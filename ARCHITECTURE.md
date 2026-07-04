@@ -171,9 +171,43 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 
 ---
 
-## Known limitations
+## Known limitations & performance thresholds
 
-- **localStorage cap**: browsers limit localStorage to ~5MB. At ~500 bytes per item, that's ~10,000 items before issues. Use IndexedDB if you plan to store tens of thousands of entries.
-- **No undo**: deletions are permanent (there's a confirm prompt, but no undo stack).
-- **Random pairing**: the algorithm may re-show the same pair. With small lists this is noticeable. Fix: track recent pairs and exclude them from selection.
-- **Single-user**: data is local to one browser profile. No sync, no sharing.
+### Rendering
+
+`renderLibrary()` and `renderLB()` rebuild the entire list via `innerHTML` on every update. This is fine up to ~500 items per category. Beyond that:
+
+| Items per category | Symptom | Fix |
+|---|---|---|
+| < 500 | No issues | — |
+| 500–2,000 | Render flicker on slower devices | Paginate, or add virtual scrolling ([clusterize.js](https://clusterize.js.org/) drops in with minimal changes) |
+| 2,000–10,000 | localStorage pressure + slow renders | Switch to IndexedDB + virtual scroll |
+| 10,000+ | Both | Backend + virtual scroll |
+
+For a personal tracker this is unlikely to be a real concern — even a very dedicated user would struggle to hit 500 items in a single category.
+
+### localStorage cap
+
+Browsers limit localStorage to ~5MB. At ~500 bytes per item that's roughly 10,000 items before issues arise. The limit comes sooner if you add notes, tags, or other large fields. Fix: switch to IndexedDB (same browser, async API, much higher limits).
+
+### Random pair selection
+
+The current algorithm picks two random items independently. This has two side effects: the same pair can be shown twice in a row, and it selects uninformative matchups (e.g. a 1400-ELO item vs a 600-ELO item, whose outcome is already predictable). With small lists this is noticeable; with large lists it means thousands of votes are needed before rankings stabilize.
+
+Better approach: prioritize pairs with similar ELO scores — those comparisons carry the most information. Implementation sketch:
+
+```js
+function smartPair(list) {
+  const sorted = [...list].sort((a, b) => a.elo - b.elo);
+  const idx = Math.floor(Math.random() * (sorted.length - 1));
+  return [sorted[idx], sorted[idx + 1]]; // adjacent ELO = most informative
+}
+```
+
+### No undo
+
+Deletions are permanent (there's a confirm prompt, but no undo stack). Fix: soft-delete with a `deleted: true` flag and a "Recently deleted" view.
+
+### Single-user
+
+Data is local to one browser profile. No sync, no sharing. Fix: add a backend (see "Switch from localStorage to a backend" above).
