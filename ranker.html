@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ranker</title>
+<style>
+  :root {
+    --bg: #f8f7f5; --surface: #ffffff; --surface-2: #f2f1ef;
+    --border: #e4e3e0; --border-strong: #cccbc8;
+    --text-primary: #1a1a18; --text-secondary: #6b6b67; --text-muted: #9c9b97;
+    --accent: #3b6fd4; --accent-bg: #eef2fc; --accent-text: #2a52a8; --accent-border: #c0cef4;
+    --danger: #c0392b; --danger-bg: #fdf0ef;
+    --radius: 8px; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #18181a; --surface: #232325; --surface-2: #2a2a2c;
+      --border: #38383b; --border-strong: #4a4a4e;
+      --text-primary: #f0efec; --text-secondary: #a0a09c; --text-muted: #686864;
+      --accent: #6b9beb; --accent-bg: #1e2840; --accent-text: #91b5f4; --accent-border: #2e4070;
+      --danger: #e57373; --danger-bg: #2a1a1a;
+    }
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font); background: var(--bg); color: var(--text-primary); min-height: 100vh; }
+  .shell { max-width: 680px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  header { margin-bottom: 2rem; }
+  header h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.3px; }
+  header p { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+
+  nav { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
+  nav button { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 14px; font-size: 14px; color: var(--text-secondary); cursor: pointer; font-family: var(--font); transition: color .15s, border-color .15s; margin-bottom: -1px; }
+  nav button:hover { color: var(--text-primary); }
+  nav button.active { color: var(--text-primary); border-bottom-color: var(--text-primary); font-weight: 500; }
+
+  .view { display: none; } .view.active { display: block; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: .75rem; }
+  .card-title { font-size: 14px; font-weight: 500; margin-bottom: .4rem; }
+  .card-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: .75rem; }
+
+  input[type=text], select {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 7px 10px; font-size: 14px; color: var(--text-primary); font-family: var(--font);
+    outline: none; transition: border-color .15s;
+  }
+  input[type=text]:focus, select:focus { border-color: var(--accent); }
+  input[type=text]::placeholder { color: var(--text-muted); }
+  input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+  select { cursor: pointer; }
+
+  button {
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius);
+    padding: 7px 14px; font-size: 14px; color: var(--text-primary); cursor: pointer; font-family: var(--font);
+    transition: background .15s;
+  }
+  button:hover { background: var(--surface-2); }
+  button:active { transform: scale(0.98); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { opacity: .9; }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button.danger:hover { background: var(--danger-bg); }
+  button.ghost { border-color: transparent; background: none; color: var(--text-muted); }
+  button.ghost:hover { color: var(--text-primary); background: var(--surface-2); }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .flex1 { flex: 1; }
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: .5rem; font-weight: 500; }
+
+  .item-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .item-row:last-child { border-bottom: none; }
+  .item-title { flex: 1; font-size: 14px; font-weight: 500; }
+  .item-meta { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .btn-sm { padding: 4px 8px; font-size: 12px; }
+
+  .empty { text-align: center; color: var(--text-muted); font-size: 14px; padding: 2.5rem 0; }
+
+  .vs-hint { text-align: center; font-size: 13px; color: var(--text-muted); margin-bottom: 1rem; }
+  .vs-wrap { display: flex; gap: 12px; align-items: stretch; margin-bottom: 1rem; }
+  .vs-card { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; cursor: pointer; transition: border-color .15s, box-shadow .15s; display: flex; flex-direction: column; gap: 6px; }
+  .vs-card:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+  .vs-card:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+  .vs-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 500; }
+  .vs-title { font-size: 17px; font-weight: 600; }
+  .vs-meta { font-size: 12px; color: var(--text-secondary); }
+  .vs-sep { display: flex; align-items: center; padding: 0 4px; font-size: 13px; font-weight: 500; color: var(--text-muted); }
+  .skip-row { text-align: center; margin-top: .5rem; }
+  .skip-btn { font-size: 13px; color: var(--text-muted); border: none; background: none; padding: 4px 10px; }
+  .skip-btn:hover { color: var(--text-primary); background: none; }
+
+  .score-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+  .score-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .4s; }
+
+  .cat-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 1rem; }
+  .pill { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); cursor: pointer; font-family: var(--font); transition: background .15s; }
+  .pill:hover { background: var(--border); }
+  .pill.active { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-border); }
+  .rank-num { font-size: 16px; font-weight: 500; color: var(--text-muted); min-width: 30px; }
+  .rank-medal { font-size: 16px; min-width: 30px; text-align: center; }
+
+  .stat-row { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: var(--text-secondary); } .stat-val { font-weight: 500; }
+
+  .field-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .field-row:last-child { border-bottom: none; }
+  .field-name { flex: 1; font-size: 14px; }
+  .field-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 500; cursor: pointer; }
+  .badge-req { background: var(--accent-bg); color: var(--accent-text); }
+  .badge-opt { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+
+  .modal-wrap { background: rgba(0,0,0,.45); border-radius: 12px; padding: 2rem 1rem; display: flex; align-items: flex-start; justify-content: center; margin-bottom: 1rem; min-height: 360px; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; width: 100%; max-width: 460px; }
+  .modal h2 { font-size: 16px; font-weight: 600; margin-bottom: .25rem; }
+  .modal p { font-size: 13px; color: var(--text-secondary); margin-bottom: 1.25rem; }
+
+  .input-group { margin-bottom: 1rem; }
+  .input-group .section-label { margin-bottom: .4rem; }
+  .input-hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--text-primary); color: var(--bg); padding: 8px 18px; border-radius: 20px; font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; z-index: 100; }
+  #toast.show { opacity: 1; }
+  input[type=file] { font-size: 13px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Ranker</h1>
+    <p>Create categories, add items, and rank everything head to head.</p>
+  </header>
+
+  <nav>
+    <button class="active" onclick="switchTab('library')">Library</button>
+    <button onclick="switchTab('rank')">Rank</button>
+    <button onclick="switchTab('leaderboard')">Leaderboard</button>
+    <button onclick="switchTab('data')">Data</button>
+  </nav>
+
+  <!-- Library -->
+  <div id="view-library" class="view active">
+    <div class="card">
+      <div class="section-label">Category</div>
+      <div class="row" style="margin-bottom:.85rem">
+        <select id="sel-cat" onchange="renderLibrary()"></select>
+        <button onclick="openNewCatModal()">+ New category</button>
+        <button class="ghost btn-sm" onclick="openSchemaEditor()" title="Edit fields">⚙ Fields</button>
+      </div>
+      <div class="section-label">Add item</div>
+      <div id="add-form"></div>
+    </div>
+    <div id="lib-list"></div>
+  </div>
+
+  <!-- New category modal -->
+  <div id="view-newcat" class="view">
+    <div class="modal-wrap">
+      <div class="modal">
+        <h2>New category</h2>
+        <p>Name it, set what you call each item, then define any extra fields.</p>
+
+        <div class="input-group">
+          <div class="section-label">Category name</div>
+          <input type="text" id="newcat-name" placeholder="e.g. NBA Players" style="width:100%">
+        </div>
+
+        <div class="input-group">
+          <div class="section-label">Primary field label</div>
+          <input type="text" id="newcat-primary" placeholder="e.g. Name, Title, Place…" style="width:100%">
+          <div class="input-hint">This is what you call each entry — shown as the main field when adding items.</div>
+        </div>
+
+        <div class="section-label">Extra fields <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted)">(optional)</span></div>
+        <div id="newcat-fields"></div>
+        <div class="row" style="margin-top:.6rem;margin-bottom:1.25rem;flex-wrap:wrap;gap:8px">
+          <input type="text" id="newcat-field-inp" placeholder="Field name…" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')addNewCatField()">
+          <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:var(--text-secondary);white-space:nowrap;cursor:pointer">
+            <input type="checkbox" id="newcat-field-req"> Required
+          </label>
+          <button onclick="addNewCatField()">Add field</button>
+        </div>
+
+        <div class="row" style="justify-content:flex-end;gap:8px">
+          <button onclick="switchTab('library')">Cancel</button>
+          <button class="primary" onclick="saveNewCat()">Create category</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Schema editor modal -->
+  <div id="view-schema" class="view">
+    <div class="modal-wrap">
+      <div class="modal">
+        <h2 id="schema-title">Edit fields</h2>
+        <p>Changes apply to new items. Existing items keep their saved values.</p>
+
+        <div class="input-group">
+          <div class="section-label">Primary field label</div>
+          <input type="text" id="schema-primary" placeholder="e.g. Name, Title, Place…" style="width:100%">
+          <div class="input-hint">What you call each entry in this category.</div>
+        </div>
+
+        <div class="section-label">Extra fields</div>
+        <div id="schema-fields"></div>
+        <div class="row" style="margin-top:.6rem;margin-bottom:1.25rem;flex-wrap:wrap;gap:8px">
+          <input type="text" id="schema-field-inp" placeholder="New field name…" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')addSchemaField()">
+          <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:var(--text-secondary);white-space:nowrap;cursor:pointer">
+            <input type="checkbox" id="schema-field-req"> Required
+          </label>
+          <button onclick="addSchemaField()">Add</button>
+        </div>
+
+        <div class="row" style="justify-content:space-between">
+          <button class="danger btn-sm" onclick="confirmDeleteCat()">Delete category</button>
+          <div class="row" style="gap:8px">
+            <button onclick="switchTab('library')">Cancel</button>
+            <button class="primary" onclick="saveSchema()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rank -->
+  <div id="view-rank" class="view">
+    <div class="row" style="margin-bottom:1rem">
+      <div class="section-label" style="margin-bottom:0">Category</div>
+      <select id="rank-cat" onchange="loadPair()"></select>
+    </div>
+    <div id="rank-pair"></div>
+    <div class="skip-row"><button class="skip-btn" onclick="loadPair()">↻ Skip this pair</button></div>
+  </div>
+
+  <!-- Leaderboard -->
+  <div id="view-leaderboard" class="view">
+    <div class="cat-pills" id="lb-cats"></div>
+    <div id="lb-list"></div>
+  </div>
+
+  <!-- Data -->
+  <div id="view-data" class="view">
+    <div class="card">
+      <div class="card-title">Export</div>
+      <div class="card-desc">Download your entire library as a JSON file you can re-import later.</div>
+      <button onclick="exportData()">↓ Export JSON</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Import</div>
+      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data — nothing is overwritten.</div>
+      <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
+    </div>
+    <div class="card">
+      <div class="card-title">Clear all data</div>
+      <div class="card-desc">Permanently deletes everything — all items, categories, and field definitions. Export first if you want a backup.</div>
+      <button class="danger" onclick="clearAllData()">Clear all data</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Stats</div>
+      <div id="stats-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const CAT_DEFAULTS = {
+  'Movies': {
+    primary: 'Title',
+    fields: [
+      { name: 'Year', required: false },
+      { name: 'Director', required: false }
+    ]
+  },
+  'Songs': {
+    primary: 'Title',
+    fields: [
+      { name: 'Artist', required: true },
+      { name: 'Album', required: false },
+      { name: 'Year', required: false },
+      { name: 'Language', required: false }
+    ]
+  }
+};
+const BUILTIN_CATS = Object.keys(CAT_DEFAULTS);
+
+// state.schema[cat] = { primary: string, fields: [{name, required}] }
+let state = {
+  items: {},
+  cats: [...BUILTIN_CATS],
+  schema: JSON.parse(JSON.stringify(CAT_DEFAULTS))
+};
+let lbCat = BUILTIN_CATS[0];
+let pendingFields = [];
+let editingCat = null;
+let editingFields = [];
+
+// --- Persistence ---
+function save() { try { localStorage.setItem('ranker-v1', JSON.stringify(state)); } catch(e) {} }
+function load() {
+  try {
+    const raw = localStorage.getItem('ranker-v1');
+    // also try old key from previous version
+    const legacy = !raw && localStorage.getItem('media-ranker-v1');
+    const src = raw || legacy;
+    if (src) {
+      const s = JSON.parse(src);
+      state = s;
+      // migrate: ensure schema exists for all cats, and has primary field
+      state.cats.forEach(c => {
+        if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
+        if (!state.schema[c].primary) state.schema[c].primary = 'Name';
+        if (!state.schema[c].fields) state.schema[c].fields = state.schema[c].map ? state.schema[c].map(f=>f) : [];
+      });
+      // migrate items: old items stored title directly, keep that
+    }
+  } catch(e) {}
+  rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats();
+}
+
+// --- Utilities ---
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2200);
+}
+function schemaFor(cat) {
+  const s = state.schema[cat];
+  if (!s) return { primary: 'Name', fields: [] };
+  if (Array.isArray(s)) return { primary: 'Name', fields: s }; // legacy
+  return s;
+}
+function primaryLabel(cat) { return schemaFor(cat).primary || 'Name'; }
+function extraFields(cat) { return schemaFor(cat).fields || []; }
+
+// --- Category selects ---
+function rebuildCatSelects() {
+  ['sel-cat','rank-cat'].forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    sel.innerHTML = state.cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    if (state.cats.includes(cur)) sel.value = cur;
+  });
+}
+
+// --- New category modal ---
+function openNewCatModal() {
+  pendingFields = [];
+  document.getElementById('newcat-name').value = '';
+  document.getElementById('newcat-primary').value = '';
+  document.getElementById('newcat-field-inp').value = '';
+  document.getElementById('newcat-field-req').checked = false;
+  renderPendingFields();
+  switchTab('newcat');
+  setTimeout(() => document.getElementById('newcat-name').focus(), 50);
+}
+
+function renderPendingFields() {
+  const el = document.getElementById('newcat-fields');
+  if (!pendingFields.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0 8px">No extra fields yet.</div>';
+    return;
+  }
+  el.innerHTML = pendingFields.map((f,i) => `
+    <div class="field-row">
+      <span class="field-name">${esc(f.name)}</span>
+      <span class="field-badge ${f.required?'badge-req':'badge-opt'}">${f.required?'required':'optional'}</span>
+      <button class="ghost btn-sm" onclick="removePendingField(${i})">✕</button>
+    </div>`).join('');
+}
+
+function addNewCatField() {
+  const name = document.getElementById('newcat-field-inp').value.trim();
+  if (!name) return;
+  if (pendingFields.find(f => f.name.toLowerCase() === name.toLowerCase())) { toast('Field already added'); return; }
+  pendingFields.push({ name, required: document.getElementById('newcat-field-req').checked });
+  document.getElementById('newcat-field-inp').value = '';
+  document.getElementById('newcat-field-req').checked = false;
+  renderPendingFields();
+  document.getElementById('newcat-field-inp').focus();
+}
+
+function removePendingField(i) { pendingFields.splice(i,1); renderPendingFields(); }
+
+function saveNewCat() {
+  const name = document.getElementById('newcat-name').value.trim();
+  if (!name) { toast('Enter a category name'); document.getElementById('newcat-name').focus(); return; }
+  if (state.cats.includes(name)) { toast('Category already exists'); return; }
+  const primary = document.getElementById('newcat-primary').value.trim() || 'Name';
+  state.cats.push(name);
+  state.schema[name] = { primary, fields: [...pendingFields] };
+  rebuildCatSelects();
+  document.getElementById('sel-cat').value = name;
+  save(); renderLibrary(); switchTab('library'); toast('Category created: ' + name);
+}
+
+// --- Schema editor ---
+function openSchemaEditor() {
+  editingCat = document.getElementById('sel-cat').value;
+  const s = schemaFor(editingCat);
+  editingFields = s.fields.map(f => ({...f}));
+  document.getElementById('schema-title').textContent = 'Fields — ' + editingCat;
+  document.getElementById('schema-primary').value = s.primary || 'Name';
+  document.getElementById('schema-field-inp').value = '';
+  document.getElementById('schema-field-req').checked = false;
+  renderEditingFields();
+  switchTab('schema');
+}
+
+function renderEditingFields() {
+  const el = document.getElementById('schema-fields');
+  if (!editingFields.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0 8px">No extra fields.</div>';
+    return;
+  }
+  el.innerHTML = editingFields.map((f,i) => `
+    <div class="field-row">
+      <span class="field-name">${esc(f.name)}</span>
+      <button class="ghost btn-sm" onclick="toggleRequired(${i})" title="Toggle required/optional">
+        <span class="field-badge ${f.required?'badge-req':'badge-opt'}">${f.required?'required':'optional'}</span>
+      </button>
+      <button class="ghost btn-sm" onclick="removeEditingField(${i})">✕</button>
+    </div>`).join('');
+}
+
+function toggleRequired(i) { editingFields[i].required = !editingFields[i].required; renderEditingFields(); }
+function removeEditingField(i) { editingFields.splice(i,1); renderEditingFields(); }
+
+function addSchemaField() {
+  const name = document.getElementById('schema-field-inp').value.trim();
+  if (!name) return;
+  if (editingFields.find(f => f.name.toLowerCase() === name.toLowerCase())) { toast('Field already exists'); return; }
+  editingFields.push({ name, required: document.getElementById('schema-field-req').checked });
+  document.getElementById('schema-field-inp').value = '';
+  document.getElementById('schema-field-req').checked = false;
+  renderEditingFields();
+  document.getElementById('schema-field-inp').focus();
+}
+
+function saveSchema() {
+  const primary = document.getElementById('schema-primary').value.trim() || 'Name';
+  state.schema[editingCat] = { primary, fields: [...editingFields] };
+  save(); renderLibrary(); switchTab('library'); toast('Fields saved');
+}
+
+function confirmDeleteCat() {
+  const count = Object.values(state.items).filter(i => i.cat === editingCat).length;
+  const msg = count > 0
+    ? `Delete "${editingCat}"? This will permanently remove ${count} item${count!==1?'s':''}.`
+    : `Delete "${editingCat}"?`;
+  if (!confirm(msg)) return;
+  state.cats = state.cats.filter(c => c !== editingCat);
+  delete state.schema[editingCat];
+  Object.keys(state.items).forEach(id => { if (state.items[id].cat === editingCat) delete state.items[id]; });
+  rebuildCatSelects();
+  save(); renderLibrary(); renderLB(); renderStats();
+  switchTab('library'); toast('Category deleted');
+}
+
+// --- Library ---
+function libCat() { return document.getElementById('sel-cat').value; }
+function libItems() { return Object.values(state.items).filter(i => i.cat === libCat()); }
+
+function renderAddForm() {
+  const cat = libCat();
+  const primary = primaryLabel(cat);
+  const fields = extraFields(cat);
+  const el = document.getElementById('add-form');
+  const extraInputs = fields.map(f =>
+    `<input type="text" id="field-${esc(f.name)}" placeholder="${esc(f.name)}${f.required?' *':''}" style="flex:1;min-width:90px" onkeydown="if(event.key==='Enter')addItem()">`
+  ).join('');
+  el.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:8px">
+    <input type="text" id="inp-primary" placeholder="${esc(primary)} *" style="flex:2;min-width:140px" onkeydown="if(event.key==='Enter')addItem()">
+    ${extraInputs}
+    <button class="primary" onclick="addItem()">Add</button>
+  </div>`;
+}
+
+function addItem() {
+  const cat = libCat();
+  const primary = primaryLabel(cat);
+  const fields = extraFields(cat);
+  const t = document.getElementById('inp-primary').value.trim();
+  if (!t) { toast(primary + ' is required'); document.getElementById('inp-primary').focus(); return; }
+  const fieldValues = {};
+  for (const f of fields) {
+    const el = document.getElementById('field-' + f.name);
+    const val = el ? el.value.trim() : '';
+    if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
+    fieldValues[f.name] = val;
+  }
+  const id = uid();
+  state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0 };
+  document.getElementById('inp-primary').value = '';
+  fields.forEach(f => { const el = document.getElementById('field-' + f.name); if (el) el.value = ''; });
+  document.getElementById('inp-primary').focus();
+  save(); renderLibrary(); toast('Added: ' + t);
+}
+
+function deleteItem(id) {
+  if (!confirm('Remove "' + state.items[id].title + '"?')) return;
+  delete state.items[id]; save(); renderLibrary(); renderLB(); renderStats();
+}
+
+function renderLibrary() {
+  rebuildCatSelects();
+  renderAddForm();
+  const cat = libCat();
+  const fields = extraFields(cat);
+  const list = libItems().sort((a,b) => a.title.localeCompare(b.title));
+  const el = document.getElementById('lib-list');
+  if (!list.length) { el.innerHTML = '<div class="empty">No items yet — add one above.</div>'; return; }
+  el.innerHTML = '<div class="card">' + list.map(i => {
+    const meta = fields.map(f => (i.fields||{})[f.name]).filter(Boolean).join(' · ');
+    return `<div class="item-row">
+      <div class="flex1">
+        <div class="item-title">${esc(i.title)}</div>
+        ${meta ? `<div class="item-meta" style="margin-top:2px">${esc(meta)}</div>` : ''}
+      </div>
+      <span class="item-meta">ELO ${Math.round(i.elo)}</span>
+      <button class="btn-sm ghost" onclick="deleteItem('${i.id}')" aria-label="Remove ${esc(i.title)}">✕</button>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+// --- Rank ---
+function rankCat() { return document.getElementById('rank-cat').value; }
+
+function itemMeta(item) {
+  return extraFields(item.cat).map(f => (item.fields||{})[f.name]).filter(Boolean).join(' · ');
+}
+
+function loadPair() {
+  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const el = document.getElementById('rank-pair');
+  if (list.length < 2) { el.innerHTML = '<div class="empty">Add at least 2 items in this category to start ranking.</div>'; return; }
+  const a = list[Math.floor(Math.random() * list.length)];
+  let b; do { b = list[Math.floor(Math.random() * list.length)]; } while (b.id === a.id);
+  el.innerHTML = `
+    <div class="vs-hint">Which do you prefer?</div>
+    <div class="vs-wrap">${vsCard(a,b)}<div class="vs-sep">or</div>${vsCard(b,a)}</div>`;
+  el.querySelectorAll('.vs-card').forEach(c => c.addEventListener('keydown', e => { if (e.key==='Enter'||e.key===' ') c.click(); }));
+}
+
+function vsCard(winner, loser) {
+  const meta = itemMeta(winner);
+  return `<div class="vs-card" onclick="vote('${winner.id}','${loser.id}')" tabindex="0" role="button" aria-label="Vote for ${esc(winner.title)}">
+    <span class="vs-label">Pick this</span>
+    <span class="vs-title">${esc(winner.title)}</span>
+    ${meta ? `<span class="vs-meta">${esc(meta)}</span>` : ''}
+    <span class="vs-meta" style="color:var(--text-muted)">ELO ${Math.round(winner.elo)} · ${winner.wins}W ${winner.losses}L</span>
+    <div class="score-bar"><div class="score-fill" style="width:${Math.min(100,Math.max(0,(winner.elo-600)/8))}%"></div></div>
+  </div>`;
+}
+
+function eloUpdate(winner, loser) {
+  const K = 32, E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
+  winner.elo += K * (1 - E); loser.elo += K * (0 - 1 + E);
+  winner.wins++; loser.losses++;
+}
+
+function vote(wid, lid) {
+  eloUpdate(state.items[wid], state.items[lid]);
+  save(); renderLB(); renderStats(); loadPair(); toast('✓ Voted');
+}
+
+// --- Leaderboard ---
+function renderLB() {
+  const allCats = [...new Set(Object.values(state.items).map(i => i.cat))];
+  if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
+  document.getElementById('lb-cats').innerHTML = allCats.map(c =>
+    `<button class="pill${c===lbCat?' active':''}" onclick="lbCat='${esc(c)}';renderLB()">${esc(c)}</button>`).join('');
+  const list = Object.values(state.items).filter(i => i.cat === lbCat).sort((a,b) => b.elo - a.elo);
+  const el = document.getElementById('lb-list');
+  if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
+  const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
+  const medals = ['🥇','🥈','🥉'];
+  el.innerHTML = '<div class="card">' + list.map((i,idx) => {
+    const meta = itemMeta(i);
+    return `<div class="item-row">
+      <span class="${idx<3?'rank-medal':'rank-num'}">${idx<3?medals[idx]:'#'+(idx+1)}</span>
+      <div class="flex1">
+        <div class="item-title">${esc(i.title)}${meta?` <span class="item-meta" style="font-weight:400">${esc(meta)}</span>`:''}
+        </div>
+        <div class="score-bar" style="margin-top:5px"><div class="score-fill" style="width:${Math.round((i.elo-bot)/range*100)}%"></div></div>
+      </div>
+      <span class="item-meta">${Math.round(i.elo)} · ${i.wins}W ${i.losses}L</span>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+// --- Data ---
+function renderStats() {
+  const counts = {}; let totalVotes = 0;
+  Object.values(state.items).forEach(i => { counts[i.cat]=(counts[i.cat]||0)+1; totalVotes+=i.wins; });
+  const total = Object.values(counts).reduce((a,b)=>a+b,0);
+  const rows = [['Total items',total],['Total comparisons',totalVotes],...Object.entries(counts).map(([c,n])=>[c,n])];
+  document.getElementById('stats-list').innerHTML = rows.map(([l,v]) =>
+    `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${v}</span></div>`).join('');
+}
+
+function exportData() {
+  const blob = new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'ranker.json'; a.click(); toast('Exported!');
+}
+
+function importData(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const d = JSON.parse(ev.target.result);
+      if (d.items) Object.assign(state.items, d.items);
+      if (d.cats) d.cats.forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
+      if (d.schema) Object.assign(state.schema, d.schema);
+      // migrate schema entries that are plain arrays (old format)
+      state.cats.forEach(c => {
+        if (Array.isArray(state.schema[c])) state.schema[c] = { primary: 'Name', fields: state.schema[c] };
+        if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
+      });
+      save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
+      toast('Imported ' + Object.keys(d.items||{}).length + ' items');
+    } catch(err) { toast('Invalid JSON file'); }
+  };
+  r.readAsText(file);
+}
+
+function clearAllData() {
+  if (!confirm('Clear everything? This cannot be undone.')) return;
+  state = { items: {}, cats: [...BUILTIN_CATS], schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)) };
+  lbCat = BUILTIN_CATS[0];
+  localStorage.removeItem('ranker-v1');
+  rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
+  toast('All data cleared');
+}
+
+// --- Tabs ---
+function switchTab(id) {
+  const navIds = ['library','rank','leaderboard','data'];
+  document.querySelectorAll('nav button').forEach((b,i) => b.classList.toggle('active', navIds[i]===id));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id==='view-'+id));
+  if (id==='rank') loadPair();
+  if (id==='leaderboard') renderLB();
+  if (id==='data') renderStats();
+}
+
+load();
+</script>
+</body>
+</html>
