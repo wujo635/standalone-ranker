@@ -1,24 +1,71 @@
-# Media Ranker — Architecture & Developer Guide
+# Ranker — Architecture & Developer Guide
 
-A single-file web app for tracking and ranking personal media collections using pairwise ELO comparisons. No build step, no dependencies, no server required.
+A single-file web app for ranking anything using pairwise ELO comparisons. Categories are fully user-defined with custom fields. No build step, no dependencies, no server required.
 
 ---
 
 ## Quick start
 
-Open `media-ranker.html` in any modern browser. That's it.
+Open `ranker.html` in any modern browser. That's it.
+
+---
+
+## Current versions
+
+| | Value |
+|---|---|
+| App version | `1.2.0` |
+| Data schema version | `3` |
+| localStorage key | `ranker-v1` |
+
+Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage.
+
+---
+
+## Version history
+
+### App version (APP_VERSION)
+
+Follows semantic versioning: `major.minor.patch`
+
+- **major** — breaking change that requires a data migration
+- **minor** — new feature, backward compatible
+- **patch** — bug fix
+
+| Version | Changes |
+|---|---|
+| 1.0.0 | Initial release as "Media Ranker"; hardcoded Year field, no schema |
+| 1.1.0 | Schema system introduced (array per category); custom fields, required/optional |
+| 1.2.0 | App renamed to "Ranker"; primary field label per category; versioning added |
+
+### Data schema version (DATA_SCHEMA_VERSION)
+
+Incremented only when the shape of `state` changes in a way that requires migration logic.
+
+| Version | Shape |
+|---|---|
+| 1 | Items had a hardcoded `year` string field. No `schema` object. |
+| 2 | `schema` introduced as a plain array of `{name, required}` per category. No `primary` label. |
+| 3 | `schema[cat]` is `{ primary: string, fields: [{name, required}] }`. `_meta` block added to exports. |
+
+### How to bump versions
+
+When making changes:
+1. Update `APP_VERSION` at the top of the script following semver
+2. If `state`'s shape changed, increment `DATA_SCHEMA_VERSION` and add a migration case in `load()` and `importData()`
+3. Add a row to both tables above
 
 ---
 
 ## File structure
 
-Everything lives in one file: `media-ranker.html`
+Everything lives in one file: `ranker.html`
 
 ```
-media-ranker.html
-├── <style>          CSS custom properties + all component styles
-├── <body>           Four tab views (Library, Rank, Leaderboard, Data)
-└── <script>         All app logic (~200 lines of vanilla JS)
+ranker.html
+├── <style>       CSS custom properties + all component styles (~130 lines)
+├── <body>        Six views: Library, New Category, Schema Editor, Rank, Leaderboard, Data
+└── <script>      All app logic (~380 lines of vanilla JS)
 ```
 
 ---
@@ -29,26 +76,66 @@ All state is held in a single `state` object in memory and mirrored to `localSto
 
 ```js
 state = {
-  cats: ['Movies', 'Songs', 'Actors', ...],  // ordered list of category names
+  cats: ['Movies', 'Songs', ...],   // ordered list of category names
+
+  schema: {
+    "Movies": {
+      primary: 'Title',             // label for the main field (e.g. "Name", "Title", "Place")
+      fields: [
+        { name: 'Year', required: false },
+        { name: 'Director', required: false }
+      ]
+    },
+    "Songs": {
+      primary: 'Title',
+      fields: [
+        { name: 'Artist', required: true },
+        { name: 'Album', required: false },
+        ...
+      ]
+    }
+  },
+
   items: {
     "<uid>": {
       id:     string,   // uid() — timestamp + random suffix, e.g. "m3x1k2ab"
       cat:    string,   // must match a value in state.cats
-      title:  string,
-      year:   string,   // optional, stored as string
+      title:  string,   // value of the primary field
+      fields: {         // values for all extra schema fields
+        "Artist": "Radiohead",
+        "Album": "OK Computer",
+        ...
+      },
       elo:    number,   // starts at 1000
-      wins:   number,   // times picked in a comparison
-      losses: number    // times not picked in a comparison
+      wins:   number,   // times chosen in a comparison
+      losses: number    // times not chosen in a comparison
     }
   }
 }
 ```
 
+### Export format
+
+Exported JSON wraps `state` with a `_meta` block:
+
+```json
+{
+  "_meta": {
+    "appVersion": "1.2.0",
+    "dataSchemaVersion": 3,
+    "exportedAt": "2026-07-05T12:00:00.000Z"
+  },
+  "cats": [...],
+  "schema": {...},
+  "items": {...}
+}
+```
+
 ### Persistence
 
-`localStorage` key: `media-ranker-v1`
+`localStorage` key: `ranker-v1`
 
-The whole `state` object is serialized to JSON on every write (`save()`), and deserialized on page load (`load()`). The export/import feature uses the same JSON shape, so exported files are directly re-importable.
+`save()` serializes the full `state` object on every write. `load()` deserializes it on page load, applying any needed migrations. The app also checks for the legacy `media-ranker-v1` key and migrates it automatically on first load.
 
 ---
 
@@ -65,22 +152,24 @@ winner.wins++;
 loser.losses++;
 ```
 
-All items start at ELO 1000. After enough comparisons, scores naturally spread — a well-ranked list typically has a range of ~200–400 points between top and bottom.
+All items start at ELO 1000. After enough comparisons, scores naturally spread — a well-ranked list typically shows a range of ~200–400 points between top and bottom.
 
-The leaderboard score bar is normalized: the top item always fills 100%, the bottom always sits at 0%, everything else scales between them.
+The leaderboard score bar is normalized: the top item always fills 100%, the bottom sits at 0%, everything else scales between them.
 
 ---
 
 ## Tab views
 
-| Tab | ID | Key function |
+| Tab | View ID | Key functions |
 |---|---|---|
-| Library | `view-library` | `renderLibrary()` |
-| Rank | `view-rank` | `loadPair()`, `vote()` |
+| Library | `view-library` | `renderLibrary()`, `renderAddForm()`, `addItem()` |
+| New Category | `view-newcat` | `openNewCatModal()`, `saveNewCat()`, `addNewCatField()` |
+| Schema Editor | `view-schema` | `openSchemaEditor()`, `saveSchema()`, `addSchemaField()` |
+| Rank | `view-rank` | `loadPair()`, `vsCard()`, `vote()` |
 | Leaderboard | `view-leaderboard` | `renderLB()` |
-| Data | `view-data` | `exportData()`, `importData()`, `renderStats()` |
+| Data | `view-data` | `exportData()`, `importData()`, `renderStats()`, `clearAllData()` |
 
-Tab switching is handled by `switchTab(id)`, which toggles `.active` on both the nav buttons and the view divs.
+Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav buttons and view divs. New Category and Schema Editor are modal-style views with no nav tab — they're entered programmatically and return to Library on save or cancel.
 
 ---
 
@@ -88,19 +177,31 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both the
 
 | Function | What it does |
 |---|---|
-| `load()` | Reads localStorage, rebuilds selects, renders all views |
+| `load()` | Reads localStorage, runs migrations, rebuilds selects, renders all views |
 | `save()` | Serializes `state` to localStorage |
-| `addItem()` | Creates a new item at ELO 1000, saves, re-renders library |
-| `deleteItem(id)` | Removes item by id, saves, re-renders library + leaderboard |
-| `loadPair()` | Picks 2 random items from the active rank category, renders VS cards |
-| `vote(wid, lid)` | Runs ELO update, saves, re-renders leaderboard, loads next pair |
-| `renderLibrary()` | Renders alphabetical item list for current library category |
-| `renderLB()` | Renders ELO-sorted leaderboard for `lbCat`, with category pills |
 | `rebuildCatSelects()` | Syncs both `<select>` elements to `state.cats` |
-| `addCustomCat()` | Prompts for name, pushes to `state.cats`, rebuilds selects |
-| `exportData()` | Serializes `state` → Blob → download |
-| `importData(e)` | Reads JSON file, merges items + cats into state, re-renders |
+| `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
+| `primaryLabel(cat)` | Returns the primary field label string for a category |
+| `extraFields(cat)` | Returns the extra fields array for a category |
+| `renderAddForm()` | Dynamically renders the Add item form based on the active category's schema |
+| `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
+| `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
+| `renderLibrary()` | Rebuilds selects + form, renders alphabetical item list |
+| `openNewCatModal()` | Resets pending state and switches to the new-category view |
+| `saveNewCat()` | Validates name + primary label, pushes to state, saves |
+| `openSchemaEditor()` | Copies current schema into editing state, switches to schema view |
+| `saveSchema()` | Writes editing state back to `state.schema`, saves |
+| `confirmDeleteCat()` | Confirms with item count, deletes category + its items, saves |
+| `loadPair()` | Picks 2 random items from the active rank category, renders VS cards |
+| `vsCard(winner, loser)` | Returns HTML string for one side of a comparison card |
+| `vote(wid, lid)` | Runs ELO update, saves, re-renders leaderboard, loads next pair |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
+| `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
+| `itemMeta(item)` | Returns formatted extra field values for display in cards/rows |
+| `renderStats()` | Renders version info + item/vote counts in the Data tab |
+| `exportData()` | Wraps state with `_meta`, serializes to JSON, triggers download |
+| `importData(e)` | Reads JSON file, runs migrations, merges into state, re-renders |
+| `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID |
 | `esc(s)` | HTML-escapes strings before injecting into innerHTML |
 
@@ -108,16 +209,25 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both the
 
 ## How to expand
 
-### Add a new field to items
+### Add a new built-in category
 
-1. Add the field in `addItem()` when constructing the item object
-2. Add an input in the Library card HTML
-3. Display it wherever relevant (item rows, VS cards)
-4. Existing saved items won't have the field — use `item.field ?? defaultValue` to handle gracefully
+Add an entry to `CAT_DEFAULTS` at the top of the script:
 
-### Add a new category type
+```js
+const CAT_DEFAULTS = {
+  'Movies': { ... },
+  'Songs':  { ... },
+  'Restaurants': {
+    primary: 'Name',
+    fields: [
+      { name: 'Cuisine', required: false },
+      { name: 'City', required: false }
+    ]
+  }
+};
+```
 
-Categories are just strings. Users can already add custom ones via "+ New category". No code change needed unless you want category-specific behavior (e.g. different fields for Songs vs Movies).
+Also add to `BUILTIN_CATS` if you want it protected from deletion (currently all keys of `CAT_DEFAULTS` are built-in).
 
 ### Add filtering or search to the library
 
@@ -130,15 +240,27 @@ const list = libItems().filter(i => i.title.toLowerCase().includes(q));
 
 ### Add notes/tags to items
 
-Extend the item schema with `notes: string` and `tags: string[]`. Render a tag input using comma-split on a text field. Filter by tag in the library view.
+Extend the item object with `notes: string` and `tags: string[]`. Add inputs in `renderAddForm()`. Filter by tag in the library view. Tags could also drive a new "browse by tag" view.
 
-### Add an "unseen" vs "seen" toggle
+### Add a "not yet seen/heard/read" toggle
 
-Add a `seen: boolean` field. Show unseen items in a separate "Watchlist" tab. Only include `seen: true` items in ranking and leaderboard.
+Add a `seen: boolean` field to items. Show unseen items in a separate Watchlist tab. Only include `seen: true` items in ranking and leaderboard.
+
+### Smart pair selection
+
+Replace random pairing in `loadPair()` with ELO-proximity selection — pairs with similar scores are more informative:
+
+```js
+function smartPair(list) {
+  const sorted = [...list].sort((a, b) => a.elo - b.elo);
+  const idx = Math.floor(Math.random() * (sorted.length - 1));
+  return [sorted[idx], sorted[idx + 1]];
+}
+```
 
 ### Switch from localStorage to a backend
 
-Replace `save()` and `load()` with `fetch()` calls to a REST API or serverless function. The state shape is already JSON-serializable — no transformation needed. Suggested stack: a simple Node/Express server or Cloudflare Worker with a KV store or SQLite.
+Replace `save()` and `load()` with `fetch()` calls to a REST API or serverless function. The state shape is already JSON-serializable — no transformation needed. Suggested stack: Node/Express or a Cloudflare Worker with KV or SQLite.
 
 ### Port to a framework
 
@@ -167,7 +289,8 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | ELO scoring | Well-understood, self-balancing | TrueSkill, simple win-count |
 | Random pair selection | Simple, covers the space over time | Smart pair selection (pick closest ELO) |
 | Vanilla JS | No build step, easy to read and edit | React/Vue/Svelte |
-| JSON export | Human-readable, re-importable | CSV, binary |
+| JSON export | Human-readable, re-importable, version-stamped | CSV, binary |
+| Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
 
 ---
 
@@ -184,7 +307,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | 2,000–10,000 | localStorage pressure + slow renders | Switch to IndexedDB + virtual scroll |
 | 10,000+ | Both | Backend + virtual scroll |
 
-For a personal tracker this is unlikely to be a real concern — even a very dedicated user would struggle to hit 500 items in a single category.
+For a personal ranker this is unlikely to be a real concern — even a very dedicated user would struggle to hit 500 items in a single category.
 
 ### localStorage cap
 
@@ -192,17 +315,7 @@ Browsers limit localStorage to ~5MB. At ~500 bytes per item that's roughly 10,00
 
 ### Random pair selection
 
-The current algorithm picks two random items independently. This has two side effects: the same pair can be shown twice in a row, and it selects uninformative matchups (e.g. a 1400-ELO item vs a 600-ELO item, whose outcome is already predictable). With small lists this is noticeable; with large lists it means thousands of votes are needed before rankings stabilize.
-
-Better approach: prioritize pairs with similar ELO scores — those comparisons carry the most information. Implementation sketch:
-
-```js
-function smartPair(list) {
-  const sorted = [...list].sort((a, b) => a.elo - b.elo);
-  const idx = Math.floor(Math.random() * (sorted.length - 1));
-  return [sorted[idx], sorted[idx + 1]]; // adjacent ELO = most informative
-}
-```
+The current algorithm picks two random items independently. This has two side effects: the same pair can appear twice in a row, and it can select uninformative matchups (e.g. a 1400-ELO item vs a 600-ELO item whose outcome is already predictable). With small lists this is noticeable; with large lists it means thousands of votes are needed before rankings stabilize. See "Smart pair selection" above.
 
 ### No undo
 
