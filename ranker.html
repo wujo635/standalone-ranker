@@ -257,6 +257,10 @@
       <button class="danger" onclick="clearAllData()">Clear all data</button>
     </div>
     <div class="card">
+      <div class="card-title">Version</div>
+      <div id="version-info"></div>
+    </div>
+    <div class="card">
       <div class="card-title">Stats</div>
       <div id="stats-list"></div>
     </div>
@@ -266,6 +270,21 @@
 <div id="toast"></div>
 
 <script>
+// --- Versioning ---
+// APP_VERSION: bump when UI or logic changes.
+//   major = breaking change requiring data migration
+//   minor = new feature, backward compatible
+//   patch = bug fix
+const APP_VERSION = '1.2.0';
+
+// DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
+// Import logic uses this to apply the right migrations.
+// History:
+//   1 — original media-ranker; items had hardcoded `year` field, no schema object
+//   2 — schema introduced as a plain array per category, no primary label
+//   3 — schema is { primary, fields[] } per category; app renamed to Ranker
+const DATA_SCHEMA_VERSION = 3;
+
 const CAT_DEFAULTS = {
   'Movies': {
     primary: 'Title',
@@ -595,6 +614,15 @@ function renderLB() {
 
 // --- Data ---
 function renderStats() {
+  const savedRaw = localStorage.getItem('ranker-v1');
+  let savedSchema = '—';
+  try { const s = JSON.parse(savedRaw); savedSchema = s._meta ? String(s._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)'; } catch(e) {}
+  document.getElementById('version-info').innerHTML = [
+    ['App version', APP_VERSION],
+    ['Data schema version', DATA_SCHEMA_VERSION],
+    ['Saved data schema', savedSchema],
+  ].map(([l,v]) => `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${esc(String(v))}</span></div>`).join('');
+
   const counts = {}; let totalVotes = 0;
   Object.values(state.items).forEach(i => { counts[i.cat]=(counts[i.cat]||0)+1; totalVotes+=i.wins; });
   const total = Object.values(counts).reduce((a,b)=>a+b,0);
@@ -604,7 +632,15 @@ function renderStats() {
 }
 
 function exportData() {
-  const blob = new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  const exportPayload = {
+    _meta: {
+      appVersion: APP_VERSION,
+      dataSchemaVersion: DATA_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString()
+    },
+    ...state
+  };
+  const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'ranker.json'; a.click(); toast('Exported!');
 }
@@ -624,7 +660,8 @@ function importData(e) {
         if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
       });
       save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
-      toast('Imported ' + Object.keys(d.items||{}).length + ' items');
+      const srcVer = d._meta ? `v${d._meta.appVersion}, schema ${d._meta.dataSchemaVersion}` : 'legacy (pre-v1.2)';
+      toast('Imported ' + Object.keys(d.items||{}).length + ' items from ' + srcVer);
     } catch(err) { toast('Invalid JSON file'); }
   };
   r.readAsText(file);
