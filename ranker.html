@@ -310,7 +310,7 @@
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -353,6 +353,45 @@ let editingFields = [];
 
 // --- Persistence ---
 function save() { try { localStorage.setItem('ranker-v1', JSON.stringify(state)); } catch(e) {} }
+
+// --- Data migration ---
+// Called on both load() and importData() before touching state.
+// Each block handles one version boundary. Add a new block here whenever
+// DATA_SCHEMA_VERSION is bumped — the migration and the version bump travel together.
+function migrateData(data) {
+  const v = data._meta?.dataSchemaVersion || 1;
+
+  if (v < 2) {
+    // v1 → v2: items had a hardcoded top-level `year` string field.
+    // Move it into fields{}, introduce schema as a plain array per category.
+    Object.values(data.items || {}).forEach(item => {
+      item.fields = { Year: item.year || '' };
+      delete item.year;
+    });
+    if (!data.schema) data.schema = {};
+    (data.cats || []).forEach(cat => {
+      if (!data.schema[cat] || Array.isArray(data.schema[cat])) return;
+      data.schema[cat] = [{ name: 'Year', required: false }];
+    });
+  }
+
+  if (v < 3) {
+    // v2 → v3: schema per category was a plain array [{name, required}].
+    // Wrap it in { primary, fields[] }. Primary defaults to 'Title'.
+    if (data.schema) {
+      Object.keys(data.schema).forEach(cat => {
+        if (Array.isArray(data.schema[cat])) {
+          data.schema[cat] = { primary: 'Title', fields: data.schema[cat] };
+        }
+      });
+    }
+  }
+
+  // v < 4: add next migration block here when DATA_SCHEMA_VERSION becomes 4
+
+  return data;
+}
+
 function load() {
   try {
     const raw = localStorage.getItem('ranker-v1');
@@ -360,15 +399,15 @@ function load() {
     const legacy = !raw && localStorage.getItem('media-ranker-v1');
     const src = raw || legacy;
     if (src) {
-      const s = JSON.parse(src);
-      state = s;
-      // migrate: ensure schema exists for all cats, and has primary field
+      const raw = JSON.parse(src);
+      const migrated = migrateData(raw);
+      state = migrated;
+      // Safety: ensure schema exists for all cats
       state.cats.forEach(c => {
         if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
         if (!state.schema[c].primary) state.schema[c].primary = 'Name';
-        if (!state.schema[c].fields) state.schema[c].fields = state.schema[c].map ? state.schema[c].map(f=>f) : [];
+        if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
       });
-      // migrate items: old items stored title directly, keep that
     }
   } catch(e) {}
   rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats();
@@ -848,13 +887,15 @@ function importData(e) {
   r.onload = ev => {
     try {
       const d = JSON.parse(ev.target.result);
-      if (d.items) Object.assign(state.items, d.items);
-      if (d.cats) d.cats.forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
-      if (d.schema) Object.assign(state.schema, d.schema);
-      // migrate schema entries that are plain arrays (old format)
+      const migrated = migrateData(d);
+      if (migrated.items) Object.assign(state.items, migrated.items);
+      if (migrated.cats) migrated.cats.forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
+      if (migrated.schema) Object.assign(state.schema, migrated.schema);
+      // Safety: ensure schema is well-formed for all cats after merge
       state.cats.forEach(c => {
-        if (Array.isArray(state.schema[c])) state.schema[c] = { primary: 'Name', fields: state.schema[c] };
         if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
+        if (!state.schema[c].primary) state.schema[c].primary = 'Name';
+        if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
       });
       save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
       const srcVer = d._meta ? `v${d._meta.appVersion}, schema ${d._meta.dataSchemaVersion}` : 'legacy (pre-v1.2)';
