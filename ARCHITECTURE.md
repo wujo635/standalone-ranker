@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.2.0` |
+| App version | `1.3.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -37,6 +37,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.0.0 | Initial release as "Media Ranker"; hardcoded Year field, no schema |
 | 1.1.0 | Schema system introduced (array per category); custom fields, required/optional |
 | 1.2.0 | App renamed to "Ranker"; primary field label per category; versioning added |
+| 1.3.0 | Inline item editing in library; Podium ranking mode; rank mode toggle |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -65,7 +66,7 @@ Everything lives in one file: `ranker.html`
 ranker.html
 ├── <style>       CSS custom properties + all component styles (~130 lines)
 ├── <body>        Six views: Library, New Category, Schema Editor, Rank, Leaderboard, Data
-└── <script>      All app logic (~380 lines of vanilla JS)
+└── <script>      All app logic (~520 lines of vanilla JS)
 ```
 
 ---
@@ -158,6 +159,34 @@ The leaderboard score bar is normalized: the top item always fills 100%, the bot
 
 ---
 
+## Ranking modes
+
+### Standard (1 vs 1)
+
+Two random items shown side by side. Pick one. One ELO update per round. Good for deliberate, focused comparisons.
+
+### Podium
+
+3–5 random items shown at once (pool size scales with list size — minimum 3 items required). You assign 🥇 🥈 🥉 to your top three. On confirm, ELO updates are applied for every implied pair:
+
+- 1st beats 2nd, 3rd, and all unranked items in the pool
+- 2nd beats 3rd and all unranked items
+- 3rd beats all unranked items
+- Unranked items are not compared against each other (no preference expressed)
+
+With a full pool of 5 items, one podium round generates up to 9 ELO updates vs 1 for standard mode — significantly faster convergence on large lists.
+
+The mode toggle (1 vs 1 / Podium) is persistent within a session but not saved to localStorage — it resets to Standard on page reload. To persist it, add `rankMode` to the `state` object.
+
+### Adding a new ranking mode
+
+1. Add a button to the `.mode-toggle` in the Rank view HTML
+2. Add a branch in `setRankMode()` and `initRankView()`
+3. Implement a `load*()` function that renders into `#rank-pair`
+4. All modes share `eloUpdate()` — call it for every implied pairwise result
+
+---
+
 ## Tab views
 
 | Tab | View ID | Key functions |
@@ -165,7 +194,7 @@ The leaderboard score bar is normalized: the top item always fills 100%, the bot
 | Library | `view-library` | `renderLibrary()`, `renderAddForm()`, `addItem()` |
 | New Category | `view-newcat` | `openNewCatModal()`, `saveNewCat()`, `addNewCatField()` |
 | Schema Editor | `view-schema` | `openSchemaEditor()`, `saveSchema()`, `addSchemaField()` |
-| Rank | `view-rank` | `loadPair()`, `vsCard()`, `vote()` |
+| Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()` |
 | Leaderboard | `view-leaderboard` | `renderLB()` |
 | Data | `view-data` | `exportData()`, `importData()`, `renderStats()`, `clearAllData()` |
 
@@ -192,9 +221,18 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `openSchemaEditor()` | Copies current schema into editing state, switches to schema view |
 | `saveSchema()` | Writes editing state back to `state.schema`, saves |
 | `confirmDeleteCat()` | Confirms with item count, deletes category + its items, saves |
+| `editItem(id)` | Toggles inline edit expansion for an item row; collapses any other open row |
+| `saveItem(id)` | Validates and writes edited field values back to state, saves |
+| `initRankView()` | Entry point for the Rank tab — dispatches to `loadPair()` or `loadPodium()` based on current mode |
+| `setRankMode(mode)` | Switches between `standard` and `podium` modes, updates toggle UI, reloads |
 | `loadPair()` | Picks 2 random items from the active rank category, renders VS cards |
 | `vsCard(winner, loser)` | Returns HTML string for one side of a comparison card |
 | `vote(wid, lid)` | Runs ELO update, saves, re-renders leaderboard, loads next pair |
+| `loadPodium()` | Picks 3–5 random items for a podium round, resets placement state, renders |
+| `renderPodium()` | Renders podium items with place assignment buttons; shows Confirm once 3 placed |
+| `assignPlace(itemId, place)` | Assigns a podium position (1/2/3) to an item, displacing any previous occupant |
+| `clearPodiumPlace(itemId)` | Removes an item's podium placement |
+| `submitPodium()` | Derives all implied pairwise ELO updates from podium order, saves, loads next round |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
 | `itemMeta(item)` | Returns formatted extra field values for display in cards/rows |
@@ -291,6 +329,8 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | Vanilla JS | No build step, easy to read and edit | React/Vue/Svelte |
 | JSON export | Human-readable, re-importable, version-stamped | CSV, binary |
 | Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
+| Multiple ranking modes | Different speeds suit different use cases | Single mode only |
+| Inline editing | Edit without leaving the library view | Separate edit screen |
 
 ---
 
