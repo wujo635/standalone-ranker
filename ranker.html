@@ -122,6 +122,10 @@
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--text-primary); color: var(--bg); padding: 8px 18px; border-radius: 20px; font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; z-index: 100; }
   #toast.show { opacity: 1; }
   input[type=file] { font-size: 13px; color: var(--text-secondary); }
+
+  .edit-row { background: var(--accent-bg); border-radius: var(--radius); padding: .75rem; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .edit-row input[type=text] { flex: 1; min-width: 100px; font-size: 13px; padding: 5px 8px; }
+  .item-row.is-editing { background: var(--accent-bg); border-radius: var(--radius); margin: 0 -.25rem; padding-left: .25rem; padding-right: .25rem; }
 </style>
 </head>
 <body>
@@ -525,9 +529,45 @@ function deleteItem(id) {
   delete state.items[id]; save(); renderLibrary(); renderLB(); renderStats();
 }
 
+let expandedItemId = null;
+
+function editItem(id) {
+  expandedItemId = expandedItemId === id ? null : id;
+  renderLibrary();
+  if (expandedItemId) {
+    setTimeout(() => {
+      const el = document.getElementById('edit-primary-' + id);
+      if (el) el.focus();
+    }, 30);
+  }
+}
+
+function saveItem(id) {
+  const item = state.items[id];
+  const cat = item.cat;
+  const primary = primaryLabel(cat);
+  const fields = extraFields(cat);
+  const t = document.getElementById('edit-primary-' + id).value.trim();
+  if (!t) { toast(primary + ' is required'); document.getElementById('edit-primary-' + id).focus(); return; }
+  for (const f of fields) {
+    const el = document.getElementById('edit-field-' + id + '-' + f.name);
+    const val = el ? el.value.trim() : '';
+    if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
+  }
+  item.title = t;
+  if (!item.fields) item.fields = {};
+  fields.forEach(f => {
+    const el = document.getElementById('edit-field-' + id + '-' + f.name);
+    if (el) item.fields[f.name] = el.value.trim();
+  });
+  expandedItemId = null;
+  save(); renderLibrary(); toast('Saved');
+}
+
 function renderLibrary() {
   rebuildCatSelects();
   renderAddForm();
+  if (expandedItemId && !libItems().find(i => i.id === expandedItemId)) expandedItemId = null;
   const cat = libCat();
   const fields = extraFields(cat);
   const list = libItems().sort((a,b) => a.title.localeCompare(b.title));
@@ -535,13 +575,32 @@ function renderLibrary() {
   if (!list.length) { el.innerHTML = '<div class="empty">No items yet — add one above.</div>'; return; }
   el.innerHTML = '<div class="card">' + list.map(i => {
     const meta = fields.map(f => (i.fields||{})[f.name]).filter(Boolean).join(' · ');
-    return `<div class="item-row">
+    const isEditing = expandedItemId === i.id;
+    const editInputs = fields.map(f =>
+      `<input type="text" id="edit-field-${i.id}-${esc(f.name)}"
+        placeholder="${esc(f.name)}${f.required?' *':''}"
+        value="${esc((i.fields||{})[f.name]||'')}"
+        onkeydown="if(event.key==='Enter')saveItem('${i.id}');if(event.key==='Escape')editItem('${i.id}')">`
+    ).join('');
+    const editForm = isEditing ? `
+      <div class="edit-row">
+        <input type="text" id="edit-primary-${i.id}"
+          value="${esc(i.title)}"
+          placeholder="${esc(primaryLabel(i.cat))} *"
+          onkeydown="if(event.key==='Enter')saveItem('${i.id}');if(event.key==='Escape')editItem('${i.id}')">
+        ${editInputs}
+        <button class="primary btn-sm" onclick="saveItem('${i.id}')">Save</button>
+        <button class="ghost btn-sm" onclick="editItem('${i.id}')">Cancel</button>
+      </div>` : '';
+    return `<div class="item-row${isEditing?' is-editing':''}">
       <div class="flex1">
         <div class="item-title">${esc(i.title)}</div>
-        ${meta ? `<div class="item-meta" style="margin-top:2px">${esc(meta)}</div>` : ''}
+        ${!isEditing && meta ? `<div class="item-meta" style="margin-top:2px">${esc(meta)}</div>` : ''}
+        ${editForm}
       </div>
-      <span class="item-meta">ELO ${Math.round(i.elo)}</span>
-      <button class="btn-sm ghost" onclick="deleteItem('${i.id}')" aria-label="Remove ${esc(i.title)}">✕</button>
+      ${!isEditing ? `<span class="item-meta">ELO ${Math.round(i.elo)}</span>` : ''}
+      <button class="btn-sm ghost" onclick="editItem('${i.id}')" aria-label="Edit ${esc(i.title)}" title="Edit">✎</button>
+      <button class="btn-sm ghost" onclick="deleteItem('${i.id}')" aria-label="Remove ${esc(i.title)}" title="Remove">✕</button>
     </div>`;
   }).join('') + '</div>';
 }
