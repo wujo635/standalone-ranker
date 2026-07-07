@@ -330,7 +330,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -382,21 +382,24 @@ function migrateData(data) {
   const v = data._meta?.dataSchemaVersion || 1;
 
   if (v < 2) {
-    // v1 → v2: items had a hardcoded top-level `year` string field.
-    // Move it into fields{}, introduce schema as a plain array per category.
+    // v1 -> v2: items had a hardcoded top-level `year` string field.
+    // Only migrate if item doesn't already have a fields object (true v1 data).
     Object.values(data.items || {}).forEach(item => {
-      item.fields = { Year: item.year || '' };
+      if (!item.fields) {
+        item.fields = { Year: item.year || '' };
+      }
       delete item.year;
     });
     if (!data.schema) data.schema = {};
     (data.cats || []).forEach(cat => {
-      if (!data.schema[cat] || Array.isArray(data.schema[cat])) return;
-      data.schema[cat] = [{ name: 'Year', required: false }];
+      if (!data.schema[cat]) {
+        data.schema[cat] = [{ name: 'Year', required: false }];
+      }
     });
   }
 
   if (v < 3) {
-    // v2 → v3: schema per category was a plain array [{name, required}].
+    // v2 -> v3: schema per category was a plain array [{name, required}].
     // Wrap it in { primary, fields[] }. Primary defaults to 'Title'.
     if (data.schema) {
       Object.keys(data.schema).forEach(cat => {
@@ -408,6 +411,13 @@ function migrateData(data) {
   }
 
   // v < 4: add next migration block here when DATA_SCHEMA_VERSION becomes 4
+
+  // Always stamp _meta so future loads know the current schema version
+  data._meta = {
+    appVersion: APP_VERSION,
+    dataSchemaVersion: DATA_SCHEMA_VERSION,
+    exportedAt: data._meta?.exportedAt || new Date().toISOString()
+  };
 
   return data;
 }
