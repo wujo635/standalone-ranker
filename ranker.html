@@ -419,8 +419,8 @@ function load() {
     const legacy = !raw && localStorage.getItem('media-ranker-v1');
     const src = raw || legacy;
     if (src) {
-      const raw = JSON.parse(src);
-      const migrated = migrateData(raw);
+      const parsed = JSON.parse(src);
+      const migrated = migrateData(parsed);
       state = migrated;
       // Safety: ensure schema exists for all cats
       state.cats.forEach(c => {
