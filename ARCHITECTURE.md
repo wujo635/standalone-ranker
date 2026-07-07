@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.3.0` |
+| App version | `1.4.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -55,6 +55,31 @@ When making changes:
 1. Update `APP_VERSION` at the top of the script following semver
 2. If `state`'s shape changed, increment `DATA_SCHEMA_VERSION` and add a migration case in `load()` and `importData()`
 3. Add a row to both tables above
+
+---
+
+## Adding a new schema version
+
+When the shape of `state` needs to change, follow these steps together — the migration and the version bump always travel as a pair:
+
+1. Increment `DATA_SCHEMA_VERSION` at the top of the script
+2. Add a `if (v < N)` block inside `migrateData()` describing what changed and transforming old data to the new shape
+3. Update the data schema version history table in this doc
+4. Update the app version (minor bump if backward compatible, major if not)
+5. Add the app version to the changelog table in this doc
+
+Example block structure:
+
+```js
+if (v < 4) {
+  // v3 → v4: describe what changed here
+  Object.values(data.items || {}).forEach(item => {
+    // transform item shape
+  });
+}
+```
+
+`migrateData()` is called in two places — `load()` (for localStorage data) and `importData()` (for uploaded files) — so migrations apply automatically regardless of how old data enters the app.
 
 ---
 
@@ -206,7 +231,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 
 | Function | What it does |
 |---|---|
-| `load()` | Reads localStorage, runs migrations, rebuilds selects, renders all views |
+| `load()` | Reads localStorage, runs `migrateData()`, rebuilds selects, renders all views |
+| `migrateData(data)` | Applies all schema version migrations in sequence; called by both `load()` and `importData()` before touching state |
 | `save()` | Serializes `state` to localStorage |
 | `rebuildCatSelects()` | Syncs both `<select>` elements to `state.cats` |
 | `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
