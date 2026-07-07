@@ -719,11 +719,22 @@ function rankCat() { return document.getElementById('rank-cat').value; }
 function itemMeta(item, useLabels) {
   const fields = extraFields(item.cat);
   const populated = fields.filter(f => (item.fields||{})[f.name]);
-  // useLabels: explicit override; otherwise auto-label when 2+ fields have values
   const label = useLabels !== undefined ? useLabels : populated.length >= 2;
   return populated.map(f =>
     label ? `${esc(f.name)}: ${esc((item.fields||{})[f.name])}` : esc((item.fields||{})[f.name])
-  ).join(' \u00b7 ');
+  );
+}
+
+// Returns fields joined for single-line display (library, leaderboard)
+function itemMetaInline(item) {
+  return itemMeta(item).join(' \u00b7 ');
+}
+
+// Returns fields as stacked lines for rank cards (VS and podium)
+function itemMetaStacked(item) {
+  const lines = itemMeta(item);
+  if (!lines.length) return '';
+  return lines.map(l => '<span class="vs-meta">' + l + '</span>').join('');
 }
 
 function setRankMode(mode) {
@@ -753,12 +764,12 @@ function loadPair() {
 }
 
 function vsCard(winner, loser) {
-  const meta = itemMeta(winner);
+  const meta = itemMetaStacked(winner);
   return `<div class="vs-card" onclick="vote('${winner.id}','${loser.id}')" tabindex="0" role="button" aria-label="Vote for ${esc(winner.title)}">
     <span class="vs-label">Pick this</span>
     <span class="vs-title">${esc(winner.title)}</span>
     ${meta ? `<span class="vs-meta">${meta}</span>` : ''}
-    <span class="vs-meta" style="color:var(--text-muted)">ELO ${Math.round(winner.elo)} \u00b7 ${winner.wins}W ${winner.losses}L</span>
+
     <div class="score-bar"><div class="score-fill" style="width:${Math.min(100,Math.max(0,(winner.elo-600)/8))}%"></div></div>
   </div>`;
 }
@@ -802,7 +813,7 @@ function renderPodium() {
 
   const itemRows = podiumPool.map(item => {
     const place = podiumPlacements[item.id];
-    const meta = itemMeta(item);
+    const meta = itemMetaStacked(item);
     const availablePlaces = [1,2,3].filter(p => !Object.values(podiumPlacements).includes(p) || podiumPlacements[item.id] === p);
     const placeButtons = place
       ? `<button class="podium-btn ghost" onclick="clearPodiumPlace('${item.id}')">Clear</button>`
@@ -815,7 +826,7 @@ function renderPodium() {
         <div class="podium-info">
           <div class="podium-title">${esc(item.title)}</div>
           ${meta ? `<div class="podium-meta">${meta}</div>` : ''}
-          <div class="podium-meta">ELO ${Math.round(item.elo)}</div>
+
         </div>
         <div class="podium-btns">${placeButtons}</div>
       </div>`;
@@ -875,7 +886,7 @@ function renderLB() {
   const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
   const medals = ['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49'];
   el.innerHTML = '<div class="card">' + list.map((i,idx) => {
-    const meta = itemMeta(i);
+    const meta = itemMetaInline(i);
     return `<div class="item-row">
       <span class="${idx<3?'rank-medal':'rank-num'}">${idx<3?medals[idx]:'#'+(idx+1)}</span>
       <div class="flex1">
