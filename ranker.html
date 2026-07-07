@@ -734,7 +734,7 @@ function itemMetaInline(item) {
 function itemMetaStacked(item) {
   const lines = itemMeta(item);
   if (!lines.length) return '';
-  return lines.map(l => '<span class="vs-meta">' + l + '</span>').join('');
+  return lines.map(l => '<span class="vs-meta" style="display:block;margin-top:3px">' + l + '</span>').join('');
 }
 
 function setRankMode(mode) {
