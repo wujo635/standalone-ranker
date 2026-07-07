@@ -287,6 +287,26 @@
       <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
     </div>
     <div class="card">
+      <div class="card-title">Preload from CSV</div>
+      <div class="card-desc">Import a formatted CSV file to create a category with its schema and items. <a href="#" onclick="showCsvHelp();return false;">See format guide</a>.</div>
+      <input type="file" id="csv-inp" accept=".csv" onchange="importCSV(event)">
+    </div>
+    <div id="csv-help" style="display:none" class="card">
+      <div class="card-title">CSV format guide</div>
+      <div style="font-size:13px;color:var(--text-secondary);line-height:1.7">
+        <p>Use <code>#</code> prefixed rows to define the schema, followed by a header row and data rows.</p>
+        <pre style="background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:.75rem;font-size:12px;margin-top:.5rem;overflow-x:auto">#category,NBA Players
+#primary,Name
+#field,Team,optional
+#field,Position,required
+#field,Draft Year,optional
+Name,Team,Position,Draft Year
+LeBron James,Lakers,SF,2003
+Stephen Curry,Warriors,PG,2009</pre>
+        <p style="margin-top:.5rem">Rules: <code>#category</code> and <code>#primary</code> are required. Each <code>#field</code> row defines an extra field and its required/optional status. The header row must match the primary label and field names exactly.</p>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-title">Clear all data</div>
       <div class="card-desc">Permanently deletes everything — all items, categories, and field definitions. Export first if you want a backup.</div>
       <button class="danger" onclick="clearAllData()">Clear all data</button>
@@ -310,7 +330,7 @@
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -846,6 +866,142 @@ function renderLB() {
       <span class="item-meta">${Math.round(i.elo)} · ${i.wins}W ${i.losses}L</span>
     </div>`;
   }).join('') + '</div>';
+}
+
+// --- CSV Preload ---
+function showCsvHelp() {
+  const el = document.getElementById('csv-help');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function importCSV(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const result = parsePreloadCSV(ev.target.result);
+      if (!result.ok) { toast(result.error); return; }
+      resolveCSVImport(result);
+    } catch(err) {
+      toast('Could not parse CSV: ' + err.message);
+    }
+    // reset input so same file can be re-imported
+    document.getElementById('csv-inp').value = '';
+  };
+  reader.readAsText(file);
+}
+
+function parsePreloadCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  let category = null, primary = null;
+  const fields = [];
+  const dataLines = [];
+  let headerLine = null;
+  let inData = false;
+
+  for (const line of lines) {
+    if (line.startsWith('#')) {
+      const parts = splitCSVLine(line.slice(1)); // strip leading #
+      const directive = parts[0].toLowerCase().trim();
+      if (directive === 'category') category = parts[1]?.trim();
+      else if (directive === 'primary') primary = parts[1]?.trim();
+      else if (directive === 'field') {
+        const name = parts[1]?.trim();
+        const req = (parts[2]?.trim().toLowerCase() === 'required');
+        if (name) fields.push({ name, required: req });
+      }
+    } else if (!inData) {
+      headerLine = splitCSVLine(line).map(h => h.trim());
+      inData = true;
+    } else {
+      dataLines.push(splitCSVLine(line));
+    }
+  }
+
+  if (!category) return { ok: false, error: 'Missing #category row' };
+  if (!primary)  return { ok: false, error: 'Missing #primary row' };
+  if (!headerLine) return { ok: false, error: 'No data rows found' };
+
+  // Validate header matches primary + field names
+  const expectedHeaders = [primary, ...fields.map(f => f.name)];
+  for (const h of expectedHeaders) {
+    if (!headerLine.includes(h)) return { ok: false, error: `Header row missing column: "${h}"` };
+  }
+
+  const primaryIdx = headerLine.indexOf(primary);
+  const items = [];
+  for (const row of dataLines) {
+    if (row.every(c => !c.trim())) continue; // skip blank rows
+    const title = row[primaryIdx]?.trim();
+    if (!title) continue;
+    const fieldValues = {};
+    fields.forEach(f => {
+      const idx = headerLine.indexOf(f.name);
+      fieldValues[f.name] = idx >= 0 ? (row[idx]?.trim() || '') : '';
+    });
+    items.push({ title, fields: fieldValues });
+  }
+
+  if (!items.length) return { ok: false, error: 'No valid data rows found' };
+  return { ok: true, category, primary, fields, items };
+}
+
+function splitCSVLine(line) {
+  // Handles quoted fields with commas inside
+  const result = [];
+  let cur = '', inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuotes = !inQuotes; }
+    else if (ch === ',' && !inQuotes) { result.push(cur); cur = ''; }
+    else { cur += ch; }
+  }
+  result.push(cur);
+  return result;
+}
+
+function resolveCSVImport(result) {
+  const { category, primary, fields, items } = result;
+  const exists = state.cats.includes(category);
+
+  if (exists) {
+    const existingCount = Object.values(state.items).filter(i => i.cat === category).length;
+    const choice = confirm(
+      `Category "${category}" already exists with ${existingCount} item${existingCount !== 1 ? 's' : ''}.
+
+OK = Add imported items alongside existing ones
+Cancel = Replace category entirely (existing items and rankings will be lost)`
+    );
+    if (choice) {
+      // Merge: add items, update schema
+      applyCSVImport(result, false);
+      toast(`Added ${items.length} items to "${category}"`);
+    } else {
+      // Confirm replace
+      if (!confirm(`Replace "${category}" and lose all existing rankings? This cannot be undone.`)) return;
+      // Remove existing items for this category
+      Object.keys(state.items).forEach(id => { if (state.items[id].cat === category) delete state.items[id]; });
+      applyCSVImport(result, true);
+      toast(`Replaced "${category}" with ${items.length} items`);
+    }
+  } else {
+    applyCSVImport(result, true);
+    toast(`Created "${category}" with ${items.length} items`);
+  }
+
+  save(); rebuildCatSelects();
+  document.getElementById('sel-cat').value = category;
+  renderLibrary(); renderLB(); renderStats();
+}
+
+function applyCSVImport({ category, primary, fields, items }, updateSchema) {
+  if (!state.cats.includes(category)) state.cats.push(category);
+  if (updateSchema) state.schema[category] = { primary, fields };
+  items.forEach(({ title, fields: fieldValues }) => {
+    const id = uid();
+    state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0 };
+  });
 }
 
 // --- Data ---
