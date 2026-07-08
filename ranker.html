@@ -330,7 +330,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.5.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1075,19 +1075,64 @@ function importData(e) {
     try {
       const d = JSON.parse(ev.target.result);
       const migrated = migrateData(d);
-      if (migrated.items) Object.assign(state.items, migrated.items);
-      if (migrated.cats) migrated.cats.forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
-      if (migrated.schema) Object.assign(state.schema, migrated.schema);
-      // Safety: ensure schema is well-formed for all cats after merge
+      const srcVer = migrated._meta ? 'v' + migrated._meta.appVersion + ', schema ' + migrated._meta.dataSchemaVersion : 'legacy (pre-v1.2)';
+
+      // Group incoming items by category
+      const incomingCats = migrated.cats || [];
+      const incomingItems = migrated.items || {};
+      const incomingSchema = migrated.schema || {};
+
+      let totalImported = 0;
+      let skipped = [];
+
+      for (const cat of incomingCats) {
+        const existingCount = Object.values(state.items).filter(i => i.cat === cat).length;
+        const incomingCount = Object.values(incomingItems).filter(i => i.cat === cat).length;
+
+        if (existingCount > 0) {
+          // Category exists locally — ask user what to do
+          const itemWord = existingCount !== 1 ? 's' : '';
+          const inWord = incomingCount !== 1 ? 's' : '';
+          const nl = String.fromCharCode(10);
+          const msgParts = ['Category [' + cat + '] already exists with ' + existingCount + ' item' + itemWord + '.', 'Imported file has ' + incomingCount + ' item' + inWord + '.', 'OK = Replace  |  Cancel = Skip'];
+          const replace = confirm(msgParts.join(nl + nl));
+          if (replace) {
+            // Remove all existing items for this category
+            Object.keys(state.items).forEach(id => {
+              if (state.items[id].cat === cat) delete state.items[id];
+            });
+            // Import incoming items and schema for this category
+            Object.entries(incomingItems).forEach(([id, item]) => {
+              if (item.cat === cat) { state.items[id] = item; totalImported++; }
+            });
+            if (!state.cats.includes(cat)) state.cats.push(cat);
+            if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
+          } else {
+            skipped.push(cat);
+          }
+        } else {
+          // Category does not exist locally — import freely
+          Object.entries(incomingItems).forEach(([id, item]) => {
+            if (item.cat === cat) { state.items[id] = item; totalImported++; }
+          });
+          if (!state.cats.includes(cat)) state.cats.push(cat);
+          if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
+        }
+      }
+
+      // Safety: ensure schema is well-formed for all cats
       state.cats.forEach(c => {
         if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
         if (!state.schema[c].primary) state.schema[c].primary = 'Name';
         if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
       });
+
       save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
-      const srcVer = d._meta ? `v${d._meta.appVersion}, schema ${d._meta.dataSchemaVersion}` : 'legacy (pre-v1.2)';
-      toast('Imported ' + Object.keys(d.items||{}).length + ' items from ' + srcVer);
-    } catch(err) { toast('Invalid JSON file'); }
+
+      let msg = 'Imported ' + totalImported + ' items from ' + srcVer;
+      if (skipped.length) msg += ' (' + skipped.join(', ') + ' skipped)';
+      toast(msg);
+    } catch(err) { toast('Invalid JSON file: ' + err.message); }
   };
   r.readAsText(file);
 }

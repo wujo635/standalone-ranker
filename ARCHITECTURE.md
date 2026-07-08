@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.4.0` |
+| App version | `1.5.3` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -38,6 +38,11 @@ Follows semantic versioning: `major.minor.patch`
 | 1.1.0 | Schema system introduced (array per category); custom fields, required/optional |
 | 1.2.0 | App renamed to "Ranker"; primary field label per category; versioning added |
 | 1.3.0 | Inline item editing in library; Podium ranking mode; rank mode toggle |
+| 1.4.0 | `migrateData()` function added; migration scaffolding wired into `load()` and `importData()`; version history comments added to script |
+| 1.5.0 | CSV preload import with schema parsing and per-category conflict resolution (merge or replace) |
+| 1.5.1 | Bug fix: `migrateData()` was unconditionally running v1 migration on every load, corrupting `item.fields`; fixed to check for existing fields first; `_meta` now stamped after migration so future loads skip correctly |
+| 1.5.2 | Field labels shown in library and leaderboard when 2+ fields populated; ELO hidden during ranking to prevent anchoring bias; fields rendered as stacked lines in VS and Podium cards; all non-ASCII bytes in script replaced with unicode escapes to prevent parse errors |
+| 1.5.3 | JSON import revised to prompt per category when conflicts exist — replace local data or skip; prevents duplicate items when importing overlapping datasets |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -91,7 +96,7 @@ Everything lives in one file: `ranker.html`
 ranker.html
 ├── <style>       CSS custom properties + all component styles (~130 lines)
 ├── <body>        Six views: Library, New Category, Schema Editor, Rank, Leaderboard, Data
-└── <script>      All app logic (~520 lines of vanilla JS)
+└── <script>      All app logic (~620 lines of vanilla JS)
 ```
 
 ---
@@ -157,11 +162,46 @@ Exported JSON wraps `state` with a `_meta` block:
 }
 ```
 
+### CSV preload format
+
+One file per category. `#directive` rows define the schema; the first non-`#` row is the column header; remaining rows are data.
+
+```
+#category,NBA Players
+#primary,Name
+#field,Team,optional
+#field,Position,required
+#field,Draft Year,optional
+Name,Team,Position,Draft Year
+LeBron James,Lakers,SF,2003
+Stephen Curry,Warriors,PG,2009
+```
+
+Rules:
+- `#category` and `#primary` are required
+- Each `#field` row takes a name and `required` or `optional`
+- The header row must include the primary label and all field names
+- Quoted fields with commas inside are supported
+- On import, if the category already exists the user is prompted to merge or replace
+
 ### Persistence
 
 `localStorage` key: `ranker-v1`
 
 `save()` serializes the full `state` object on every write. `load()` deserializes it on page load, applying any needed migrations. The app also checks for the legacy `media-ranker-v1` key and migrates it automatically on first load.
+
+### Import conflict resolution
+
+JSON imports are resolved per category:
+
+| Situation | Behaviour |
+|---|---|
+| Category in file does not exist locally | Imported freely, no prompt |
+| Category in file already exists locally | Confirm dialog: **OK** replaces local category entirely; **Cancel** skips it |
+
+Replacing a category removes all local items for that category before writing the imported ones — no duplicates possible. The toast on completion reports how many items were imported and which categories were skipped.
+
+This means importing is safe to use as an update mechanism: import a file with corrected data, choose Replace for the affected category, and the local copy is cleanly overwritten.
 
 ---
 
@@ -200,6 +240,8 @@ Two random items shown side by side. Pick one. One ELO update per round. Good fo
 - Unranked items are not compared against each other (no preference expressed)
 
 With a full pool of 5 items, one podium round generates up to 9 ELO updates vs 1 for standard mode — significantly faster convergence on large lists.
+
+ELO scores and win/loss counts are intentionally hidden during ranking (both 1v1 and Podium) to avoid anchoring bias. They remain visible in the Library and Leaderboard.
 
 The mode toggle (1 vs 1 / Podium) is persistent within a session but not saved to localStorage — it resets to Standard on page reload. To persist it, add `rankMode` to the `state` object.
 
@@ -261,10 +303,18 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `submitPodium()` | Derives all implied pairwise ELO updates from podium order, saves, loads next round |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
-| `itemMeta(item)` | Returns formatted extra field values for display in cards/rows |
+| `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
+| `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in library and leaderboard |
+| `itemMetaStacked(item)` | Renders `itemMeta()` as stacked `<span>` blocks for VS and Podium rank cards |
+| `showCsvHelp()` | Toggles the CSV format guide in the Data tab |
+| `importCSV(e)` | Reads a CSV file, delegates to `parsePreloadCSV()` and `resolveCSVImport()` |
+| `parsePreloadCSV(text)` | Parses `#directive` header rows and data rows; returns `{ok, category, primary, fields, items}` or `{ok:false, error}` |
+| `splitCSVLine(line)` | Splits a CSV line handling quoted fields with commas inside |
+| `resolveCSVImport(result)` | Handles conflict resolution when category already exists (merge or replace); calls `applyCSVImport()` |
+| `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
 | `exportData()` | Wraps state with `_meta`, serializes to JSON, triggers download |
-| `importData(e)` | Reads JSON file, runs migrations, merges into state, re-renders |
+| `importData(e)` | Reads JSON file, runs `migrateData()`, then prompts per category to replace or skip when conflicts exist |
 | `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID |
 | `esc(s)` | HTML-escapes strings before injecting into innerHTML |
@@ -309,6 +359,13 @@ Extend the item object with `notes: string` and `tags: string[]`. Add inputs in 
 ### Add a "not yet seen/heard/read" toggle
 
 Add a `seen: boolean` field to items. Show unseen items in a separate Watchlist tab. Only include `seen: true` items in ranking and leaderboard.
+
+### Extend the CSV preload format
+
+The CSV parser reads `#category`, `#primary`, and `#field` directives. To add new directives (e.g. `#description` for a category description):
+1. Add a new `else if (directive === 'description')` branch in `parsePreloadCSV()`
+2. Store the value in the result object
+3. Apply it in `applyCSVImport()`
 
 ### Smart pair selection
 
@@ -356,6 +413,9 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | JSON export | Human-readable, re-importable, version-stamped | CSV, binary |
 | Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
 | Multiple ranking modes | Different speeds suit different use cases | Single mode only |
+| ELO hidden during ranking | Prevents anchoring bias during comparison | Always visible |
+| Stacked fields in rank cards | Readable with many attributes | Single line, cramped |
+| CSV preload format | Easy to author in a spreadsheet | JSON only |
 | Inline editing | Edit without leaving the library view | Separate edit screen |
 
 ---
