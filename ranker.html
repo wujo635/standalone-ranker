@@ -776,7 +776,8 @@ function vsCard(winner, loser) {
 
 function eloUpdate(winner, loser) {
   const K = 32, E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
-  winner.elo += K * (1 - E); loser.elo += K * (0 - 1 + E);
+  winner.elo = Math.round(winner.elo + K * (1 - E));
+  loser.elo  = Math.round(loser.elo  + K * (0 - 1 + E));
   winner.wins++; loser.losses++;
 }
 
