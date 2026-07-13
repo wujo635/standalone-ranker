@@ -123,6 +123,37 @@
   #toast.show { opacity: 1; }
   input[type=file] { font-size: 13px; color: var(--text-secondary); }
 
+  /* Tier ranking */
+  .tier-setup { margin-bottom: 1rem; }
+  .tier-board { display: flex; flex-direction: column; gap: 8px; margin-bottom: 1rem; }
+  .tier-row { display: flex; align-items: flex-start; gap: 8px; min-height: 52px; }
+  .tier-label { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; flex-shrink: 0; margin-top: 6px; }
+  .tier-s { background: #ff7675; color: #fff; }
+  .tier-a { background: #fd9644; color: #fff; }
+  .tier-b { background: #f9ca24; color: #333; }
+  .tier-c { background: #6ab04c; color: #fff; }
+  .tier-d { background: #7f8fa6; color: #fff; }
+  .tier-lane { flex: 1; min-height: 48px; border: 1px dashed var(--border); border-radius: 8px; padding: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .tier-lane.has-items { border-color: var(--border-strong); background: var(--surface-2); }
+  .tier-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .tier-chip-name { font-weight: 500; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tier-chip-remove { cursor: pointer; color: var(--text-muted); font-size: 11px; }
+  .tier-chip-remove:hover { color: var(--danger); }
+  .tier-untiered { margin-top: .5rem; }
+  .tier-untiered-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: .5rem; font-weight: 500; }
+  .tier-item-list { display: flex; flex-direction: column; gap: 6px; }
+  .tier-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .85rem; display: flex; align-items: center; gap: 10px; }
+  .tier-item-info { flex: 1; }
+  .tier-item-title { font-size: 13px; font-weight: 500; }
+  .tier-item-meta { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+  .tier-item-btns { display: flex; gap: 4px; }
+  .tier-item-btn { font-size: 11px; font-weight: 600; padding: 3px 7px; border-radius: 5px; border: none; cursor: pointer; color: #fff; }
+  .tier-item-btn.ts { background: #ff7675; }
+  .tier-item-btn.ta { background: #fd9644; }
+  .tier-item-btn.tb { background: #f9ca24; color: #333; }
+  .tier-item-btn.tc { background: #6ab04c; }
+  .tier-item-btn.td { background: #7f8fa6; }
+
   /* Mode toggle */
   .mode-toggle { display: flex; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px; }
   .mode-btn { border: none; background: none; border-radius: 6px; padding: 5px 14px; font-size: 13px; color: var(--text-secondary); cursor: pointer; font-family: var(--font); transition: background .15s, color .15s; }
@@ -262,10 +293,11 @@
       <div class="mode-toggle">
         <button class="mode-btn active" id="mode-btn-standard" onclick="setRankMode('standard')">1 vs 1</button>
         <button class="mode-btn" id="mode-btn-podium" onclick="setRankMode('podium')">Podium</button>
+        <button class="mode-btn" id="mode-btn-tier" onclick="setRankMode('tier')">Tier</button>
       </div>
     </div>
     <div id="rank-pair"></div>
-    <div class="skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
+    <div class="skip-row" id="rank-skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
   </div>
 
   <!-- Leaderboard -->
@@ -333,7 +365,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.5';
+const APP_VERSION = '1.6.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -744,12 +776,18 @@ function setRankMode(mode) {
   rankMode = mode;
   document.getElementById('mode-btn-standard').classList.toggle('active', mode === 'standard');
   document.getElementById('mode-btn-podium').classList.toggle('active', mode === 'podium');
-  document.getElementById('rank-skip-btn').textContent = mode === 'podium' ? '\u21bb New round' : '\u21bb Skip this pair';
+  document.getElementById('mode-btn-tier').classList.toggle('active', mode === 'tier');
+  const skipRow = document.getElementById('rank-skip-row');
+  if (skipRow) skipRow.style.display = mode === 'tier' ? 'none' : '';
+  if (mode !== 'tier') {
+    document.getElementById('rank-skip-btn').textContent = mode === 'podium' ? '\u21bb New round' : '\u21bb Skip this pair';
+  }
   initRankView();
 }
 
 function initRankView() {
   if (rankMode === 'podium') loadPodium();
+  else if (rankMode === 'tier') loadTier();
   else loadPair();
 }
 
@@ -876,6 +914,134 @@ function submitPodium() {
   save(); renderLB(); renderStats();
   toast(`Podium confirmed — ${updates} ELO updates applied`);
   loadPodium();
+}
+
+// --- Tier mode ---
+const TIERS = ['S', 'A', 'B', 'C', 'D'];
+let tierPool = [];       // items in current tier session
+let tierPlacements = {}; // { itemId: 'S'|'A'|'B'|'C'|'D' }
+let tierSessionSize = 10;
+
+function loadTier() {
+  const el = document.getElementById('rank-pair');
+  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  if (list.length < 3) {
+    el.innerHTML = '<div class="empty">Add at least 3 items to use Tier mode.</div>';
+    return;
+  }
+
+  // Ask for session size
+  const input = prompt('How many items in this tier session? (3–' + Math.min(list.length, 30) + ')', String(Math.min(tierSessionSize, list.length)));
+  if (!input) return;
+  const n = parseInt(input, 10);
+  if (isNaN(n) || n < 3 || n > list.length) {
+    toast('Enter a number between 3 and ' + Math.min(list.length, 30));
+    return;
+  }
+  tierSessionSize = n;
+
+  // Prioritise items with zero comparisons, then low comparison count
+  const sorted = [...list].sort((a, b) => {
+    const aTotal = a.wins + a.losses;
+    const bTotal = b.wins + b.losses;
+    if (aTotal === 0 && bTotal > 0) return -1;
+    if (bTotal === 0 && aTotal > 0) return 1;
+    return aTotal - bTotal;
+  });
+  // Take the top n/2 least-compared, rest random from remainder
+  const priority = sorted.slice(0, Math.ceil(n / 2));
+  const rest = sorted.slice(Math.ceil(n / 2)).sort(() => Math.random() - 0.5);
+  const pool = [...priority, ...rest].slice(0, n).sort(() => Math.random() - 0.5);
+
+  tierPool = pool;
+  tierPlacements = {};
+  renderTier();
+}
+
+function renderTier() {
+  const el = document.getElementById('rank-pair');
+  const tiered = new Set(Object.keys(tierPlacements));
+  const untiered = tierPool.filter(i => !tiered.has(i.id));
+  const allPlaced = untiered.length === 0;
+  const TIER_CLASS = {S:'ts',A:'ta',B:'tb',C:'tc',D:'td'};
+  const TIER_COLOR = {S:'#ff7675',A:'#fd9644',B:'#f9ca24',C:'#6ab04c',D:'#7f8fa6'};
+
+  // Build tier board
+  let lanes = '';
+  TIERS.forEach(t => {
+    const placed = tierPool.filter(i => tierPlacements[i.id] === t);
+    let chips = '';
+    placed.forEach(i => {
+      chips += '<div class="tier-chip">' +
+        '<span class="tier-chip-name" title="' + esc(i.title) + '">' + esc(i.title) + '</span>' +
+        '<button class="tier-chip-remove" data-id="' + i.id + '" onclick="removeTierPlacement(this.dataset.id)">\u00d7</button>' +
+        '</div>';
+    });
+    lanes += '<div class="tier-row">' +
+      '<div class="tier-label tier-' + t.toLowerCase() + '">' + t + '</div>' +
+      '<div class="tier-lane' + (placed.length ? ' has-items' : '') + '">' + chips + '</div>' +
+      '</div>';
+  });
+
+  // Build untiered list
+  let itemRows = '';
+  untiered.forEach(i => {
+    const meta = itemMetaInline(i);
+    let btns = '';
+    TIERS.forEach(t => {
+      btns += '<button class="tier-item-btn ' + TIER_CLASS[t] + '" data-id="' + i.id + '" data-tier="' + t + '" onclick="assignTier(this.dataset.id, this.dataset.tier)">' + t + '</button>';
+    });
+    itemRows += '<div class="tier-item">' +
+      '<div class="tier-item-info">' +
+      '<div class="tier-item-title">' + esc(i.title) + '</div>' +
+      (meta ? '<div class="tier-item-meta">' + meta + '</div>' : '') +
+      '</div>' +
+      '<div class="tier-item-btns">' + btns + '</div>' +
+      '</div>';
+  });
+
+  el.innerHTML =
+    '<div class="tier-board">' + lanes + '</div>' +
+    '<div class="tier-untiered">' +
+    (untiered.length
+      ? '<div class="tier-untiered-label">Untiered (' + untiered.length + ' remaining)</div>' +
+        '<div class="tier-item-list">' + itemRows + '</div>'
+      : '') +
+    '</div>' +
+    (allPlaced
+      ? '<div class="podium-actions" style="margin-top:1rem"><button class="primary" onclick="submitTier()">Confirm tier results</button></div>'
+      : '');
+}
+
+
+function assignTier(itemId, tier) {
+  tierPlacements[itemId] = tier;
+  renderTier();
+}
+
+function removeTierPlacement(itemId) {
+  delete tierPlacements[itemId];
+  renderTier();
+}
+
+function submitTier() {
+  // For each pair where tierIndex(a) < tierIndex(b), a beats b
+  const placed = tierPool.filter(i => tierPlacements[i.id]);
+  let updates = 0;
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      const ti = TIERS.indexOf(tierPlacements[placed[i].id]);
+      const tj = TIERS.indexOf(tierPlacements[placed[j].id]);
+      if (ti === tj) continue; // same tier — no comparison
+      const winner = ti < tj ? placed[i] : placed[j];
+      const loser  = ti < tj ? placed[j] : placed[i];
+      eloUpdate(state.items[winner.id], state.items[loser.id]);
+      updates++;
+    }
+  }
+  save(); renderLB(); renderStats();
+  toast('Tier confirmed — ' + updates + ' ELO updates applied');
+  loadTier();
 }
 
 // --- Leaderboard ---
