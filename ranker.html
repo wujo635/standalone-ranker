@@ -197,7 +197,7 @@
         <div class="input-group">
           <div class="section-label">Primary field label</div>
           <input type="text" id="newcat-primary" placeholder="e.g. Name, Title, Place…" style="width:100%">
-          <div class="input-hint">This is what you call each entry \u2014 shown as the main field when adding items.</div>
+          <div class="input-hint">This is what you call each entry — shown as the main field when adding items.</div>
         </div>
 
         <div class="section-label">Extra fields <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted)">(optional)</span></div>
@@ -283,7 +283,7 @@
     </div>
     <div class="card">
       <div class="card-title">Import</div>
-      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data \u2014 nothing is overwritten.</div>
+      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data — nothing is overwritten.</div>
       <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
     </div>
     <div class="card">
@@ -308,7 +308,7 @@ Stephen Curry,Warriors,PG,2009</pre>
     </div>
     <div class="card">
       <div class="card-title">Clear all data</div>
-      <div class="card-desc">Permanently deletes everything \u2014 all items, categories, and field definitions. Export first if you want a backup.</div>
+      <div class="card-desc">Permanently deletes everything — all items, categories, and field definitions. Export first if you want a backup.</div>
       <button class="danger" onclick="clearAllData()">Clear all data</button>
     </div>
     <div class="card">
@@ -335,9 +335,9 @@ const APP_VERSION = '1.5.3';
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
 // History:
-//   1 \u2014 original media-ranker; items had hardcoded `year` field, no schema object
-//   2 \u2014 schema introduced as a plain array per category, no primary label
-//   3 \u2014 schema is { primary, fields[] } per category; app renamed to Ranker
+//   1 — original media-ranker; items had hardcoded `year` field, no schema object
+//   2 — schema introduced as a plain array per category, no primary label
+//   3 — schema is { primary, fields[] } per category; app renamed to Ranker
 const DATA_SCHEMA_VERSION = 3;
 
 const CAT_DEFAULTS = {
@@ -377,7 +377,7 @@ function save() { try { localStorage.setItem('ranker-v1', JSON.stringify(state))
 // --- Data migration ---
 // Called on both load() and importData() before touching state.
 // Each block handles one version boundary. Add a new block here whenever
-// DATA_SCHEMA_VERSION is bumped \u2014 the migration and the version bump travel together.
+// DATA_SCHEMA_VERSION is bumped — the migration and the version bump travel together.
 function migrateData(data) {
   const v = data._meta?.dataSchemaVersion || 1;
 
@@ -526,7 +526,7 @@ function openSchemaEditor() {
   editingCat = document.getElementById('sel-cat').value;
   const s = schemaFor(editingCat);
   editingFields = s.fields.map(f => ({...f}));
-  document.getElementById('schema-title').textContent = 'Fields \u2014 ' + editingCat;
+  document.getElementById('schema-title').textContent = 'Fields — ' + editingCat;
   document.getElementById('schema-primary').value = s.primary || 'Name';
   document.getElementById('schema-field-inp').value = '';
   document.getElementById('schema-field-req').checked = false;
@@ -672,7 +672,7 @@ function renderLibrary() {
   const fields = extraFields(cat);
   const list = libItems().sort((a,b) => a.title.localeCompare(b.title));
   const el = document.getElementById('lib-list');
-  if (!list.length) { el.innerHTML = '<div class="empty">No items yet \u2014 add one above.</div>'; return; }
+  if (!list.length) { el.innerHTML = '<div class="empty">No items yet — add one above.</div>'; return; }
   el.innerHTML = '<div class="card">' + list.map(i => {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
     const useLabels = populated.length >= 2;
@@ -807,7 +807,7 @@ function loadPodium() {
 
 function renderPodium() {
   const el = document.getElementById('rank-pair');
-  const placeLabels = { 1: '\ud83e\udd47', 2: '\ud83e\udd48', 3: '\ud83e\udd49' };
+  const placeLabels = { 1: '🥇', 2: '🥈', 3: '🥉' };
   const placedIds = new Set(Object.keys(podiumPlacements));
   const placedCount = placedIds.size;
   const allPlaced = placedCount >= 3;
@@ -823,7 +823,7 @@ function renderPodium() {
         ).join('');
     return `
       <div class="podium-item${place ? ' selected-'+place : ''}">
-        <div class="podium-rank">${place ? placeLabels[place] : '<span style="color:var(--text-muted);font-size:14px">\u2014</span>'}</div>
+        <div class="podium-rank">${place ? placeLabels[place] : '<span style="color:var(--text-muted);font-size:14px">—</span>'}</div>
         <div class="podium-info">
           <div class="podium-title">${esc(item.title)}</div>
           ${meta ? `<div class="podium-meta">${meta}</div>` : ''}
@@ -834,7 +834,7 @@ function renderPodium() {
   }).join('');
 
   el.innerHTML = `
-    <div class="podium-hint">Assign \ud83e\udd47 \ud83e\udd48 \ud83e\udd49 to your top 3 from this group.</div>
+    <div class="podium-hint">Assign 🥇 🥈 🥉 to your top 3 from this group.</div>
     <div class="podium-grid">${itemRows}</div>
     ${allPlaced ? `<div class="podium-actions"><button class="primary" onclick="submitPodium()">Confirm podium</button></div>` : ''}`;
 }
@@ -871,7 +871,7 @@ function submitPodium() {
     }
   }
   save(); renderLB(); renderStats();
-  toast(`Podium confirmed \u2014 ${updates} ELO updates applied`);
+  toast(`Podium confirmed — ${updates} ELO updates applied`);
   loadPodium();
 }
 
@@ -885,7 +885,7 @@ function renderLB() {
   const el = document.getElementById('lb-list');
   if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
   const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
-  const medals = ['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49'];
+  const medals = ['🥇','🥈','🥉'];
   el.innerHTML = '<div class="card">' + list.map((i,idx) => {
     const meta = itemMetaInline(i);
     return `<div class="item-row">
@@ -1039,7 +1039,7 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
 // --- Data ---
 function renderStats() {
   const savedRaw = localStorage.getItem('ranker-v1');
-  let savedSchema = '\u2014';
+  let savedSchema = '—';
   try { const s = JSON.parse(savedRaw); savedSchema = s._meta ? String(s._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)'; } catch(e) {}
   document.getElementById('version-info').innerHTML = [
     ['App version', APP_VERSION],
