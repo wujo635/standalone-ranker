@@ -278,8 +278,11 @@
   <div id="view-data" class="view">
     <div class="card">
       <div class="card-title">Export</div>
-      <div class="card-desc">Download your entire library as a JSON file you can re-import later.</div>
-      <button onclick="exportData()">↓ Export JSON</button>
+      <div class="card-desc">Download your entire library as JSON, or export the current category as a clean CSV — no rankings — so others can import it as a fresh starting point.</div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <button onclick="exportData()">↓ Export JSON</button>
+        <button onclick="exportCategoryCSV()">↓ Export category as CSV</button>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Import</div>
@@ -330,7 +333,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.3';
+const APP_VERSION = '1.5.4';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1067,6 +1070,50 @@ function exportData() {
   const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'ranker.json'; a.click(); toast('Exported!');
+}
+
+function exportCategoryCSV() {
+  const cat = document.getElementById('sel-cat').value;
+  const schema = schemaFor(cat);
+  const fields = schema.fields || [];
+  const items = Object.values(state.items).filter(i => i.cat === cat);
+
+  if (!items.length) { toast('No items in ' + cat + ' to export'); return; }
+
+  const lines = [];
+
+  // Schema directives
+  lines.push('#category,' + csvCell(cat));
+  lines.push('#primary,' + csvCell(schema.primary || 'Name'));
+  fields.forEach(f => {
+    lines.push('#field,' + csvCell(f.name) + ',' + (f.required ? 'required' : 'optional'));
+  });
+
+  // Header row
+  const headers = [schema.primary || 'Name', ...fields.map(f => f.name)];
+  lines.push(headers.map(csvCell).join(','));
+
+  // Data rows — title + extra fields only, no ELO/wins/losses
+  items.sort((a, b) => a.title.localeCompare(b.title)).forEach(item => {
+    const row = [item.title, ...fields.map(f => (item.fields || {})[f.name] || '')];
+    lines.push(row.map(csvCell).join(','));
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = cat.toLowerCase().replace(/\s+/g, '-') + '.csv';
+  a.click();
+  toast('Exported ' + items.length + ' items as CSV');
+}
+
+function csvCell(val) {
+  const s = String(val || '');
+  // Quote if contains comma, quote, or newline
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
 }
 
 function importData(e) {
