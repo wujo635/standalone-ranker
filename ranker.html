@@ -197,7 +197,7 @@
         <div class="input-group">
           <div class="section-label">Primary field label</div>
           <input type="text" id="newcat-primary" placeholder="e.g. Name, Title, Place…" style="width:100%">
-          <div class="input-hint">This is what you call each entry \u2014 shown as the main field when adding items.</div>
+          <div class="input-hint">This is what you call each entry — shown as the main field when adding items.</div>
         </div>
 
         <div class="section-label">Extra fields <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted)">(optional)</span></div>
@@ -265,7 +265,7 @@
       </div>
     </div>
     <div id="rank-pair"></div>
-    <div class="skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">\u21bb New round</button></div>
+    <div class="skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
   </div>
 
   <!-- Leaderboard -->
@@ -278,12 +278,15 @@
   <div id="view-data" class="view">
     <div class="card">
       <div class="card-title">Export</div>
-      <div class="card-desc">Download your entire library as a JSON file you can re-import later.</div>
-      <button onclick="exportData()">↓ Export JSON</button>
+      <div class="card-desc">Download your entire library as JSON, or export the current category as a clean CSV — no rankings — so others can import it as a fresh starting point.</div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <button onclick="exportData()">↓ Export JSON</button>
+        <button onclick="exportCategoryCSV()">↓ Export category as CSV</button>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Import</div>
-      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data \u2014 nothing is overwritten.</div>
+      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data — nothing is overwritten.</div>
       <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
     </div>
     <div class="card">
@@ -308,7 +311,7 @@ Stephen Curry,Warriors,PG,2009</pre>
     </div>
     <div class="card">
       <div class="card-title">Clear all data</div>
-      <div class="card-desc">Permanently deletes everything \u2014 all items, categories, and field definitions. Export first if you want a backup.</div>
+      <div class="card-desc">Permanently deletes everything — all items, categories, and field definitions. Export first if you want a backup.</div>
       <button class="danger" onclick="clearAllData()">Clear all data</button>
     </div>
     <div class="card">
@@ -330,14 +333,14 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.5.5';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
 // History:
-//   1 \u2014 original media-ranker; items had hardcoded `year` field, no schema object
-//   2 \u2014 schema introduced as a plain array per category, no primary label
-//   3 \u2014 schema is { primary, fields[] } per category; app renamed to Ranker
+//   1 — original media-ranker; items had hardcoded `year` field, no schema object
+//   2 — schema introduced as a plain array per category, no primary label
+//   3 — schema is { primary, fields[] } per category; app renamed to Ranker
 const DATA_SCHEMA_VERSION = 3;
 
 const CAT_DEFAULTS = {
@@ -377,7 +380,7 @@ function save() { try { localStorage.setItem('ranker-v1', JSON.stringify(state))
 // --- Data migration ---
 // Called on both load() and importData() before touching state.
 // Each block handles one version boundary. Add a new block here whenever
-// DATA_SCHEMA_VERSION is bumped \u2014 the migration and the version bump travel together.
+// DATA_SCHEMA_VERSION is bumped — the migration and the version bump travel together.
 function migrateData(data) {
   const v = data._meta?.dataSchemaVersion || 1;
 
@@ -526,7 +529,7 @@ function openSchemaEditor() {
   editingCat = document.getElementById('sel-cat').value;
   const s = schemaFor(editingCat);
   editingFields = s.fields.map(f => ({...f}));
-  document.getElementById('schema-title').textContent = 'Fields \u2014 ' + editingCat;
+  document.getElementById('schema-title').textContent = 'Fields — ' + editingCat;
   document.getElementById('schema-primary').value = s.primary || 'Name';
   document.getElementById('schema-field-inp').value = '';
   document.getElementById('schema-field-req').checked = false;
@@ -672,7 +675,7 @@ function renderLibrary() {
   const fields = extraFields(cat);
   const list = libItems().sort((a,b) => a.title.localeCompare(b.title));
   const el = document.getElementById('lib-list');
-  if (!list.length) { el.innerHTML = '<div class="empty">No items yet \u2014 add one above.</div>'; return; }
+  if (!list.length) { el.innerHTML = '<div class="empty">No items yet — add one above.</div>'; return; }
   el.innerHTML = '<div class="card">' + list.map(i => {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
     const useLabels = populated.length >= 2;
@@ -776,7 +779,8 @@ function vsCard(winner, loser) {
 
 function eloUpdate(winner, loser) {
   const K = 32, E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
-  winner.elo += K * (1 - E); loser.elo += K * (0 - 1 + E);
+  winner.elo = Math.round(winner.elo + K * (1 - E));
+  loser.elo  = Math.round(loser.elo  + K * (0 - 1 + E));
   winner.wins++; loser.losses++;
 }
 
@@ -806,7 +810,7 @@ function loadPodium() {
 
 function renderPodium() {
   const el = document.getElementById('rank-pair');
-  const placeLabels = { 1: '\ud83e\udd47', 2: '\ud83e\udd48', 3: '\ud83e\udd49' };
+  const placeLabels = { 1: '🥇', 2: '🥈', 3: '🥉' };
   const placedIds = new Set(Object.keys(podiumPlacements));
   const placedCount = placedIds.size;
   const allPlaced = placedCount >= 3;
@@ -822,7 +826,7 @@ function renderPodium() {
         ).join('');
     return `
       <div class="podium-item${place ? ' selected-'+place : ''}">
-        <div class="podium-rank">${place ? placeLabels[place] : '<span style="color:var(--text-muted);font-size:14px">\u2014</span>'}</div>
+        <div class="podium-rank">${place ? placeLabels[place] : '<span style="color:var(--text-muted);font-size:14px">—</span>'}</div>
         <div class="podium-info">
           <div class="podium-title">${esc(item.title)}</div>
           ${meta ? `<div class="podium-meta">${meta}</div>` : ''}
@@ -833,7 +837,7 @@ function renderPodium() {
   }).join('');
 
   el.innerHTML = `
-    <div class="podium-hint">Assign \ud83e\udd47 \ud83e\udd48 \ud83e\udd49 to your top 3 from this group.</div>
+    <div class="podium-hint">Assign 🥇 🥈 🥉 to your top 3 from this group.</div>
     <div class="podium-grid">${itemRows}</div>
     ${allPlaced ? `<div class="podium-actions"><button class="primary" onclick="submitPodium()">Confirm podium</button></div>` : ''}`;
 }
@@ -870,7 +874,7 @@ function submitPodium() {
     }
   }
   save(); renderLB(); renderStats();
-  toast(`Podium confirmed \u2014 ${updates} ELO updates applied`);
+  toast(`Podium confirmed — ${updates} ELO updates applied`);
   loadPodium();
 }
 
@@ -884,7 +888,7 @@ function renderLB() {
   const el = document.getElementById('lb-list');
   if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
   const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
-  const medals = ['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49'];
+  const medals = ['🥇','🥈','🥉'];
   el.innerHTML = '<div class="card">' + list.map((i,idx) => {
     const meta = itemMetaInline(i);
     return `<div class="item-row">
@@ -998,32 +1002,65 @@ function resolveCSVImport(result) {
 
   if (exists) {
     const existingCount = Object.values(state.items).filter(i => i.cat === category).length;
-    const choice = confirm(
-      `Category "${category}" already exists with ${existingCount} item${existingCount !== 1 ? 's' : ''}.
+    const nl = String.fromCharCode(10);
+    const msg = [
+      'Category [' + category + '] already exists with ' + existingCount + ' item' + (existingCount !== 1 ? 's' : '') + '.',
+      '',
+      '1 = Bulk add — update fields on matches, add new items, preserve all rankings',
+      '2 = Replace — wipe category entirely and start fresh',
+      '3 = Cancel'
+    ].join(nl);
+    const choice = prompt(msg, '1');
+    if (!choice || choice.trim() === '3' || choice.trim() === '') return;
 
-OK = Add imported items alongside existing ones
-Cancel = Replace category entirely (existing items and rankings will be lost)`
-    );
-    if (choice) {
-      // Merge: add items, update schema
-      applyCSVImport(result, false);
-      toast(`Added ${items.length} items to "${category}"`);
-    } else {
-      // Confirm replace
-      if (!confirm(`Replace "${category}" and lose all existing rankings? This cannot be undone.`)) return;
-      // Remove existing items for this category
+    if (choice.trim() === '1') {
+      bulkAddCSVImport(result);
+    } else if (choice.trim() === '2') {
+      const nl2 = String.fromCharCode(10);
+      const warn = ['Replace [' + category + '] and lose all existing rankings?', '', 'OK = Replace  |  Cancel = abort'].join(nl2);
+      if (!confirm(warn)) return;
       Object.keys(state.items).forEach(id => { if (state.items[id].cat === category) delete state.items[id]; });
       applyCSVImport(result, true);
-      toast(`Replaced "${category}" with ${items.length} items`);
+      toast('Replaced ' + category + ' with ' + items.length + ' items');
+    } else {
+      toast('Invalid choice — nothing changed');
+      return;
     }
   } else {
     applyCSVImport(result, true);
-    toast(`Created "${category}" with ${items.length} items`);
+    toast('Created ' + category + ' with ' + items.length + ' items');
   }
 
   save(); rebuildCatSelects();
   document.getElementById('sel-cat').value = category;
   renderLibrary(); renderLB(); renderStats();
+}
+
+// Bulk add: match on title, update fields but preserve ELO/wins/losses.
+// New titles not found in existing items are added fresh at ELO 1000.
+// Schema directives in the CSV are ignored — existing schema is kept.
+function bulkAddCSVImport({ category, items }) {
+  // Build a lookup of existing items by lowercase title
+  const existing = {};
+  Object.values(state.items).forEach(item => {
+    if (item.cat === category) existing[item.title.toLowerCase()] = item;
+  });
+
+  let added = 0, updated = 0;
+  items.forEach(({ title, fields: fieldValues }) => {
+    const match = existing[title.toLowerCase()];
+    if (match) {
+      // Update field values, preserve ELO and record
+      match.fields = Object.assign(match.fields || {}, fieldValues);
+      updated++;
+    } else {
+      // New item — add fresh
+      const id = uid();
+      state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0 };
+      added++;
+    }
+  });
+  toast('Bulk add: ' + added + ' added, ' + updated + ' updated in ' + category);
 }
 
 function applyCSVImport({ category, primary, fields, items }, updateSchema) {
@@ -1038,7 +1075,7 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
 // --- Data ---
 function renderStats() {
   const savedRaw = localStorage.getItem('ranker-v1');
-  let savedSchema = '\u2014';
+  let savedSchema = '—';
   try { const s = JSON.parse(savedRaw); savedSchema = s._meta ? String(s._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)'; } catch(e) {}
   document.getElementById('version-info').innerHTML = [
     ['App version', APP_VERSION],
@@ -1068,6 +1105,50 @@ function exportData() {
   a.download = 'ranker.json'; a.click(); toast('Exported!');
 }
 
+function exportCategoryCSV() {
+  const cat = document.getElementById('sel-cat').value;
+  const schema = schemaFor(cat);
+  const fields = schema.fields || [];
+  const items = Object.values(state.items).filter(i => i.cat === cat);
+
+  if (!items.length) { toast('No items in ' + cat + ' to export'); return; }
+
+  const lines = [];
+
+  // Schema directives
+  lines.push('#category,' + csvCell(cat));
+  lines.push('#primary,' + csvCell(schema.primary || 'Name'));
+  fields.forEach(f => {
+    lines.push('#field,' + csvCell(f.name) + ',' + (f.required ? 'required' : 'optional'));
+  });
+
+  // Header row
+  const headers = [schema.primary || 'Name', ...fields.map(f => f.name)];
+  lines.push(headers.map(csvCell).join(','));
+
+  // Data rows — title + extra fields only, no ELO/wins/losses
+  items.sort((a, b) => a.title.localeCompare(b.title)).forEach(item => {
+    const row = [item.title, ...fields.map(f => (item.fields || {})[f.name] || '')];
+    lines.push(row.map(csvCell).join(','));
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = cat.toLowerCase().replace(/\s+/g, '-') + '.csv';
+  a.click();
+  toast('Exported ' + items.length + ' items as CSV');
+}
+
+function csvCell(val) {
+  const s = String(val || '');
+  // Quote if contains comma, quote, or newline
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
 function importData(e) {
   const file = e.target.files[0]; if (!file) return;
   const r = new FileReader();
@@ -1075,19 +1156,64 @@ function importData(e) {
     try {
       const d = JSON.parse(ev.target.result);
       const migrated = migrateData(d);
-      if (migrated.items) Object.assign(state.items, migrated.items);
-      if (migrated.cats) migrated.cats.forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
-      if (migrated.schema) Object.assign(state.schema, migrated.schema);
-      // Safety: ensure schema is well-formed for all cats after merge
+      const srcVer = migrated._meta ? 'v' + migrated._meta.appVersion + ', schema ' + migrated._meta.dataSchemaVersion : 'legacy (pre-v1.2)';
+
+      // Group incoming items by category
+      const incomingCats = migrated.cats || [];
+      const incomingItems = migrated.items || {};
+      const incomingSchema = migrated.schema || {};
+
+      let totalImported = 0;
+      let skipped = [];
+
+      for (const cat of incomingCats) {
+        const existingCount = Object.values(state.items).filter(i => i.cat === cat).length;
+        const incomingCount = Object.values(incomingItems).filter(i => i.cat === cat).length;
+
+        if (existingCount > 0) {
+          // Category exists locally — ask user what to do
+          const itemWord = existingCount !== 1 ? 's' : '';
+          const inWord = incomingCount !== 1 ? 's' : '';
+          const nl = String.fromCharCode(10);
+          const msgParts = ['Category [' + cat + '] already exists with ' + existingCount + ' item' + itemWord + '.', 'Imported file has ' + incomingCount + ' item' + inWord + '.', 'OK = Replace  |  Cancel = Skip'];
+          const replace = confirm(msgParts.join(nl + nl));
+          if (replace) {
+            // Remove all existing items for this category
+            Object.keys(state.items).forEach(id => {
+              if (state.items[id].cat === cat) delete state.items[id];
+            });
+            // Import incoming items and schema for this category
+            Object.entries(incomingItems).forEach(([id, item]) => {
+              if (item.cat === cat) { state.items[id] = item; totalImported++; }
+            });
+            if (!state.cats.includes(cat)) state.cats.push(cat);
+            if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
+          } else {
+            skipped.push(cat);
+          }
+        } else {
+          // Category does not exist locally — import freely
+          Object.entries(incomingItems).forEach(([id, item]) => {
+            if (item.cat === cat) { state.items[id] = item; totalImported++; }
+          });
+          if (!state.cats.includes(cat)) state.cats.push(cat);
+          if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
+        }
+      }
+
+      // Safety: ensure schema is well-formed for all cats
       state.cats.forEach(c => {
         if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
         if (!state.schema[c].primary) state.schema[c].primary = 'Name';
         if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
       });
+
       save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
-      const srcVer = d._meta ? `v${d._meta.appVersion}, schema ${d._meta.dataSchemaVersion}` : 'legacy (pre-v1.2)';
-      toast('Imported ' + Object.keys(d.items||{}).length + ' items from ' + srcVer);
-    } catch(err) { toast('Invalid JSON file'); }
+
+      let msg = 'Imported ' + totalImported + ' items from ' + srcVer;
+      if (skipped.length) msg += ' (' + skipped.join(', ') + ' skipped)';
+      toast(msg);
+    } catch(err) { toast('Invalid JSON file: ' + err.message); }
   };
   r.readAsText(file);
 }
