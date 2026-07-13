@@ -333,7 +333,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.5.4';
+const APP_VERSION = '1.5.5';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1002,32 +1002,65 @@ function resolveCSVImport(result) {
 
   if (exists) {
     const existingCount = Object.values(state.items).filter(i => i.cat === category).length;
-    const choice = confirm(
-      `Category "${category}" already exists with ${existingCount} item${existingCount !== 1 ? 's' : ''}.
+    const nl = String.fromCharCode(10);
+    const msg = [
+      'Category [' + category + '] already exists with ' + existingCount + ' item' + (existingCount !== 1 ? 's' : '') + '.',
+      '',
+      '1 = Bulk add — update fields on matches, add new items, preserve all rankings',
+      '2 = Replace — wipe category entirely and start fresh',
+      '3 = Cancel'
+    ].join(nl);
+    const choice = prompt(msg, '1');
+    if (!choice || choice.trim() === '3' || choice.trim() === '') return;
 
-OK = Add imported items alongside existing ones
-Cancel = Replace category entirely (existing items and rankings will be lost)`
-    );
-    if (choice) {
-      // Merge: add items, update schema
-      applyCSVImport(result, false);
-      toast(`Added ${items.length} items to "${category}"`);
-    } else {
-      // Confirm replace
-      if (!confirm(`Replace "${category}" and lose all existing rankings? This cannot be undone.`)) return;
-      // Remove existing items for this category
+    if (choice.trim() === '1') {
+      bulkAddCSVImport(result);
+    } else if (choice.trim() === '2') {
+      const nl2 = String.fromCharCode(10);
+      const warn = ['Replace [' + category + '] and lose all existing rankings?', '', 'OK = Replace  |  Cancel = abort'].join(nl2);
+      if (!confirm(warn)) return;
       Object.keys(state.items).forEach(id => { if (state.items[id].cat === category) delete state.items[id]; });
       applyCSVImport(result, true);
-      toast(`Replaced "${category}" with ${items.length} items`);
+      toast('Replaced ' + category + ' with ' + items.length + ' items');
+    } else {
+      toast('Invalid choice — nothing changed');
+      return;
     }
   } else {
     applyCSVImport(result, true);
-    toast(`Created "${category}" with ${items.length} items`);
+    toast('Created ' + category + ' with ' + items.length + ' items');
   }
 
   save(); rebuildCatSelects();
   document.getElementById('sel-cat').value = category;
   renderLibrary(); renderLB(); renderStats();
+}
+
+// Bulk add: match on title, update fields but preserve ELO/wins/losses.
+// New titles not found in existing items are added fresh at ELO 1000.
+// Schema directives in the CSV are ignored — existing schema is kept.
+function bulkAddCSVImport({ category, items }) {
+  // Build a lookup of existing items by lowercase title
+  const existing = {};
+  Object.values(state.items).forEach(item => {
+    if (item.cat === category) existing[item.title.toLowerCase()] = item;
+  });
+
+  let added = 0, updated = 0;
+  items.forEach(({ title, fields: fieldValues }) => {
+    const match = existing[title.toLowerCase()];
+    if (match) {
+      // Update field values, preserve ELO and record
+      match.fields = Object.assign(match.fields || {}, fieldValues);
+      updated++;
+    } else {
+      // New item — add fresh
+      const id = uid();
+      state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0 };
+      added++;
+    }
+  });
+  toast('Bulk add: ' + added + ' added, ' + updated + ' updated in ' + category);
 }
 
 function applyCSVImport({ category, primary, fields, items }, updateSchema) {

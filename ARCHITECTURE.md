@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.5.4` |
+| App version | `1.5.5` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -44,6 +44,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.5.2 | Field labels shown in library and leaderboard when 2+ fields populated; ELO hidden during ranking to prevent anchoring bias; fields rendered as stacked lines in VS and Podium cards; all non-ASCII bytes in script replaced with unicode escapes to prevent parse errors |
 | 1.5.3 | JSON import revised to prompt per category when conflicts exist — replace local data or skip; prevents duplicate items when importing overlapping datasets |
 | 1.5.4 | Export current category as CSV (library only, no rankings); output is compatible with CSV preload import format so recipients can start fresh |
+| 1.5.5 | CSV import into existing category now offers three options: bulk add (update fields on title matches, add new items, preserve all ELO/rankings), replace (wipe and start fresh), or cancel |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -183,7 +184,10 @@ Rules:
 - Each `#field` row takes a name and `required` or `optional`
 - The header row must include the primary label and all field names
 - Quoted fields with commas inside are supported
-- On import, if the category already exists the user is prompted to merge or replace
+- On import into an existing category, a prompt offers three options:
+  - **Bulk add** — matches on title (case-insensitive); updates field values on matches, preserves ELO and win/loss; adds new titles at ELO 1000. Use this to apply corrections or add new items without losing rankings.
+  - **Replace** — wipes all existing items and rankings for the category, then imports fresh
+  - **Cancel** — aborts with no changes
 
 The "Export category as CSV" button in the Data tab produces a file in this exact format — making it easy to share a clean library with another user who can import it and start ranking from scratch with no inherited ELO scores.
 
@@ -313,7 +317,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `importCSV(e)` | Reads a CSV file, delegates to `parsePreloadCSV()` and `resolveCSVImport()` |
 | `parsePreloadCSV(text)` | Parses `#directive` header rows and data rows; returns `{ok, category, primary, fields, items}` or `{ok:false, error}` |
 | `splitCSVLine(line)` | Splits a CSV line handling quoted fields with commas inside |
-| `resolveCSVImport(result)` | Handles conflict resolution when category already exists (merge or replace); calls `applyCSVImport()` |
+| `resolveCSVImport(result)` | Handles conflict resolution when category already exists — prompts for bulk add, replace, or cancel; dispatches to `bulkAddCSVImport()` or `applyCSVImport()` |
+| `bulkAddCSVImport(result)` | Matches incoming items to existing ones by title (case-insensitive); updates field values on matches, preserves ELO and win/loss record; adds unmatched items fresh at ELO 1000 |
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
 | `exportData()` | Wraps state with `_meta`, serializes to JSON, triggers download |
