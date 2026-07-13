@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.5.3` |
+| App version | `1.5.4` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -43,6 +43,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.5.1 | Bug fix: `migrateData()` was unconditionally running v1 migration on every load, corrupting `item.fields`; fixed to check for existing fields first; `_meta` now stamped after migration so future loads skip correctly |
 | 1.5.2 | Field labels shown in library and leaderboard when 2+ fields populated; ELO hidden during ranking to prevent anchoring bias; fields rendered as stacked lines in VS and Podium cards; all non-ASCII bytes in script replaced with unicode escapes to prevent parse errors |
 | 1.5.3 | JSON import revised to prompt per category when conflicts exist — replace local data or skip; prevents duplicate items when importing overlapping datasets |
+| 1.5.4 | Export current category as CSV (library only, no rankings); output is compatible with CSV preload import format so recipients can start fresh |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -184,6 +185,8 @@ Rules:
 - Quoted fields with commas inside are supported
 - On import, if the category already exists the user is prompted to merge or replace
 
+The "Export category as CSV" button in the Data tab produces a file in this exact format — making it easy to share a clean library with another user who can import it and start ranking from scratch with no inherited ELO scores.
+
 ### Persistence
 
 `localStorage` key: `ranker-v1`
@@ -314,6 +317,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
 | `exportData()` | Wraps state with `_meta`, serializes to JSON, triggers download |
+| `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
+| `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
 | `importData(e)` | Reads JSON file, runs `migrateData()`, then prompts per category to replace or skip when conflicts exist |
 | `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID |
@@ -416,6 +421,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | ELO hidden during ranking | Prevents anchoring bias during comparison | Always visible |
 | Stacked fields in rank cards | Readable with many attributes | Single line, cramped |
 | CSV preload format | Easy to author in a spreadsheet | JSON only |
+| CSV export (library only) | Share base data without rankings; recipient starts fresh | Export full JSON only |
 | Inline editing | Edit without leaving the library view | Separate edit screen |
 
 ---
