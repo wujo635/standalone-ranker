@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.5.5` |
+| App version | `1.6.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -45,6 +45,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.5.3 | JSON import revised to prompt per category when conflicts exist — replace local data or skip; prevents duplicate items when importing overlapping datasets |
 | 1.5.4 | Export current category as CSV (library only, no rankings); output is compatible with CSV preload import format so recipients can start fresh |
 | 1.5.5 | CSV import into existing category now offers three options: bulk add (update fields on title matches, add new items, preserve all ELO/rankings), replace (wipe and start fresh), or cancel |
+| 1.6.0 | Tier ranking mode: S/A/B/C/D tiers, configurable session size, prioritises unranked items, generates up to n*(n-1)/2 ELO updates per session; skip button hidden in tier mode |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -252,6 +253,14 @@ ELO scores and win/loss counts are intentionally hidden during ranking (both 1v1
 
 The mode toggle (1 vs 1 / Podium) is persistent within a session but not saved to localStorage — it resets to Standard on page reload. To persist it, add `rankMode` to the `state` object.
 
+### Tier
+
+3–30 items per session (user sets count each time). Items are assigned to S/A/B/C/D tiers by clicking coloured buttons. On confirm, every cross-tier pair generates an ELO update — items in the same tier are not compared. With 10 items this produces up to 45 ELO updates per session, making it the most efficient mode for large lists.
+
+Pool selection prioritises items with zero comparisons first, then items with the fewest total comparisons, with the remainder filled randomly. This ensures new items surface quickly.
+
+The skip button is hidden in Tier mode — session control is handled by the initial size prompt. Minimum 3 items required.
+
 ### Adding a new ranking mode
 
 1. Add a button to the `.mode-toggle` in the Rank view HTML
@@ -303,6 +312,11 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `loadPair()` | Picks 2 random items from the active rank category, renders VS cards |
 | `vsCard(winner, loser)` | Returns HTML string for one side of a comparison card |
 | `vote(wid, lid)` | Runs ELO update, saves, re-renders leaderboard, loads next pair |
+| `loadTier()` | Prompts for session size, assembles pool prioritising zero-comparison items, resets placements, renders |
+| `renderTier()` | Renders tier lanes (S/A/B/C/D) with placed chips and untiered item list with tier buttons |
+| `assignTier(itemId, tier)` | Places an item into a tier lane |
+| `removeTierPlacement(itemId)` | Returns an item from a tier lane back to untiered |
+| `submitTier()` | Derives all implied pairwise ELO updates from tier order (items in same tier not compared), saves, loads next session |
 | `loadPodium()` | Picks 3–5 random items for a podium round, resets placement state, renders |
 | `renderPodium()` | Renders podium items with place assignment buttons; shows Confirm once 3 placed |
 | `assignPlace(itemId, place)` | Assigns a podium position (1/2/3) to an item, displacing any previous occupant |
@@ -422,7 +436,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | Vanilla JS | No build step, easy to read and edit | React/Vue/Svelte |
 | JSON export | Human-readable, re-importable, version-stamped | CSV, binary |
 | Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
-| Multiple ranking modes | Different speeds suit different use cases | Single mode only |
+| Multiple ranking modes | 1v1, Podium, Tier — different speeds and batch sizes | Single mode only |
 | ELO hidden during ranking | Prevents anchoring bias during comparison | Always visible |
 | Stacked fields in rank cards | Readable with many attributes | Single line, cramped |
 | CSV preload format | Easy to author in a spreadsheet | JSON only |
