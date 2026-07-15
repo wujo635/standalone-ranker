@@ -929,13 +929,32 @@ function loadTier() {
     el.innerHTML = '<div class="empty">Add at least 3 items to use Tier mode.</div>';
     return;
   }
+  // Show start screen — no prompt until user clicks Start
+  const unranked = list.filter(i => i.wins + i.losses === 0).length;
+  const maxSize = Math.min(list.length, 30);
+  el.innerHTML =
+    '<div class="card" style="text-align:center;padding:1.5rem 1.25rem">' +
+    '<div style="font-size:16px;font-weight:600;margin-bottom:.4rem">Tier Session</div>' +
+    '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:1.25rem">' +
+    list.length + ' items in this category' +
+    (unranked ? ' · ' + unranked + ' unranked (will be prioritised)' : '') +
+    '</div>' +
+    '<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:1.25rem">' +
+    '<label style="font-size:13px;color:var(--text-secondary)">Items per session</label>' +
+    '<input type="number" id="tier-size-input" min="3" max="' + maxSize + '" value="' + Math.min(tierSessionSize, maxSize) + '" ' +
+    'style="width:70px;text-align:center;font-size:14px">' +
+    '</div>' +
+    '<button class="primary" onclick="startTierSession()">Start session</button>' +
+    '</div>';
+}
 
-  // Ask for session size
-  const input = prompt('How many items in this tier session? (3–' + Math.min(list.length, 30) + ')', String(Math.min(tierSessionSize, list.length)));
-  if (!input) return;
-  const n = parseInt(input, 10);
-  if (isNaN(n) || n < 3 || n > list.length) {
-    toast('Enter a number between 3 and ' + Math.min(list.length, 30));
+function startTierSession() {
+  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const input = document.getElementById('tier-size-input');
+  const n = parseInt(input ? input.value : tierSessionSize, 10);
+  const maxSize = Math.min(list.length, 30);
+  if (isNaN(n) || n < 3 || n > maxSize) {
+    toast('Enter a number between 3 and ' + maxSize);
     return;
   }
   tierSessionSize = n;
@@ -948,7 +967,6 @@ function loadTier() {
     if (bTotal === 0 && aTotal > 0) return 1;
     return aTotal - bTotal;
   });
-  // Take the top n/2 least-compared, rest random from remainder
   const priority = sorted.slice(0, Math.ceil(n / 2));
   const rest = sorted.slice(Math.ceil(n / 2)).sort(() => Math.random() - 0.5);
   const pool = [...priority, ...rest].slice(0, n).sort(() => Math.random() - 0.5);
