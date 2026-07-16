@@ -1011,19 +1011,25 @@ function startTierSession() {
   }
   tierSessionSize = n;
 
-  // Prioritise items with zero comparisons, then low comparison count
-  const sorted = [...list].sort((a, b) => {
-    const aTotal = a.wins + a.losses;
-    const bTotal = b.wins + b.losses;
-    if (aTotal === 0 && bTotal > 0) return -1;
-    if (bTotal === 0 && aTotal > 0) return 1;
-    if (smartPairMode) return a.elo - b.elo;
-    return aTotal - bTotal;
-  });
-  const priority = sorted.slice(0, Math.ceil(n / 2));
-  const rest = sorted.slice(Math.ceil(n / 2));
-  if (!smartPairMode) rest.sort(() => Math.random() - 0.5);
-  const pool = [...priority, ...rest].slice(0, n);
+  // Prioritise items with zero comparisons (unranked), regardless of pairing mode
+  const unranked = list.filter(i => i.wins + i.losses === 0);
+  const ranked = list.filter(i => i.wins + i.losses > 0);
+  
+  // If smart pairing, pick a random ELO window from ranked items
+  let priorityItems = unranked.slice(0, Math.ceil(n / 2));
+  let restItems = ranked;
+  
+  if (smartPairMode && ranked.length > 0) {
+    const eloSorted = [...ranked].sort((a, b) => a.elo - b.elo);
+    const windowSize = Math.max(Math.min(n + 2, eloSorted.length), n);
+    const maxStart = Math.max(0, eloSorted.length - windowSize);
+    const startIdx = Math.floor(Math.random() * (maxStart + 1));
+    restItems = eloSorted.slice(startIdx, startIdx + windowSize);
+  } else {
+    restItems = ranked.sort(() => Math.random() - 0.5);
+  }
+  
+  const pool = [...priorityItems, ...restItems].slice(0, n);
   if (!smartPairMode) pool.sort(() => Math.random() - 0.5);
 
   tierPool = pool;
