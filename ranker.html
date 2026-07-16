@@ -295,6 +295,9 @@
         <button class="mode-btn" id="mode-btn-podium" onclick="setRankMode('podium')">Podium</button>
         <button class="mode-btn" id="mode-btn-tier" onclick="setRankMode('tier')">Tier</button>
       </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);margin-left:auto;white-space:nowrap;cursor:pointer">
+        <input type="checkbox" id="smart-pair-toggle" onchange="toggleSmartPair(this.checked)" style="accent-color:var(--accent)"> Smart pairing
+      </label>
     </div>
     <div id="rank-pair"></div>
     <div class="skip-row" id="rank-skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
@@ -745,7 +748,8 @@ function renderLibrary() {
 }
 
 // --- Rank ---
-let rankMode = 'standard'; // 'standard' | 'podium'
+let rankMode = 'standard'; // 'standard' | 'podium' | 'tier'
+let smartPairMode = false; // Use ELO-proximity pairing instead of random
 let podiumPool = [];        // items in current podium round
 let podiumPlacements = {};  // { itemId: place (1|2|3) }
 
@@ -785,6 +789,13 @@ function setRankMode(mode) {
   initRankView();
 }
 
+function toggleSmartPair(enabled) {
+  smartPairMode = enabled;
+  if (rankMode === 'standard') loadPair();
+  else if (rankMode === 'podium') loadPodium();
+  else if (rankMode === 'tier') loadTier();
+}
+
 function initRankView() {
   if (rankMode === 'podium') loadPodium();
   else if (rankMode === 'tier') loadTier();
@@ -792,12 +803,26 @@ function initRankView() {
 }
 
 // --- Standard 1v1 ---
+function smartPair(list) {
+  if (list.length < 2) return null;
+  const sorted = [...list].sort((a, b) => a.elo - b.elo);
+  const idx = Math.floor(Math.random() * (sorted.length - 1));
+  return [sorted[idx], sorted[idx + 1]];
+}
+
+function randomPair(list) {
+  if (list.length < 2) return null;
+  const a = list[Math.floor(Math.random() * list.length)];
+  let b; do { b = list[Math.floor(Math.random() * list.length)]; } while (b.id === a.id);
+  return [a, b];
+}
+
 function loadPair() {
   const list = Object.values(state.items).filter(i => i.cat === rankCat());
   const el = document.getElementById('rank-pair');
   if (list.length < 2) { el.innerHTML = '<div class="empty">Add at least 2 items in this category to start ranking.</div>'; return; }
-  const a = list[Math.floor(Math.random() * list.length)];
-  let b; do { b = list[Math.floor(Math.random() * list.length)]; } while (b.id === a.id);
+  const pair = smartPairMode ? smartPair(list) : randomPair(list);
+  const [a, b] = pair;
   el.innerHTML = `
     <div class="vs-hint">Which do you prefer?</div>
     <div class="vs-wrap">${vsCard(a,b)}<div class="vs-sep">or</div>${vsCard(b,a)}</div>`;
@@ -839,8 +864,15 @@ function loadPodium() {
   }
   // Pool size: 5 if >=5 items, else list size (min 3)
   const poolSize = Math.min(5, list.length);
-  // Shuffle and take poolSize items
-  const shuffled = [...list].sort(() => Math.random() - 0.5).slice(0, poolSize);
+  // Select pool: if smart pairing, pick closest items by ELO, else random shuffle
+  let shuffled;
+  if (smartPairMode && list.length >= 5) {
+    const sorted = [...list].sort((a, b) => a.elo - b.elo);
+    const idx = Math.floor(Math.random() * (sorted.length - poolSize));
+    shuffled = sorted.slice(idx, idx + poolSize);
+  } else {
+    shuffled = [...list].sort(() => Math.random() - 0.5).slice(0, poolSize);
+  }
   podiumPool = shuffled;
   podiumPlacements = {};
   renderPodium();
@@ -965,11 +997,14 @@ function startTierSession() {
     const bTotal = b.wins + b.losses;
     if (aTotal === 0 && bTotal > 0) return -1;
     if (bTotal === 0 && aTotal > 0) return 1;
+    if (smartPairMode) return a.elo - b.elo;
     return aTotal - bTotal;
   });
   const priority = sorted.slice(0, Math.ceil(n / 2));
-  const rest = sorted.slice(Math.ceil(n / 2)).sort(() => Math.random() - 0.5);
-  const pool = [...priority, ...rest].slice(0, n).sort(() => Math.random() - 0.5);
+  const rest = sorted.slice(Math.ceil(n / 2));
+  if (!smartPairMode) rest.sort(() => Math.random() - 0.5);
+  const pool = [...priority, ...rest].slice(0, n);
+  if (!smartPairMode) pool.sort(() => Math.random() - 0.5);
 
   tierPool = pool;
   tierPlacements = {};
