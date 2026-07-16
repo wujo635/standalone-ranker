@@ -655,8 +655,8 @@ function addItem() {
   state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0 };
   document.getElementById('inp-primary').value = '';
   fields.forEach(f => { const el = document.getElementById('field-' + f.name); if (el) el.value = ''; });
-  document.getElementById('inp-primary').focus();
   save(); renderLibrary(); toast('Added: ' + t);
+  setTimeout(() => document.getElementById('inp-primary').focus(), 20);
 }
 
 function deleteItem(id) {
