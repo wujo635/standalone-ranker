@@ -14,7 +14,7 @@ Open `ranker.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.6.0` |
+| App version | `1.8.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -46,6 +46,8 @@ Follows semantic versioning: `major.minor.patch`
 | 1.5.4 | Export current category as CSV (library only, no rankings); output is compatible with CSV preload import format so recipients can start fresh |
 | 1.5.5 | CSV import into existing category now offers three options: bulk add (update fields on title matches, add new items, preserve all ELO/rankings), replace (wipe and start fresh), or cancel |
 | 1.6.0 | Tier ranking mode: S/A/B/C/D tiers, configurable session size, prioritises unranked items, generates up to n*(n-1)/2 ELO updates per session; skip button hidden in tier mode |
+| 1.7.0 | Smart pair selection: optional toggle in Rank tab, uses ELO-proximity instead of random pairing for all three ranking modes (VS, Podium, Tier); helps rankings converge faster with large pools |
+| 1.8.0 | Library search/filter: real-time search across titles and all field values, case-insensitive; useful for large categories (50+ items) |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -369,12 +371,28 @@ Also add to `BUILTIN_CATS` if you want it protected from deletion (currently all
 
 ### Add filtering or search to the library
 
-Add a search `<input>` above the list and filter `libItems()` before rendering:
+Real-time search across item titles and all field values. The Library view includes a search card with a text input that filters the list as you type.
 
+**Implementation**:
+- Search input with id `lib-search` in the library card
+- `renderLibrary()` reads the input value and applies case-insensitive substring matching
+- Searches both item `title` and all values in `item.fields`
+- Shows "No items match X" when no results
+- Search clears when switching categories (for UX clarity)
+
+**How it works**:
 ```js
-const q = document.getElementById('search').value.toLowerCase();
-const list = libItems().filter(i => i.title.toLowerCase().includes(q));
+const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
+if (query) {
+  list = list.filter(i => {
+    if (i.title.toLowerCase().includes(query)) return true;
+    const itemFields = i.fields || {};
+    return Object.values(itemFields).some(v => String(v).toLowerCase().includes(query));
+  });
+}
 ```
+
+**Use cases**: Find all movies by director, all books from a year, all restaurants of a cuisine type.
 
 ### Add notes/tags to items
 
@@ -393,15 +411,17 @@ The CSV parser reads `#category`, `#primary`, and `#field` directives. To add ne
 
 ### Smart pair selection
 
-Replace random pairing in `loadPair()` with ELO-proximity selection — pairs with similar scores are more informative:
+The Rank tab includes an optional **Smart pairing** toggle that changes how items are selected for comparison. When enabled, instead of picking two completely random items (which often results in lopsided matchups), smart pairing sorts items by ELO and picks two adjacent items — guaranteeing they have similar ratings and the outcome is uncertain.
 
-```js
-function smartPair(list) {
-  const sorted = [...list].sort((a, b) => a.elo - b.elo);
-  const idx = Math.floor(Math.random() * (sorted.length - 1));
-  return [sorted[idx], sorted[idx + 1]];
-}
-```
+**Implementation**: 
+- `smartPair(list)` — sorts by ELO, picks a random position idx, returns `[sorted[idx], sorted[idx+1]]`
+- `randomPair(list)` — original random logic, used when toggle is off
+- Applied to all three ranking modes: VS (`loadPair`), Podium (`loadPodium`), and Tier (`startTierSession`)
+- Toggle is stored in `smartPairMode` flag and synced via `toggleSmartPair(enabled)`
+
+**Effect**: Convergence is faster (fewer uninformative blowouts), especially with large item pools (50+). Random mode is still the default — smart pairing is opt-in.
+
+**Extending**: To make the toggle persist across sessions, add `smartPairMode` to the `state` object and sync it in `save()`/`load()`. Currently it resets to `false` on page reload.
 
 ### Switch from localStorage to a backend
 
@@ -432,7 +452,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | Single HTML file | Zero setup, trivially shareable | Multi-file with a bundler |
 | localStorage | No server needed | IndexedDB (larger data), backend |
 | ELO scoring | Well-understood, self-balancing | TrueSkill, simple win-count |
-| Random pair selection | Simple, covers the space over time | Smart pair selection (pick closest ELO) |
+| Random pair selection | Simple, covers the space over time | Smart pair selection (pick closest ELO) — now available as optional toggle |
 | Vanilla JS | No build step, easy to read and edit | React/Vue/Svelte |
 | JSON export | Human-readable, re-importable, version-stamped | CSV, binary |
 | Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
