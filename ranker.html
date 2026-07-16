@@ -368,7 +368,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -402,7 +402,8 @@ const BUILTIN_CATS = Object.keys(CAT_DEFAULTS);
 let state = {
   items: {},
   cats: [...BUILTIN_CATS],
-  schema: JSON.parse(JSON.stringify(CAT_DEFAULTS))
+  schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)),
+  settings: { smartPairMode: false }
 };
 let lbCat = BUILTIN_CATS[0];
 let pendingFields = [];
@@ -478,6 +479,11 @@ function load() {
       });
     }
   } catch(e) {}
+  // Restore settings
+  if (state.settings?.smartPairMode !== undefined) {
+    smartPairMode = state.settings.smartPairMode;
+    document.getElementById('smart-pair-toggle').checked = smartPairMode;
+  }
   rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats();
 }
 
@@ -791,6 +797,9 @@ function setRankMode(mode) {
 
 function toggleSmartPair(enabled) {
   smartPairMode = enabled;
+  state.settings = state.settings || {};
+  state.settings.smartPairMode = enabled;
+  save();
   if (rankMode === 'standard') loadPair();
   else if (rankMode === 'podium') loadPodium();
   else if (rankMode === 'tier') loadTier();
