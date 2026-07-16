@@ -203,12 +203,16 @@
     <div class="card">
       <div class="section-label">Category</div>
       <div class="row" style="margin-bottom:.85rem">
-        <select id="sel-cat" onchange="renderLibrary()"></select>
+        <select id="sel-cat" onchange="document.getElementById('lib-search').value='';renderLibrary()"></select>
         <button onclick="openNewCatModal()">+ New category</button>
         <button class="ghost btn-sm" onclick="openSchemaEditor()" title="Edit fields">⚙ Fields</button>
       </div>
       <div class="section-label">Add item</div>
       <div id="add-form"></div>
+    </div>
+    <div class="card">
+      <div class="section-label">Search</div>
+      <input type="text" id="lib-search" placeholder="Search by title or fields…" style="width:100%" onkeyup="renderLibrary()">
     </div>
     <div id="lib-list"></div>
   </div>
@@ -714,9 +718,27 @@ function renderLibrary() {
   if (expandedItemId && !libItems().find(i => i.id === expandedItemId)) expandedItemId = null;
   const cat = libCat();
   const fields = extraFields(cat);
-  const list = libItems().sort((a,b) => a.title.localeCompare(b.title));
+  let list = libItems().sort((a,b) => a.title.localeCompare(b.title));
+  
+  // Apply search filter
+  const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
+  if (query) {
+    list = list.filter(i => {
+      // Search in title
+      if (i.title.toLowerCase().includes(query)) return true;
+      // Search in fields
+      const itemFields = i.fields || {};
+      return Object.values(itemFields).some(v => String(v).toLowerCase().includes(query));
+    });
+  }
+  
   const el = document.getElementById('lib-list');
-  if (!list.length) { el.innerHTML = '<div class="empty">No items yet — add one above.</div>'; return; }
+  if (!list.length) { 
+    el.innerHTML = query 
+      ? `<div class="empty">No items match "${esc(query)}"</div>`
+      : '<div class="empty">No items yet — add one above.</div>'; 
+    return; 
+  }
   el.innerHTML = '<div class="card">' + list.map(i => {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
     const useLabels = populated.length >= 2;
