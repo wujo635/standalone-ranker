@@ -814,9 +814,20 @@ function initRankView() {
 // --- Standard 1v1 ---
 function smartPair(list) {
   if (list.length < 2) return null;
-  const sorted = [...list].sort((a, b) => a.elo - b.elo);
-  const idx = Math.floor(Math.random() * (sorted.length - 1));
-  return [sorted[idx], sorted[idx + 1]];
+  // Pick a random anchor item
+  const anchor = list[Math.floor(Math.random() * list.length)];
+  // Find the item closest to it in ELO (excluding itself)
+  let closest = null;
+  let minDiff = Infinity;
+  list.forEach(item => {
+    if (item.id === anchor.id) return;
+    const diff = Math.abs(item.elo - anchor.elo);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = item;
+    }
+  });
+  return closest ? [anchor, closest] : null;
 }
 
 function randomPair(list) {
