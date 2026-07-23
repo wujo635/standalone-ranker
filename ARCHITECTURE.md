@@ -101,8 +101,8 @@ Everything lives in one file: `index.html`
 ```
 index.html
 ├── <style>       CSS custom properties + all component styles (~130 lines)
-├── <body>        Six views: Library, New Category, Schema Editor, Rank, Leaderboard, Data
-└── <script>      All app logic (~620 lines of vanilla JS)
+├── <body>        Seven views: Library, New Category, Schema Editor, Rank, Leaderboard, History, Data
+└── <script>      All app logic (~750 lines of vanilla JS)
 ```
 
 ---
@@ -147,7 +147,20 @@ state = {
       wins:   number,   // times chosen in a comparison
       losses: number    // times not chosen in a comparison
     }
-  }
+  },
+
+  history: [            // array of recent rankings (max 50 entries), with undo support
+    {
+      type: 'standard'|'podium'|'tier',  // ranking mode
+      category: string,
+      timestamp: number,  // Date.now()
+      winner: { id, title, eloChange },  // for standard mode only
+      loser: { id, title, eloChange },   // for standard mode only
+      podium: [...],      // for podium mode: [{id, title, place}, ...]
+      tiers: [...],       // for tier mode: [S_items[], A_items[], B_items[], C_items[], D_items[]]
+      updates: [...]      // for podium/tier: [{wid, lid, wChange, lChange}, ...] for undo reversal
+    }
+  ]
 }
 ```
 
@@ -280,8 +293,9 @@ The skip button is hidden in Tier mode — session control is handled by the ini
 | Library | `view-library` | `renderLibrary()`, `renderAddForm()`, `addItem()` |
 | New Category | `view-newcat` | `openNewCatModal()`, `saveNewCat()`, `addNewCatField()` |
 | Schema Editor | `view-schema` | `openSchemaEditor()`, `saveSchema()`, `addSchemaField()` |
-| Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()` |
+| Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()`, `loadTier()`, `submitTier()` |
 | Leaderboard | `view-leaderboard` | `renderLB()` |
+| History | `view-history` | `renderHistory()`, `recordRanking()`, `undoRanking()` |
 | Data | `view-data` | `exportData()`, `importData()`, `renderStats()`, `clearAllData()` |
 
 Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav buttons and view divs. New Category and Schema Editor are modal-style views with no nav tab — they're entered programmatically and return to Library on save or cancel.
@@ -320,6 +334,9 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `assignTier(itemId, tier)` | Places an item into a tier lane |
 | `removeTierPlacement(itemId)` | Returns an item from a tier lane back to untiered |
 | `submitTier()` | Derives all implied pairwise ELO updates from tier order (items in same tier not compared), saves, loads next session |
+| `recordRanking(entry)` | Appends a ranking to `state.history` with timestamp; keeps only last 50 entries (called after each vote/podium/tier session) |
+| `undoRanking(idx)` | Reverses ELO, wins, losses for all items involved in a ranking; removes entry from history; refreshes leaderboard and history views |
+| `renderHistory()` | Renders the last 50 rankings in reverse chronological order with undo buttons for each |
 | `loadPodium()` | Picks 3–5 random items for a podium round, resets placement state, renders |
 | `renderPodium()` | Renders podium items with place assignment buttons; shows Confirm once 3 placed |
 | `assignPlace(itemId, place)` | Assigns a podium position (1/2/3) to an item, displacing any previous occupant |
@@ -463,6 +480,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | CSV preload format | Easy to author in a spreadsheet | JSON only |
 | CSV export (library only) | Share base data without rankings; recipient starts fresh | Export full JSON only |
 | Inline editing | Edit without leaving the library view | Separate edit screen |
+| History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
 
 ---
 
@@ -489,9 +507,9 @@ Browsers limit localStorage to ~5MB. At ~500 bytes per item that's roughly 10,00
 
 The current algorithm picks two random items independently. This has two side effects: the same pair can appear twice in a row, and it can select uninformative matchups (e.g. a 1400-ELO item vs a 600-ELO item whose outcome is already predictable). With small lists this is noticeable; with large lists it means thousands of votes are needed before rankings stabilize. See "Smart pair selection" above.
 
-### No undo
+### Undo for rankings
 
-Deletions are permanent (there's a confirm prompt, but no undo stack). Fix: soft-delete with a `deleted: true` flag and a "Recently deleted" view.
+Undo is now available for rankings (Standard/Podium/Tier) via the History tab — users can reverse any ranking and restore ELO scores. However, deletions of items are still permanent (there's a confirm prompt, but no undo stack). To enable undo for deletions: implement soft-delete with a `deleted: true` flag and a "Recently deleted" view.
 
 ### Single-user
 
