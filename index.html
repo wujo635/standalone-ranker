@@ -462,6 +462,10 @@ function migrateData(data) {
 
   // v < 4: add next migration block here when DATA_SCHEMA_VERSION becomes 4
 
+  // Ensure new optional fields exist (added in app updates, not schema migrations)
+  if (!data.history) data.history = [];
+  if (!data.settings) data.settings = { smartPairMode: false };
+
   // Always stamp _meta so future loads know the current schema version
   data._meta = {
     appVersion: APP_VERSION,
