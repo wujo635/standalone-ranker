@@ -6,7 +6,7 @@ A single-file web app for ranking anything using pairwise ELO comparisons. Categ
 
 ## Quick start
 
-Open `ranker.html` in any modern browser. That's it.
+Open `index.html` in any modern browser. That's it.
 
 ---
 
@@ -95,10 +95,10 @@ if (v < 4) {
 
 ## File structure
 
-Everything lives in one file: `ranker.html`
+Everything lives in one file: `index.html`
 
 ```
-ranker.html
+index.html
 ├── <style>       CSS custom properties + all component styles (~130 lines)
 ├── <body>        Six views: Library, New Category, Schema Editor, Rank, Leaderboard, Data
 └── <script>      All app logic (~620 lines of vanilla JS)
