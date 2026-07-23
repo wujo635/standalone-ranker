@@ -195,6 +195,7 @@
     <button class="active" onclick="switchTab('library')">Library</button>
     <button onclick="switchTab('rank')">Rank</button>
     <button onclick="switchTab('leaderboard')">Leaderboard</button>
+    <button onclick="switchTab('history')">History</button>
     <button onclick="switchTab('data')">Data</button>
   </nav>
 
@@ -313,6 +314,11 @@
     <div id="lb-list"></div>
   </div>
 
+  <!-- History -->
+  <div id="view-history" class="view">
+    <div id="history-list"></div>
+  </div>
+
   <!-- Data -->
   <div id="view-data" class="view">
     <div class="card">
@@ -372,7 +378,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -407,7 +413,8 @@ let state = {
   items: {},
   cats: [...BUILTIN_CATS],
   schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)),
-  settings: { smartPairMode: false }
+  settings: { smartPairMode: false },
+  history: []
 };
 let lbCat = BUILTIN_CATS[0];
 let pendingFields = [];
@@ -890,7 +897,16 @@ function eloUpdate(winner, loser) {
 }
 
 function vote(wid, lid) {
-  eloUpdate(state.items[wid], state.items[lid]);
+  const winner = state.items[wid];
+  const loser = state.items[lid];
+  const wEloB4 = winner.elo, lEloB4 = loser.elo;
+  eloUpdate(winner, loser);
+  recordRanking({
+    type: 'standard',
+    category: rankCat(),
+    winner: { id: wid, title: winner.title, eloChange: winner.elo - wEloB4 },
+    loser: { id: lid, title: loser.title, eloChange: loser.elo - lEloB4 }
+  });
   save(); renderLB(); renderStats(); loadPair(); toast('\u2713 Voted');
 }
 
@@ -976,15 +992,32 @@ function submitPodium() {
   const unranked = podiumPool.filter(i => !podiumPlacements[i.id]).map(i => i.id);
   const ordered = [...ranked, ...unranked]; // full order for ELO
   let updates = 0;
+  const historyUpdates = [];
   // Apply ELO for every pair where higher rank beats lower rank
   // Only apply when both are in the explicitly ranked top 3, OR winner is ranked and loser is unranked
   for (let i = 0; i < ranked.length; i++) {
     for (let j = i + 1; j < ordered.length; j++) {
       const winner = state.items[ordered[i]];
       const loser  = state.items[ordered[j]];
-      if (winner && loser) { eloUpdate(winner, loser); updates++; }
+      if (winner && loser) {
+        const wEloB4 = winner.elo, lEloB4 = loser.elo;
+        eloUpdate(winner, loser);
+        historyUpdates.push({ wid: ordered[i], lid: ordered[j], wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 });
+        updates++;
+      }
     }
   }
+  const podium = [1,2,3].map((p, idx) => {
+    const id = ranked[idx];
+    return { id, title: state.items[id]?.title || '', place: p };
+  });
+  recordRanking({
+    type: 'podium',
+    category: rankCat(),
+    podium: podium.filter(p => p.id),
+    unranked: unranked.map(id => state.items[id]?.title || ''),
+    updates: historyUpdates
+  });
   save(); renderLB(); renderStats();
   toast(`Podium confirmed — ${updates} ELO updates applied`);
   loadPodium();
@@ -1129,6 +1162,8 @@ function submitTier() {
   // For each pair where tierIndex(a) < tierIndex(b), a beats b
   const placed = tierPool.filter(i => tierPlacements[i.id]);
   let updates = 0;
+  const historyUpdates = [];
+  const tiers = [[], [], [], [], []]; // S, A, B, C, D
   for (let i = 0; i < placed.length; i++) {
     for (let j = i + 1; j < placed.length; j++) {
       const ti = TIERS.indexOf(tierPlacements[placed[i].id]);
@@ -1136,13 +1171,93 @@ function submitTier() {
       if (ti === tj) continue; // same tier — no comparison
       const winner = ti < tj ? placed[i] : placed[j];
       const loser  = ti < tj ? placed[j] : placed[i];
+      const wEloB4 = winner.elo, lEloB4 = loser.elo;
       eloUpdate(state.items[winner.id], state.items[loser.id]);
+      historyUpdates.push({ wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 });
       updates++;
     }
+    tiers[TIERS.indexOf(tierPlacements[placed[i].id])].push(placed[i].title);
   }
+  recordRanking({
+    type: 'tier',
+    category: rankCat(),
+    tiers: tiers,
+    updates: historyUpdates
+  });
   save(); renderLB(); renderStats();
   toast('Tier confirmed — ' + updates + ' ELO updates applied');
   loadTier();
+}
+
+// --- History ---
+function recordRanking(entry) {
+  state.history.push({ ...entry, timestamp: Date.now() });
+  // Keep only last 50 entries
+  if (state.history.length > 50) state.history.shift();
+}
+
+function undoRanking(idx) {
+  if (idx < 0 || idx >= state.history.length) return;
+  const entry = state.history[idx];
+  // Reverse ELO for all updates in this entry
+  if (entry.type === 'standard' && entry.winner && entry.loser) {
+    const w = state.items[entry.winner.id];
+    const l = state.items[entry.loser.id];
+    if (w && l) {
+      w.elo -= entry.winner.eloChange;
+      l.elo -= entry.loser.eloChange;
+      w.wins--; l.losses--;
+    }
+  } else if (entry.type === 'podium' && entry.updates) {
+    entry.updates.forEach(({ wid, lid, wChange, lChange }) => {
+      const w = state.items[wid];
+      const l = state.items[lid];
+      if (w && l) {
+        w.elo -= wChange;
+        l.elo -= lChange;
+        w.wins--; l.losses--;
+      }
+    });
+  } else if (entry.type === 'tier' && entry.updates) {
+    entry.updates.forEach(({ wid, lid, wChange, lChange }) => {
+      const w = state.items[wid];
+      const l = state.items[lid];
+      if (w && l) {
+        w.elo -= wChange;
+        l.elo -= lChange;
+        w.wins--; l.losses--;
+      }
+    });
+  }
+  state.history.splice(idx, 1);
+  save(); renderLB(); renderHistory();
+  toast('Undo complete');
+}
+
+function renderHistory() {
+  const el = document.getElementById('history-list');
+  if (!state.history.length) {
+    el.innerHTML = '<div class="empty">No rankings yet.</div>';
+    return;
+  }
+  const list = [...state.history].reverse(); // Show newest first
+  el.innerHTML = list.map((entry, revIdx) => {
+    const idx = state.history.length - 1 - revIdx;
+    const dt = new Date(entry.timestamp).toLocaleString();
+    let summary = '';
+    if (entry.type === 'standard') {
+      summary = `<strong>${esc(entry.winner.title)}</strong> beat <strong>${esc(entry.loser.title)}</strong>`;
+    } else if (entry.type === 'podium') {
+      summary = `Podium: ${entry.podium.map(p => `<strong>${esc(p.title)}</strong> (${p.place})`).join(', ')}`;
+    } else if (entry.type === 'tier') {
+      summary = `Tier session: ${entry.tiers.map((tier, t) => TIERS[t] + ' (' + tier.length + ')').filter(x => x.includes('(0)') === false).join(', ')}`;
+    }
+    return `<div class="card">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:.5rem">${dt} · ${esc(entry.category)}</div>
+      <div style="font-size:14px;margin-bottom:.75rem">${summary}</div>
+      <button class="danger btn-sm" onclick="undoRanking(${idx})">↶ Undo</button>
+    </div>`;
+  }).join('');
 }
 
 // --- Leaderboard ---
@@ -1487,7 +1602,7 @@ function importData(e) {
 
 function clearAllData() {
   if (!confirm('Clear everything? This cannot be undone.')) return;
-  state = { items: {}, cats: [...BUILTIN_CATS], schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)) };
+  state = { items: {}, cats: [...BUILTIN_CATS], schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)), settings: { smartPairMode: false }, history: [] };
   lbCat = BUILTIN_CATS[0];
   localStorage.removeItem('ranker-v1');
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
@@ -1496,11 +1611,12 @@ function clearAllData() {
 
 // --- Tabs ---
 function switchTab(id) {
-  const navIds = ['library','rank','leaderboard','data'];
+  const navIds = ['library','rank','leaderboard','history','data'];
   document.querySelectorAll('nav button').forEach((b,i) => b.classList.toggle('active', navIds[i]===id));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id==='view-'+id));
   if (id==='rank') initRankView();
   if (id==='leaderboard') renderLB();
+  if (id==='history') renderHistory();
   if (id==='data') renderStats();
 }
 

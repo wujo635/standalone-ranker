@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.8.0` |
+| App version | `1.9.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -48,6 +48,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.6.0 | Tier ranking mode: S/A/B/C/D tiers, configurable session size, prioritises unranked items, generates up to n*(n-1)/2 ELO updates per session; skip button hidden in tier mode |
 | 1.7.0 | Smart pair selection: optional toggle in Rank tab, uses ELO-proximity instead of random pairing for all three ranking modes (VS, Podium, Tier); helps rankings converge faster with large pools |
 | 1.8.0 | Library search/filter: real-time search across titles and all field values, case-insensitive; useful for large categories (50+ items) |
+| 1.9.0 | History tab: view the last 50 rankings across all modes with timestamps and categories; undo button to reverse any ranking and restore ELO scores |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
