@@ -204,7 +204,7 @@
     <div class="card">
       <div class="section-label">Category</div>
       <div class="row" style="margin-bottom:.85rem">
-        <select id="sel-cat" onchange="document.getElementById('lib-search').value='';renderLibrary()"></select>
+        <select id="sel-cat" onchange="document.getElementById('lib-search').value='';resetFilters(libCat());renderLibrary()"></select>
         <button onclick="openNewCatModal()">+ New category</button>
         <button class="ghost btn-sm" onclick="openSchemaEditor()" title="Edit fields">⚙ Fields</button>
       </div>
@@ -214,6 +214,9 @@
     <div class="card">
       <div class="section-label">Search</div>
       <input type="text" id="lib-search" placeholder="Search by title or fields…" style="width:100%" onkeyup="renderLibrary()">
+    </div>
+    <div class="card">
+      <div id="lib-filters"></div>
     </div>
     <div id="lib-list"></div>
   </div>
@@ -293,7 +296,7 @@
     <div class="row" style="margin-bottom:1rem;flex-wrap:wrap;gap:10px">
       <div class="row" style="gap:8px">
         <div class="section-label" style="margin-bottom:0">Category</div>
-        <select id="rank-cat" onchange="initRankView()"></select>
+        <select id="rank-cat" onchange="resetFilters(rankCat());initRankView()"></select>
       </div>
       <div class="mode-toggle">
         <button class="mode-btn active" id="mode-btn-standard" onclick="setRankMode('standard')">1 vs 1</button>
@@ -378,7 +381,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -518,6 +521,197 @@ function schemaFor(cat) {
 }
 function primaryLabel(cat) { return schemaFor(cat).primary || 'Name'; }
 function extraFields(cat) { return schemaFor(cat).fields || []; }
+
+// --- Filtering ---
+let filterState = {}; // { [category]: { [fieldName]: { type, values, min, max, equals } } }
+let fieldTypeCache = {}; // { "cat:fieldName": "number" | "string" }
+
+function inferFieldType(cat, fieldName) {
+  const cacheKey = `${cat}:${fieldName}`;
+  if (fieldTypeCache[cacheKey]) return fieldTypeCache[cacheKey];
+
+  const items = Object.values(state.items).filter(i => i.cat === cat);
+  let numericCount = 0, totalCount = 0;
+
+  // Sample up to 20 non-empty values
+  for (const item of items) {
+    if (totalCount >= 20) break;
+    const val = (item.fields || {})[fieldName];
+    if (val === undefined || val === '') continue;
+    totalCount++;
+    if (!isNaN(parseFloat(val))) numericCount++;
+  }
+
+  // If >= 80% numeric, classify as number
+  const type = totalCount > 0 && numericCount / totalCount >= 0.8 ? 'number' : 'string';
+  fieldTypeCache[cacheKey] = type;
+  return type;
+}
+
+function getFilteredItems(cat, items, filters) {
+  if (!filters || !filters[cat]) return items;
+  const catFilters = filters[cat];
+
+  return items.filter(item => {
+    for (const [fieldName, filter] of Object.entries(catFilters)) {
+      if (!filter || !filter.type) continue;
+
+      const val = (item.fields || {})[fieldName];
+      if (val === undefined || val === '') {
+        // If no value and filter is active, exclude this item
+        if (filter.type === 'number' && (filter.min !== undefined || filter.max !== undefined || filter.equals !== undefined)) {
+          return false;
+        }
+        if (filter.type === 'string' && filter.values && filter.values.length > 0) {
+          return false;
+        }
+      }
+
+      if (filter.type === 'number') {
+        const num = parseFloat(val);
+        if (isNaN(num)) return false; // Can't parse as number, exclude
+        if (filter.min !== undefined && num < filter.min) return false;
+        if (filter.max !== undefined && num > filter.max) return false;
+        if (filter.equals !== undefined && num !== filter.equals) return false;
+      } else if (filter.type === 'string' && filter.values && filter.values.length > 0) {
+        if (!filter.values.includes(String(val))) return false;
+      }
+    }
+    return true;
+  });
+}
+
+function resetFilters(cat) {
+  if (filterState[cat]) {
+    delete filterState[cat];
+    renderFilterUI(cat);
+  }
+}
+
+function renderFilterUI(cat) {
+  const fields = extraFields(cat);
+  const el = document.getElementById('lib-filters');
+  if (!el) return;
+
+  if (!fields.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0">No extra fields to filter.</div>';
+    return;
+  }
+
+  const catFilters = filterState[cat] || {};
+  const activeCount = Object.values(catFilters).filter(f => f && (
+    (f.type === 'number' && (f.min !== undefined || f.max !== undefined || f.equals !== undefined)) ||
+    (f.type === 'string' && f.values && f.values.length > 0)
+  )).length;
+
+  let html = '<div style="margin-bottom:.75rem">';
+  html += '<div class="section-label" style="margin-bottom:.5rem">Filter' + (activeCount ? ` (${activeCount} active)` : '') + '</div>';
+
+  for (const field of fields) {
+    const type = inferFieldType(cat, field.name);
+    const filter = catFilters[field.name] || { type };
+
+    if (!filterState[cat]) filterState[cat] = {};
+    if (!filterState[cat][field.name]) filterState[cat][field.name] = { type };
+
+    if (type === 'number') {
+      const minVal = filter.min !== undefined ? filter.min : '';
+      const maxVal = filter.max !== undefined ? filter.max : '';
+      const eqVal = filter.equals !== undefined ? filter.equals : '';
+      html += `
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:.5rem;flex-wrap:wrap">
+          <label style="font-size:13px;color:var(--text-secondary);min-width:80px">${esc(field.name)}</label>
+          <input type="number" placeholder="min" value="${minVal}"
+            data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="min"
+            onchange="updateFilter(this)" style="width:70px;font-size:13px">
+          <input type="number" placeholder="max" value="${maxVal}"
+            data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="max"
+            onchange="updateFilter(this)" style="width:70px;font-size:13px">
+          <input type="number" placeholder="=" value="${eqVal}"
+            data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="equals"
+            onchange="updateFilter(this)" style="width:70px;font-size:13px" title="Exact match">
+        </div>`;
+    } else {
+      // Categorical: get unique values
+      const items = Object.values(state.items).filter(i => i.cat === cat);
+      const uniqueVals = [...new Set(items.map(i => (i.fields||{})[field.name]).filter(v => v !== undefined && v !== ''))];
+      uniqueVals.sort();
+      const selectedVals = filter.values || [];
+
+      html += `<div style="margin-bottom:.75rem">
+        <div style="font-size:13px;color:var(--text-secondary);margin-bottom:.4rem">${esc(field.name)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">`;
+      for (const val of uniqueVals) {
+        const isChecked = selectedVals.includes(String(val));
+        html += `<label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;padding:4px 8px;background:var(--surface-2);border-radius:6px;border:1px solid ${isChecked ? 'var(--accent-border)' : 'var(--border)'}">
+          <input type="checkbox" ${isChecked ? 'checked' : ''}
+            data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-value="${esc(String(val))}"
+            onchange="updateFilter(this)" style="accent-color:var(--accent)">
+          ${esc(String(val))}
+        </label>`;
+      }
+      html += '</div></div>';
+    }
+  }
+
+  if (activeCount > 0) {
+    html += `<button class="ghost btn-sm" onclick="clearAllFilters('${esc(cat)}')">Clear all filters</button>`;
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function updateFilter(el) {
+  const cat = el.dataset.cat;
+  const field = el.dataset.field;
+
+  if (!filterState[cat]) filterState[cat] = {};
+  if (!filterState[cat][field]) filterState[cat][field] = { type: inferFieldType(cat, field) };
+
+  if (el.type === 'number') {
+    const op = el.dataset.op;
+    const val = el.value.trim();
+    if (val === '') {
+      delete filterState[cat][field][op];
+    } else {
+      filterState[cat][field][op] = parseFloat(val);
+    }
+  } else if (el.type === 'checkbox') {
+    const val = el.dataset.value;
+    if (!filterState[cat][field].values) filterState[cat][field].values = [];
+    if (el.checked) {
+      if (!filterState[cat][field].values.includes(val)) {
+        filterState[cat][field].values.push(val);
+      }
+    } else {
+      filterState[cat][field].values = filterState[cat][field].values.filter(v => v !== val);
+    }
+  }
+
+  // Re-render filter UI to show active count, and re-render library/leaderboard
+  renderFilterUI(cat);
+  if (document.getElementById('view-library').classList.contains('active')) {
+    renderLibrary();
+    renderLB();
+  }
+  if (document.getElementById('view-rank').classList.contains('active')) {
+    initRankView();
+    renderLB();
+  }
+}
+
+function clearAllFilters(cat) {
+  resetFilters(cat);
+  if (document.getElementById('view-library').classList.contains('active')) {
+    renderLibrary();
+    renderLB();
+  }
+  if (document.getElementById('view-rank').classList.contains('active')) {
+    initRankView();
+    renderLB();
+  }
+}
 
 // --- Category selects ---
 function rebuildCatSelects() {
@@ -730,7 +924,7 @@ function renderLibrary() {
   const cat = libCat();
   const fields = extraFields(cat);
   let list = libItems().sort((a,b) => a.title.localeCompare(b.title));
-  
+
   // Apply search filter
   const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
   if (query) {
@@ -742,13 +936,19 @@ function renderLibrary() {
       return Object.values(itemFields).some(v => String(v).toLowerCase().includes(query));
     });
   }
-  
+
+  // Apply field filters
+  list = getFilteredItems(cat, list, filterState);
+
+  // Render filter UI
+  renderFilterUI(cat);
+
   const el = document.getElementById('lib-list');
-  if (!list.length) { 
-    el.innerHTML = query 
+  if (!list.length) {
+    el.innerHTML = query
       ? `<div class="empty">No items match "${esc(query)}"</div>`
-      : '<div class="empty">No items yet — add one above.</div>'; 
-    return; 
+      : '<div class="empty">No items yet — add one above.</div>';
+    return;
   }
   el.innerHTML = '<div class="card">' + list.map(i => {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
@@ -871,7 +1071,9 @@ function randomPair(list) {
 }
 
 function loadPair() {
-  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const cat = rankCat();
+  let list = Object.values(state.items).filter(i => i.cat === cat);
+  list = getFilteredItems(cat, list, filterState);
   const el = document.getElementById('rank-pair');
   if (list.length < 2) { el.innerHTML = '<div class="empty">Add at least 2 items in this category to start ranking.</div>'; return; }
   const pair = smartPairMode ? smartPair(list) : randomPair(list);
@@ -919,7 +1121,9 @@ function vote(wid, lid) {
 // Placing item at rank r beats all items ranked below it -> n*(n-1)/2 ELO updates.
 
 function loadPodium() {
-  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const cat = rankCat();
+  let list = Object.values(state.items).filter(i => i.cat === cat);
+  list = getFilteredItems(cat, list, filterState);
   const el = document.getElementById('rank-pair');
   if (list.length < 3) {
     el.innerHTML = '<div class="empty">Add at least 3 items to use Podium mode.</div>'; return;
@@ -1035,7 +1239,9 @@ let tierSessionSize = 10;
 
 function loadTier() {
   const el = document.getElementById('rank-pair');
-  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const cat = rankCat();
+  let list = Object.values(state.items).filter(i => i.cat === cat);
+  list = getFilteredItems(cat, list, filterState);
   if (list.length < 3) {
     el.innerHTML = '<div class="empty">Add at least 3 items to use Tier mode.</div>';
     return;
@@ -1060,7 +1266,9 @@ function loadTier() {
 }
 
 function startTierSession() {
-  const list = Object.values(state.items).filter(i => i.cat === rankCat());
+  const cat = rankCat();
+  let list = Object.values(state.items).filter(i => i.cat === cat);
+  list = getFilteredItems(cat, list, filterState);
   const input = document.getElementById('tier-size-input');
   const n = parseInt(input ? input.value : tierSessionSize, 10);
   const maxSize = Math.min(list.length, 30);
@@ -1270,7 +1478,9 @@ function renderLB() {
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
     `<button class="pill${c===lbCat?' active':''}" onclick="lbCat='${esc(c)}';renderLB()">${esc(c)}</button>`).join('');
-  const list = Object.values(state.items).filter(i => i.cat === lbCat).sort((a,b) => b.elo - a.elo);
+  let list = Object.values(state.items).filter(i => i.cat === lbCat);
+  list = getFilteredItems(lbCat, list, filterState);
+  list = list.sort((a,b) => b.elo - a.elo);
   const el = document.getElementById('lb-list');
   if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
   const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
