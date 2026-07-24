@@ -307,6 +307,9 @@
         <input type="checkbox" id="smart-pair-toggle" onchange="toggleSmartPair(this.checked)" style="accent-color:var(--accent)"> Smart pairing
       </label>
     </div>
+    <div class="card">
+      <div id="rank-filters"></div>
+    </div>
     <div id="rank-pair"></div>
     <div class="skip-row" id="rank-skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
   </div>
@@ -590,8 +593,9 @@ function resetFilters(cat) {
 
 function renderFilterUI(cat) {
   const fields = extraFields(cat);
-  const el = document.getElementById('lib-filters');
-  if (!el) return;
+  const libEl = document.getElementById('lib-filters');
+  const rankEl = document.getElementById('rank-filters');
+  if (!libEl && !rankEl) return;
 
   if (!fields.length) {
     el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0">No extra fields to filter.</div>';
@@ -659,7 +663,8 @@ function renderFilterUI(cat) {
   }
 
   html += '</div>';
-  el.innerHTML = html;
+  if (libEl) libEl.innerHTML = html;
+  if (rankEl) rankEl.innerHTML = html;
 }
 
 function updateFilter(el) {
@@ -1039,6 +1044,7 @@ function toggleSmartPair(enabled) {
 }
 
 function initRankView() {
+  renderFilterUI(rankCat());
   if (rankMode === 'podium') loadPodium();
   else if (rankMode === 'tier') loadTier();
   else loadPair();
