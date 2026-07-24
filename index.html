@@ -689,8 +689,18 @@ function renderFilterUI(cat) {
 
   html += '</div>'; // Close filter-fields div
   html += '</div>'; // Close outer wrapper div
-  if (libEl) libEl.innerHTML = html;
-  if (rankEl) rankEl.innerHTML = html;
+
+  // Render with lib-specific ID to avoid conflicts
+  if (libEl) {
+    const libHtml = html.replace(new RegExp(filterId, 'g'), filterId + '-lib');
+    libEl.innerHTML = libHtml;
+  }
+
+  // Render with rank-specific ID to avoid conflicts
+  if (rankEl) {
+    const rankHtml = html.replace(new RegExp(filterId, 'g'), filterId + '-rank');
+    rankEl.innerHTML = rankHtml;
+  }
 }
 
 function updateFilter(el) {
