@@ -629,6 +629,9 @@ function renderFilterUI(cat) {
   }
 
   for (const field of fields) {
+    // Skip fields marked as non-filterable
+    if (field.filterable === false) continue;
+
     const type = inferFieldType(cat, field.name);
     const filter = catFilters[field.name] || { type };
 
@@ -840,18 +843,22 @@ function renderEditingFields() {
       <button class="ghost btn-sm" onclick="toggleRequired(${i})" title="Toggle required/optional">
         <span class="field-badge ${f.required?'badge-req':'badge-opt'}">${f.required?'required':'optional'}</span>
       </button>
+      <button class="ghost btn-sm" onclick="toggleFilterable(${i})" title="Toggle in filter UI" style="font-size:11px;padding:4px 6px">
+        ${f.filterable !== false ? '\ud83d\udd0d' : '\u2205'}
+      </button>
       <button class="ghost btn-sm" onclick="removeEditingField(${i})">\u2715</button>
     </div>`).join('');
 }
 
 function toggleRequired(i) { editingFields[i].required = !editingFields[i].required; renderEditingFields(); }
+function toggleFilterable(i) { editingFields[i].filterable = editingFields[i].filterable !== false ? false : true; renderEditingFields(); }
 function removeEditingField(i) { editingFields.splice(i,1); renderEditingFields(); }
 
 function addSchemaField() {
   const name = document.getElementById('schema-field-inp').value.trim();
   if (!name) return;
   if (editingFields.find(f => f.name.toLowerCase() === name.toLowerCase())) { toast('Field already exists'); return; }
-  editingFields.push({ name, required: document.getElementById('schema-field-req').checked });
+  editingFields.push({ name, required: document.getElementById('schema-field-req').checked, filterable: true });
   document.getElementById('schema-field-inp').value = '';
   document.getElementById('schema-field-req').checked = false;
   renderEditingFields();
