@@ -386,7 +386,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.12.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -626,8 +626,18 @@ function renderFilterUI(cat) {
   // Initialize collapse state (default to collapsed)
   if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
   const isCollapsed = filterCollapsed[cat];
-  const filterId = 'filter-fields-' + esc(cat);
 
+  // Field cards are identical for both containers, so build them once.
+  const fieldsHtml = buildFilterFieldCards(cat, fields, catFilters);
+
+  // Each container gets its own directly-embedded id — no shared HTML
+  // string and no text-replace, so there's no risk of a field value that
+  // happens to match the id pattern getting corrupted.
+  if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, activeCount, fieldsHtml);
+  if (rankEl) rankEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-rank', isCollapsed, activeCount, fieldsHtml);
+}
+
+function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
   let html = '<div style="display:flex;flex-direction:column;gap:1rem">';
   html += '<div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="filterCollapsed[\'' + esc(cat) + '\'] = !filterCollapsed[\'' + esc(cat) + '\'];document.getElementById(\'' + filterId + '\').style.display = filterCollapsed[\'' + esc(cat) + '\'] ? \'none\' : \'flex\';">';
   html += '<div class="section-label" style="margin-bottom:0">Filter' + (activeCount ? ` <span style="color:var(--accent);font-weight:600">${activeCount}</span>` : '') + '</div>';
@@ -635,11 +645,17 @@ function renderFilterUI(cat) {
   html += '</div>';
 
   html += '<div id="' + filterId + '" style="display:' + (isCollapsed ? 'none' : 'flex') + ';flex-direction:column;gap:1rem">';
-
   if (activeCount > 0) {
     html += '<button class="ghost btn-sm" style="font-size:12px;color:var(--text-muted)" onclick="event.stopPropagation();clearAllFilters(\'' + esc(cat) + '\')">✕ Clear</button>';
   }
+  html += fieldsHtml;
+  html += '</div>'; // Close filter-fields div
+  html += '</div>'; // Close outer wrapper div
+  return html;
+}
 
+function buildFilterFieldCards(cat, fields, catFilters) {
+  let html = '';
   for (const field of fields) {
     // Skip fields marked as non-filterable
     if (field.filterable === false) continue;
@@ -654,7 +670,6 @@ function renderFilterUI(cat) {
       const minVal = filter.min !== undefined ? filter.min : '';
       const maxVal = filter.max !== undefined ? filter.max : '';
       const eqVal = filter.equals !== undefined ? filter.equals : '';
-      const hasNumFilter = minVal !== '' || maxVal !== '' || eqVal !== '';
 
       html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem;transition:all 0.2s">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
@@ -717,21 +732,7 @@ function renderFilterUI(cat) {
       html += '</div></div>';
     }
   }
-
-  html += '</div>'; // Close filter-fields div
-  html += '</div>'; // Close outer wrapper div
-
-  // Render with lib-specific ID to avoid conflicts
-  if (libEl) {
-    const libHtml = html.replace(new RegExp(filterId, 'g'), filterId + '-lib');
-    libEl.innerHTML = libHtml;
-  }
-
-  // Render with rank-specific ID to avoid conflicts
-  if (rankEl) {
-    const rankHtml = html.replace(new RegExp(filterId, 'g'), filterId + '-rank');
-    rankEl.innerHTML = rankHtml;
-  }
+  return html;
 }
 
 function updateFilter(el) {

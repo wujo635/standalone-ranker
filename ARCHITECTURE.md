@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.12.1` |
+| App version | `1.12.2` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -54,6 +54,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.11.1 | Bug fix: Library item rows overflowed horizontally when titles or field values were long, because fields were joined onto one `white-space: nowrap` line; fields now stack one per line and the row/title wrap and shrink instead of forcing width |
 | 1.12.0 | Field names bolded (`itemMeta()`) when shown with labels, in Library rows, Leaderboard, and Rank cards (VS/Podium) |
 | 1.12.1 | Bug fix: Podium and Tier cards had the same overflow risk Library had in 1.11.1 (`.podium-info`/`.tier-item-info` missing `min-width: 0` and word-break) — fixed the same way. Internal refactor (no behavior change): `renderLibrary()` now calls `itemMeta()` instead of reimplementing it; added `itemsForCat()` and `deleteItemsInCat()` helpers to remove duplicated category-filtering and category-deletion logic; added `applyEloUpdate()` to remove duplicated before/after ELO delta tracking in `vote()`, `submitPodium()`, `submitTier()`; merged the identical podium/tier branches in `undoRanking()`; removed unused `TIER_COLOR` |
+| 1.12.2 | Internal refactor (no behavior change): `renderFilterUI()` no longer builds one HTML string and mutates it with `.replace(new RegExp(...))` to produce the lib/rank id variants — it now builds the field cards once via `buildFilterFieldCards()` and wraps them per-container via `buildFilterPanel(cat, filterId, ...)` with the id passed in directly. Removes a latent bug: the old regex replace ran globally against the *entire rendered HTML*, so a field value that happened to contain the substring `filter-fields-<category>` would have been silently corrupted |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -432,7 +433,9 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 **Key functions**:
 - `inferFieldType(cat, fieldName)` — scans up to 20 non-empty values; if ≥80% are numeric, classifies as `"number"`, else `"string"` (categorical)
 - `getFilteredItems(cat, items, filters)` — applies all active filters with AND logic; numeric fields check `min`/`max`/`equals`; categorical fields check multi-select values; `nonBlank` (if set, on either field type) excludes items where the field is `undefined` or `""`, independent of the type-specific condition
-- `renderFilterUI(cat)` — generates filter form based on inferred field types; skips fields where `filterable === false`; numeric fields show min/max/exact inputs plus a "Has value" checkbox; categorical fields show checkboxes for all unique values plus the same "Has value" checkbox; renders to both `lib-filters` and `rank-filters` containers with unique IDs to avoid conflicts
+- `renderFilterUI(cat)` — builds the field cards once via `buildFilterFieldCards(cat, fields, catFilters)`, then renders them into both `lib-filters` and `rank-filters` via `buildFilterPanel(cat, filterId, ...)`, passing each container its own directly-embedded id (`filter-fields-<cat>-lib` / `-rank`) so the two copies never share DOM ids
+- `buildFilterFieldCards(cat, fields, catFilters)` — generates the per-field filter cards; skips fields where `filterable === false`; numeric fields show min/max/exact inputs plus a "Has value" checkbox; categorical fields show checkboxes for all unique values plus the same "Has value" checkbox
+- `buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml)` — wraps a set of field cards with the collapsible header (chevron, active-filter count, "✕ Clear" button) and the collapse-toggle target div
 - `updateFilter(el)` — onclick handler for filter inputs; distinguishes the "Has value" checkbox (`data-op="nonblank"`) from categorical value checkboxes (`data-value`) via the `data-op` attribute; updates `filterState[cat]` and re-renders affected views
 - `resetFilters(cat)` — clears filters for a category and re-renders filter UI
 - `clearAllFilters(cat)` — clears all active filters when user clicks "✕ Clear" button
