@@ -646,24 +646,24 @@ function renderFilterUI(cat) {
 
       html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem;transition:all 0.2s">
         <div style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:0.6rem;text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <div style="display:flex;align-items:center;gap:4px;flex:1;min-width:100px">
-            <span style="font-size:11px;color:var(--text-muted);min-width:18px">≥</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">
+          <div style="display:flex;align-items:center;gap:4px;min-width:0">
+            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">≥</span>
             <input type="number" placeholder="min" value="${minVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="min"
-              onchange="updateFilter(this)" style="flex:1;padding:6px 8px;font-size:13px;border-radius:4px">
+              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px">
           </div>
-          <div style="display:flex;align-items:center;gap:4px;flex:1;min-width:100px">
-            <span style="font-size:11px;color:var(--text-muted);min-width:18px">≤</span>
+          <div style="display:flex;align-items:center;gap:4px;min-width:0">
+            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">≤</span>
             <input type="number" placeholder="max" value="${maxVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="max"
-              onchange="updateFilter(this)" style="flex:1;padding:6px 8px;font-size:13px;border-radius:4px">
+              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px">
           </div>
-          <div style="display:flex;align-items:center;gap:4px;flex:0.8;min-width:70px">
-            <span style="font-size:11px;color:var(--text-muted);min-width:18px">=</span>
+          <div style="display:flex;align-items:center;gap:4px;min-width:0">
+            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">=</span>
             <input type="number" placeholder="exact" value="${eqVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="equals"
-              onchange="updateFilter(this)" style="flex:1;padding:6px 8px;font-size:13px;border-radius:4px" title="Exact match">
+              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px" title="Exact match">
           </div>
         </div>
       </div>`;
