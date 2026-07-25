@@ -14,62 +14,21 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.12.0` |
+| App version | `1.12.2` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
 Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage.
 
----
-
-## Version history
-
-### App version (APP_VERSION)
-
-Follows semantic versioning: `major.minor.patch`
-
-- **major** — breaking change that requires a data migration
-- **minor** — new feature, backward compatible
-- **patch** — bug fix
-
-| Version | Changes |
-|---|---|
-| 1.0.0 | Initial release as "Media Ranker"; hardcoded Year field, no schema |
-| 1.1.0 | Schema system introduced (array per category); custom fields, required/optional |
-| 1.2.0 | App renamed to "Ranker"; primary field label per category; versioning added |
-| 1.3.0 | Inline item editing in library; Podium ranking mode; rank mode toggle |
-| 1.4.0 | `migrateData()` function added; migration scaffolding wired into `load()` and `importData()`; version history comments added to script |
-| 1.5.0 | CSV preload import with schema parsing and per-category conflict resolution (merge or replace) |
-| 1.5.1 | Bug fix: `migrateData()` was unconditionally running v1 migration on every load, corrupting `item.fields`; fixed to check for existing fields first; `_meta` now stamped after migration so future loads skip correctly |
-| 1.5.2 | Field labels shown in library and leaderboard when 2+ fields populated; ELO hidden during ranking to prevent anchoring bias; fields rendered as stacked lines in VS and Podium cards; all non-ASCII bytes in script replaced with unicode escapes to prevent parse errors |
-| 1.5.3 | JSON import revised to prompt per category when conflicts exist — replace local data or skip; prevents duplicate items when importing overlapping datasets |
-| 1.5.4 | Export current category as CSV (library only, no rankings); output is compatible with CSV preload import format so recipients can start fresh |
-| 1.5.5 | CSV import into existing category now offers three options: bulk add (update fields on title matches, add new items, preserve all ELO/rankings), replace (wipe and start fresh), or cancel |
-| 1.6.0 | Tier ranking mode: S/A/B/C/D tiers, configurable session size, prioritises unranked items, generates up to n*(n-1)/2 ELO updates per session; skip button hidden in tier mode |
-| 1.7.0 | Smart pair selection: optional toggle in Rank tab, uses ELO-proximity instead of random pairing for all three ranking modes (VS, Podium, Tier); helps rankings converge faster with large pools |
-| 1.8.0 | Library search/filter: real-time search across titles and all field values, case-insensitive; useful for large categories (50+ items) |
-| 1.9.0 | History tab: view the last 50 rankings across all modes with timestamps and categories; undo button to reverse any ranking and restore ELO scores |
-| 1.10.0 | Field-based filtering: filter items by extra fields with smart type inference (numeric ranges with >=, <=, = operators; categorical with multi-select checkboxes); applies to Library view and all ranking modes; collapsible filter section to save screen space |
-| 1.11.0 | Filter fields by "Has value" (non-blank) regardless of type; fixed latent bug where numeric fields with a blank value were always excluded from filtered views even with no active filter |
-| 1.11.1 | Bug fix: Library item rows overflowed horizontally when titles or field values were long, because fields were joined onto one `white-space: nowrap` line; fields now stack one per line and the row/title wrap and shrink instead of forcing width |
-| 1.12.0 | Field names bolded (`itemMeta()`) when shown with labels, in Library rows, Leaderboard, and Rank cards (VS/Podium) |
-
-### Data schema version (DATA_SCHEMA_VERSION)
-
-Incremented only when the shape of `state` changes in a way that requires migration logic.
-
-| Version | Shape |
-|---|---|
-| 1 | Items had a hardcoded `year` string field. No `schema` object. |
-| 2 | `schema` introduced as a plain array of `{name, required}` per category. No `primary` label. |
-| 3 | `schema[cat]` is `{ primary: string, fields: [{name, required}] }`. `_meta` block added to exports. |
+Full release history for both version numbers lives in [CHANGELOG.md](CHANGELOG.md), kept separate from this doc since it only ever grows and isn't needed to understand how the app currently works.
 
 ### How to bump versions
 
 When making changes:
-1. Update `APP_VERSION` at the top of the script following semver
+1. Update `APP_VERSION` at the top of the script following semver (major = breaking/needs migration, minor = new feature, patch = bug fix)
 2. If `state`'s shape changed, increment `DATA_SCHEMA_VERSION` and add a migration case in `load()` and `importData()`
-3. Add a row to both tables above
+3. Update the "Current versions" table above
+4. Add a row to the relevant table(s) in [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -79,9 +38,9 @@ When the shape of `state` needs to change, follow these steps together — the m
 
 1. Increment `DATA_SCHEMA_VERSION` at the top of the script
 2. Add a `if (v < N)` block inside `migrateData()` describing what changed and transforming old data to the new shape
-3. Update the data schema version history table in this doc
+3. Add a row to the data schema version table in [CHANGELOG.md](CHANGELOG.md)
 4. Update the app version (minor bump if backward compatible, major if not)
-5. Add the app version to the changelog table in this doc
+5. Add a row to the app version table in [CHANGELOG.md](CHANGELOG.md)
 
 Example block structure:
 
@@ -317,6 +276,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
 | `primaryLabel(cat)` | Returns the primary field label string for a category |
 | `extraFields(cat)` | Returns the extra fields array for a category |
+| `itemsForCat(cat)` | Returns a category's items with the active field filters applied; shared by Library, Leaderboard, and all three rank modes |
+| `deleteItemsInCat(cat)` | Permanently removes every item belonging to a category (no filters); used by category deletion and both import "replace" flows |
 | `renderAddForm()` | Dynamically renders the Add item form based on the active category's schema |
 | `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
 | `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
@@ -347,6 +308,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `clearPodiumPlace(itemId)` | Removes an item's podium placement |
 | `submitPodium()` | Derives all implied pairwise ELO updates from podium order, saves, loads next round |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
+| `applyEloUpdate(winner, loser)` | Calls `eloUpdate()` and returns the `{wid, lid, wChange, lChange}` delta record used by `recordRanking()`/`undoRanking()`; shared by `vote()`, `submitPodium()`, `submitTier()` |
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
 | `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
 | `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in leaderboard and tier's untiered list |
@@ -428,7 +390,9 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 **Key functions**:
 - `inferFieldType(cat, fieldName)` — scans up to 20 non-empty values; if ≥80% are numeric, classifies as `"number"`, else `"string"` (categorical)
 - `getFilteredItems(cat, items, filters)` — applies all active filters with AND logic; numeric fields check `min`/`max`/`equals`; categorical fields check multi-select values; `nonBlank` (if set, on either field type) excludes items where the field is `undefined` or `""`, independent of the type-specific condition
-- `renderFilterUI(cat)` — generates filter form based on inferred field types; skips fields where `filterable === false`; numeric fields show min/max/exact inputs plus a "Has value" checkbox; categorical fields show checkboxes for all unique values plus the same "Has value" checkbox; renders to both `lib-filters` and `rank-filters` containers with unique IDs to avoid conflicts
+- `renderFilterUI(cat)` — builds the field cards once via `buildFilterFieldCards(cat, fields, catFilters)`, then renders them into both `lib-filters` and `rank-filters` via `buildFilterPanel(cat, filterId, ...)`, passing each container its own directly-embedded id (`filter-fields-<cat>-lib` / `-rank`) so the two copies never share DOM ids
+- `buildFilterFieldCards(cat, fields, catFilters)` — generates the per-field filter cards; skips fields where `filterable === false`; numeric fields show min/max/exact inputs plus a "Has value" checkbox; categorical fields show checkboxes for all unique values plus the same "Has value" checkbox
+- `buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml)` — wraps a set of field cards with the collapsible header (chevron, active-filter count, "✕ Clear" button) and the collapse-toggle target div
 - `updateFilter(el)` — onclick handler for filter inputs; distinguishes the "Has value" checkbox (`data-op="nonblank"`) from categorical value checkboxes (`data-value`) via the `data-op` attribute; updates `filterState[cat]` and re-renders affected views
 - `resetFilters(cat)` — clears filters for a category and re-renders filter UI
 - `clearAllFilters(cat)` — clears all active filters when user clicks "✕ Clear" button
