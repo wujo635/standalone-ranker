@@ -386,7 +386,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.11.1';
+const APP_VERSION = '1.12.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1026,7 +1026,7 @@ function renderLibrary() {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
     const useLabels = populated.length >= 2;
     const meta = populated.map(f =>
-      `<span class="item-meta-line">${useLabels ? `${esc(f.name)}: ${esc((i.fields||{})[f.name])}` : esc((i.fields||{})[f.name])}</span>`
+      `<span class="item-meta-line">${useLabels ? `<strong>${esc(f.name)}:</strong> ${esc((i.fields||{})[f.name])}` : esc((i.fields||{})[f.name])}</span>`
     ).join('');
     const isEditing = expandedItemId === i.id;
     const editInputs = fields.map(f =>
@@ -1071,7 +1071,7 @@ function itemMeta(item, useLabels) {
   const populated = fields.filter(f => (item.fields||{})[f.name]);
   const label = useLabels !== undefined ? useLabels : populated.length >= 2;
   return populated.map(f =>
-    label ? `${esc(f.name)}: ${esc((item.fields||{})[f.name])}` : esc((item.fields||{})[f.name])
+    label ? `<strong>${esc(f.name)}:</strong> ${esc((item.fields||{})[f.name])}` : esc((item.fields||{})[f.name])
   );
 }
 

@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.11.1` |
+| App version | `1.12.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -52,6 +52,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.10.0 | Field-based filtering: filter items by extra fields with smart type inference (numeric ranges with >=, <=, = operators; categorical with multi-select checkboxes); applies to Library view and all ranking modes; collapsible filter section to save screen space |
 | 1.11.0 | Filter fields by "Has value" (non-blank) regardless of type; fixed latent bug where numeric fields with a blank value were always excluded from filtered views even with no active filter |
 | 1.11.1 | Bug fix: Library item rows overflowed horizontally when titles or field values were long, because fields were joined onto one `white-space: nowrap` line; fields now stack one per line and the row/title wrap and shrink instead of forcing width |
+| 1.12.0 | Field names bolded (`itemMeta()`) when shown with labels, in Library rows, Leaderboard, and Rank cards (VS/Podium) |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
