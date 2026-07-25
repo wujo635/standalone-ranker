@@ -120,15 +120,15 @@ state = {
     "Movies": {
       primary: 'Title',             // label for the main field (e.g. "Name", "Title", "Place")
       fields: [
-        { name: 'Year', required: false },
-        { name: 'Director', required: false }
+        { name: 'Year', required: false, filterable: true },
+        { name: 'Director', required: false, filterable: true }
       ]
     },
     "Songs": {
       primary: 'Title',
       fields: [
-        { name: 'Artist', required: true },
-        { name: 'Album', required: false },
+        { name: 'Artist', required: true, filterable: true },
+        { name: 'Album', required: false, filterable: false },
         ...
       ]
     }
@@ -425,10 +425,11 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 **Key functions**:
 - `inferFieldType(cat, fieldName)` — scans up to 20 non-empty values; if ≥80% are numeric, classifies as `"number"`, else `"string"` (categorical)
 - `getFilteredItems(cat, items, filters)` — applies all active filters with AND logic; numeric fields check `min`/`max`/`equals`; categorical fields check multi-select values
-- `renderFilterUI(cat)` — generates filter form based on inferred field types; numeric fields show min/max/exact inputs; categorical fields show checkboxes for all unique values; renders to both `lib-filters` and `rank-filters` containers with unique IDs to avoid conflicts
+- `renderFilterUI(cat)` — generates filter form based on inferred field types; skips fields where `filterable === false`; numeric fields show min/max/exact inputs; categorical fields show checkboxes for all unique values; renders to both `lib-filters` and `rank-filters` containers with unique IDs to avoid conflicts
 - `updateFilter(el)` — onclick handler for filter inputs; updates `filterState[cat]` and re-renders affected views
 - `resetFilters(cat)` — clears filters for a category and re-renders filter UI
 - `clearAllFilters(cat)` — clears all active filters when user clicks "✕ Clear" button
+- `toggleFilterable(i)` — toggles the `filterable` flag for a field in the schema editor
 
 **Integration points**:
 - `renderLibrary()` calls `getFilteredItems(rankCat(), list, filterState)` before displaying items
@@ -448,6 +449,8 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 - Numeric fields use three separate inputs (min/max/exact) rather than a single operator dropdown — clearer semantics
 - Filters hidden items entirely rather than dimming them — no confusion about why they appear in leaderboard but not ranking
 - Filter logic is applied consistently: all filtering functions call `getFilteredItems()` to avoid drift
+- Each field has a `filterable` property (defaults to `true`) that controls whether it appears in the filter UI; set to `false` for fields like URLs, IDs, or notes that are not meaningful for filtering
+- Filterable toggle is accessible in the Fields editor (⚙ button in Library tab) — users can click 🔍 to toggle between filterable and non-filterable state
 
 ### Add notes/tags to items
 
