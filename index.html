@@ -145,9 +145,9 @@
   .tier-untiered-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: .5rem; font-weight: 500; }
   .tier-item-list { display: flex; flex-direction: column; gap: 6px; }
   .tier-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .85rem; display: flex; align-items: center; gap: 10px; }
-  .tier-item-info { flex: 1; }
-  .tier-item-title { font-size: 13px; font-weight: 500; }
-  .tier-item-meta { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+  .tier-item-info { flex: 1; min-width: 0; }
+  .tier-item-title { font-size: 13px; font-weight: 500; overflow-wrap: break-word; word-break: break-word; }
+  .tier-item-meta { font-size: 11px; color: var(--text-muted); margin-top: 1px; overflow-wrap: break-word; word-break: break-word; }
   .tier-item-btns { display: flex; gap: 4px; }
   .tier-item-btn { font-size: 11px; font-weight: 600; padding: 3px 7px; border-radius: 5px; border: none; cursor: pointer; color: #fff; }
   .tier-item-btn.ts { background: #ff7675; }
@@ -174,9 +174,9 @@
     .podium-item.selected-3 { background: #251a10; }
   }
   .podium-rank { font-size: 20px; min-width: 32px; text-align: center; }
-  .podium-info { flex: 1; }
-  .podium-title { font-size: 14px; font-weight: 500; }
-  .podium-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .podium-info { flex: 1; min-width: 0; }
+  .podium-title { font-size: 14px; font-weight: 500; overflow-wrap: break-word; word-break: break-word; }
+  .podium-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; overflow-wrap: break-word; word-break: break-word; }
   .podium-btns { display: flex; flex-direction: column; gap: 4px; }
   .podium-btn { font-size: 12px; padding: 3px 10px; border-radius: 6px; white-space: nowrap; }
   .podium-actions { display: flex; gap: 8px; justify-content: center; margin-top: .5rem; }
@@ -386,7 +386,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -526,6 +526,14 @@ function schemaFor(cat) {
 }
 function primaryLabel(cat) { return schemaFor(cat).primary || 'Name'; }
 function extraFields(cat) { return schemaFor(cat).fields || []; }
+// Items in a category with the active field filters applied.
+function itemsForCat(cat) {
+  return getFilteredItems(cat, Object.values(state.items).filter(i => i.cat === cat), filterState);
+}
+// Permanently removes every item belonging to a category (no filters applied).
+function deleteItemsInCat(cat) {
+  Object.keys(state.items).forEach(id => { if (state.items[id].cat === cat) delete state.items[id]; });
+}
 
 // --- Filtering ---
 let filterState = {}; // { [category]: { [fieldName]: { type, values, min, max, equals } } }
@@ -903,7 +911,7 @@ function confirmDeleteCat() {
   if (!confirm(msg)) return;
   state.cats = state.cats.filter(c => c !== editingCat);
   delete state.schema[editingCat];
-  Object.keys(state.items).forEach(id => { if (state.items[id].cat === editingCat) delete state.items[id]; });
+  deleteItemsInCat(editingCat);
   rebuildCatSelects();
   save(); renderLibrary(); renderLB(); renderStats();
   switchTab('library'); toast('Category deleted');
@@ -1023,11 +1031,7 @@ function renderLibrary() {
     return;
   }
   el.innerHTML = '<div class="card">' + list.map(i => {
-    const populated = fields.filter(f => (i.fields||{})[f.name]);
-    const useLabels = populated.length >= 2;
-    const meta = populated.map(f =>
-      `<span class="item-meta-line">${useLabels ? `<strong>${esc(f.name)}:</strong> ${esc((i.fields||{})[f.name])}` : esc((i.fields||{})[f.name])}</span>`
-    ).join('');
+    const meta = itemMeta(i).map(l => `<span class="item-meta-line">${l}</span>`).join('');
     const isEditing = expandedItemId === i.id;
     const editInputs = fields.map(f =>
       `<input type="text" id="edit-field-${i.id}-${esc(f.name)}"
@@ -1145,8 +1149,7 @@ function randomPair(list) {
 
 function loadPair() {
   const cat = rankCat();
-  let list = Object.values(state.items).filter(i => i.cat === cat);
-  list = getFilteredItems(cat, list, filterState);
+  let list = itemsForCat(cat);
   const el = document.getElementById('rank-pair');
   if (list.length < 2) { el.innerHTML = '<div class="empty">Add at least 2 items in this category to start ranking.</div>'; return; }
   const pair = smartPairMode ? smartPair(list) : randomPair(list);
@@ -1175,16 +1178,22 @@ function eloUpdate(winner, loser) {
   winner.wins++; loser.losses++;
 }
 
+// Applies the ELO update and returns the delta record used for history/undo.
+function applyEloUpdate(winner, loser) {
+  const wEloB4 = winner.elo, lEloB4 = loser.elo;
+  eloUpdate(winner, loser);
+  return { wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 };
+}
+
 function vote(wid, lid) {
   const winner = state.items[wid];
   const loser = state.items[lid];
-  const wEloB4 = winner.elo, lEloB4 = loser.elo;
-  eloUpdate(winner, loser);
+  const { wChange, lChange } = applyEloUpdate(winner, loser);
   recordRanking({
     type: 'standard',
     category: rankCat(),
-    winner: { id: wid, title: winner.title, eloChange: winner.elo - wEloB4 },
-    loser: { id: lid, title: loser.title, eloChange: loser.elo - lEloB4 }
+    winner: { id: wid, title: winner.title, eloChange: wChange },
+    loser: { id: lid, title: loser.title, eloChange: lChange }
   });
   save(); renderLB(); renderStats(); loadPair(); toast('\u2713 Voted');
 }
@@ -1195,8 +1204,7 @@ function vote(wid, lid) {
 
 function loadPodium() {
   const cat = rankCat();
-  let list = Object.values(state.items).filter(i => i.cat === cat);
-  list = getFilteredItems(cat, list, filterState);
+  let list = itemsForCat(cat);
   const el = document.getElementById('rank-pair');
   if (list.length < 3) {
     el.innerHTML = '<div class="empty">Add at least 3 items to use Podium mode.</div>'; return;
@@ -1281,9 +1289,7 @@ function submitPodium() {
       const winner = state.items[ordered[i]];
       const loser  = state.items[ordered[j]];
       if (winner && loser) {
-        const wEloB4 = winner.elo, lEloB4 = loser.elo;
-        eloUpdate(winner, loser);
-        historyUpdates.push({ wid: ordered[i], lid: ordered[j], wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 });
+        historyUpdates.push(applyEloUpdate(winner, loser));
         updates++;
       }
     }
@@ -1313,8 +1319,7 @@ let tierSessionSize = 10;
 function loadTier() {
   const el = document.getElementById('rank-pair');
   const cat = rankCat();
-  let list = Object.values(state.items).filter(i => i.cat === cat);
-  list = getFilteredItems(cat, list, filterState);
+  let list = itemsForCat(cat);
   if (list.length < 3) {
     el.innerHTML = '<div class="empty">Add at least 3 items to use Tier mode.</div>';
     return;
@@ -1340,8 +1345,7 @@ function loadTier() {
 
 function startTierSession() {
   const cat = rankCat();
-  let list = Object.values(state.items).filter(i => i.cat === cat);
-  list = getFilteredItems(cat, list, filterState);
+  let list = itemsForCat(cat);
   const input = document.getElementById('tier-size-input');
   const n = parseInt(input ? input.value : tierSessionSize, 10);
   const maxSize = Math.min(list.length, 30);
@@ -1383,7 +1387,6 @@ function renderTier() {
   const untiered = tierPool.filter(i => !tiered.has(i.id));
   const allPlaced = untiered.length === 0;
   const TIER_CLASS = {S:'ts',A:'ta',B:'tb',C:'tc',D:'td'};
-  const TIER_COLOR = {S:'#ff7675',A:'#fd9644',B:'#f9ca24',C:'#6ab04c',D:'#7f8fa6'};
 
   // Build tier board
   let lanes = '';
@@ -1456,9 +1459,7 @@ function submitTier() {
       if (ti === tj) continue; // same tier — no comparison
       const winner = ti < tj ? placed[i] : placed[j];
       const loser  = ti < tj ? placed[j] : placed[i];
-      const wEloB4 = winner.elo, lEloB4 = loser.elo;
-      eloUpdate(state.items[winner.id], state.items[loser.id]);
-      historyUpdates.push({ wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 });
+      historyUpdates.push(applyEloUpdate(winner, loser));
       updates++;
     }
     tiers[TIERS.indexOf(tierPlacements[placed[i].id])].push(placed[i].title);
@@ -1493,17 +1494,8 @@ function undoRanking(idx) {
       l.elo -= entry.loser.eloChange;
       w.wins--; l.losses--;
     }
-  } else if (entry.type === 'podium' && entry.updates) {
-    entry.updates.forEach(({ wid, lid, wChange, lChange }) => {
-      const w = state.items[wid];
-      const l = state.items[lid];
-      if (w && l) {
-        w.elo -= wChange;
-        l.elo -= lChange;
-        w.wins--; l.losses--;
-      }
-    });
-  } else if (entry.type === 'tier' && entry.updates) {
+  } else if (entry.updates) {
+    // podium and tier both record a flat list of pairwise updates to reverse
     entry.updates.forEach(({ wid, lid, wChange, lChange }) => {
       const w = state.items[wid];
       const l = state.items[lid];
@@ -1551,9 +1543,7 @@ function renderLB() {
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
     `<button class="pill${c===lbCat?' active':''}" onclick="lbCat='${esc(c)}';renderLB()">${esc(c)}</button>`).join('');
-  let list = Object.values(state.items).filter(i => i.cat === lbCat);
-  list = getFilteredItems(lbCat, list, filterState);
-  list = list.sort((a,b) => b.elo - a.elo);
+  let list = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
   const el = document.getElementById('lb-list');
   if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
   const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
@@ -1688,7 +1678,7 @@ function resolveCSVImport(result) {
       const nl2 = String.fromCharCode(10);
       const warn = ['Replace [' + category + '] and lose all existing rankings?', '', 'OK = Replace  |  Cancel = abort'].join(nl2);
       if (!confirm(warn)) return;
-      Object.keys(state.items).forEach(id => { if (state.items[id].cat === category) delete state.items[id]; });
+      deleteItemsInCat(category);
       applyCSVImport(result, true);
       toast('Replaced ' + category + ' with ' + items.length + ' items');
     } else {
@@ -1848,9 +1838,7 @@ function importData(e) {
           const replace = confirm(msgParts.join(nl + nl));
           if (replace) {
             // Remove all existing items for this category
-            Object.keys(state.items).forEach(id => {
-              if (state.items[id].cat === cat) delete state.items[id];
-            });
+            deleteItemsInCat(cat);
             // Import incoming items and schema for this category
             Object.entries(incomingItems).forEach(([id, item]) => {
               if (item.cat === cat) { state.items[id] = item; totalImported++; }

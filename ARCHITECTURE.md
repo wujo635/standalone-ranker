@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.12.0` |
+| App version | `1.12.1` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -53,6 +53,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.11.0 | Filter fields by "Has value" (non-blank) regardless of type; fixed latent bug where numeric fields with a blank value were always excluded from filtered views even with no active filter |
 | 1.11.1 | Bug fix: Library item rows overflowed horizontally when titles or field values were long, because fields were joined onto one `white-space: nowrap` line; fields now stack one per line and the row/title wrap and shrink instead of forcing width |
 | 1.12.0 | Field names bolded (`itemMeta()`) when shown with labels, in Library rows, Leaderboard, and Rank cards (VS/Podium) |
+| 1.12.1 | Bug fix: Podium and Tier cards had the same overflow risk Library had in 1.11.1 (`.podium-info`/`.tier-item-info` missing `min-width: 0` and word-break) — fixed the same way. Internal refactor (no behavior change): `renderLibrary()` now calls `itemMeta()` instead of reimplementing it; added `itemsForCat()` and `deleteItemsInCat()` helpers to remove duplicated category-filtering and category-deletion logic; added `applyEloUpdate()` to remove duplicated before/after ELO delta tracking in `vote()`, `submitPodium()`, `submitTier()`; merged the identical podium/tier branches in `undoRanking()`; removed unused `TIER_COLOR` |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -317,6 +318,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
 | `primaryLabel(cat)` | Returns the primary field label string for a category |
 | `extraFields(cat)` | Returns the extra fields array for a category |
+| `itemsForCat(cat)` | Returns a category's items with the active field filters applied; shared by Library, Leaderboard, and all three rank modes |
+| `deleteItemsInCat(cat)` | Permanently removes every item belonging to a category (no filters); used by category deletion and both import "replace" flows |
 | `renderAddForm()` | Dynamically renders the Add item form based on the active category's schema |
 | `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
 | `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
@@ -347,6 +350,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `clearPodiumPlace(itemId)` | Removes an item's podium placement |
 | `submitPodium()` | Derives all implied pairwise ELO updates from podium order, saves, loads next round |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
+| `applyEloUpdate(winner, loser)` | Calls `eloUpdate()` and returns the `{wid, lid, wChange, lChange}` delta record used by `recordRanking()`/`undoRanking()`; shared by `vote()`, `submitPodium()`, `submitTier()` |
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
 | `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
 | `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in leaderboard and tier's untiered list |
