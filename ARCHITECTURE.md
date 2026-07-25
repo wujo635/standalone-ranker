@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.10.0` |
+| App version | `1.12.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -51,6 +51,8 @@ Follows semantic versioning: `major.minor.patch`
 | 1.9.0 | History tab: view the last 50 rankings across all modes with timestamps and categories; undo button to reverse any ranking and restore ELO scores |
 | 1.10.0 | Field-based filtering: filter items by extra fields with smart type inference (numeric ranges with >=, <=, = operators; categorical with multi-select checkboxes); applies to Library view and all ranking modes; collapsible filter section to save screen space |
 | 1.11.0 | Filter fields by "Has value" (non-blank) regardless of type; fixed latent bug where numeric fields with a blank value were always excluded from filtered views even with no active filter |
+| 1.11.1 | Bug fix: Library item rows overflowed horizontally when titles or field values were long, because fields were joined onto one `white-space: nowrap` line; fields now stack one per line and the row/title wrap and shrink instead of forcing width |
+| 1.12.0 | Field names bolded (`itemMeta()`) when shown with labels, in Library rows, Leaderboard, and Rank cards (VS/Podium) |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -347,7 +349,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
 | `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
-| `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in library and leaderboard |
+| `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in leaderboard and tier's untiered list |
 | `itemMetaStacked(item)` | Renders `itemMeta()` as stacked `<span>` blocks for VS and Podium rank cards |
 | `showCsvHelp()` | Toggles the CSV format guide in the Data tab |
 | `importCSV(e)` | Reads a CSV file, delegates to `parsePreloadCSV()` and `resolveCSVImport()` |
@@ -519,7 +521,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | Schema per category | Flexible, user-defined fields | Hardcoded fields per type |
 | Multiple ranking modes | 1v1, Podium, Tier — different speeds and batch sizes | Single mode only |
 | ELO hidden during ranking | Prevents anchoring bias during comparison | Always visible |
-| Stacked fields in rank cards | Readable with many attributes | Single line, cramped |
+| Stacked fields in rank cards and library rows | Readable with many attributes; avoids horizontal overflow with long values | Single line, cramped |
 | CSV preload format | Easy to author in a spreadsheet | JSON only |
 | CSV export (library only) | Share base data without rankings; recipient starts fresh | Export full JSON only |
 | Inline editing | Edit without leaving the library view | Separate edit screen |

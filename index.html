@@ -65,14 +65,16 @@
   button.ghost:hover { color: var(--text-primary); background: var(--surface-2); }
 
   .row { display: flex; align-items: center; gap: 8px; }
-  .flex1 { flex: 1; }
+  .flex1 { flex: 1; min-width: 0; }
   .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: .5rem; font-weight: 500; }
 
-  .item-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .item-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
   .item-row:last-child { border-bottom: none; }
-  .item-title { flex: 1; font-size: 14px; font-weight: 500; }
-  .item-meta { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .btn-sm { padding: 4px 8px; font-size: 12px; }
+  .item-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; overflow-wrap: break-word; word-break: break-word; }
+  .item-meta { font-size: 12px; color: var(--text-muted); }
+  .item-meta-line { display: block; margin-top: 2px; overflow-wrap: break-word; word-break: break-word; }
+  .item-elo { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; align-self: center; }
+  .btn-sm { padding: 4px 8px; font-size: 12px; flex-shrink: 0; }
 
   .empty { text-align: center; color: var(--text-muted); font-size: 14px; padding: 2.5rem 0; }
 
@@ -384,7 +386,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1024,8 +1026,8 @@ function renderLibrary() {
     const populated = fields.filter(f => (i.fields||{})[f.name]);
     const useLabels = populated.length >= 2;
     const meta = populated.map(f =>
-      useLabels ? `${esc(f.name)}: ${esc((i.fields||{})[f.name])}` : esc((i.fields||{})[f.name])
-    ).join(' \u00b7 ');
+      `<span class="item-meta-line">${useLabels ? `<strong>${esc(f.name)}:</strong> ${esc((i.fields||{})[f.name])}` : esc((i.fields||{})[f.name])}</span>`
+    ).join('');
     const isEditing = expandedItemId === i.id;
     const editInputs = fields.map(f =>
       `<input type="text" id="edit-field-${i.id}-${esc(f.name)}"
@@ -1046,10 +1048,10 @@ function renderLibrary() {
     return `<div class="item-row${isEditing?' is-editing':''}">
       <div class="flex1">
         <div class="item-title">${esc(i.title)}</div>
-        ${!isEditing && meta ? `<div class="item-meta" style="margin-top:2px">${meta}</div>` : ''}
+        ${!isEditing && meta ? `<div class="item-meta">${meta}</div>` : ''}
         ${editForm}
       </div>
-      ${!isEditing ? `<span class="item-meta">ELO ${Math.round(i.elo)}</span>` : ''}
+      ${!isEditing ? `<span class="item-elo">ELO ${Math.round(i.elo)}</span>` : ''}
       <button class="btn-sm ghost" onclick="editItem('${i.id}')" aria-label="Edit ${esc(i.title)}" title="Edit">\u270e</button>
       <button class="btn-sm ghost" onclick="deleteItem('${i.id}')" aria-label="Remove ${esc(i.title)}" title="Remove">\u2715</button>
     </div>`;
@@ -1069,7 +1071,7 @@ function itemMeta(item, useLabels) {
   const populated = fields.filter(f => (item.fields||{})[f.name]);
   const label = useLabels !== undefined ? useLabels : populated.length >= 2;
   return populated.map(f =>
-    label ? `${esc(f.name)}: ${esc((item.fields||{})[f.name])}` : esc((item.fields||{})[f.name])
+    label ? `<strong>${esc(f.name)}:</strong> ${esc((item.fields||{})[f.name])}` : esc((item.fields||{})[f.name])
   );
 }
 
