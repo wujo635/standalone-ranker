@@ -384,7 +384,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -561,15 +561,16 @@ function getFilteredItems(cat, items, filters) {
       if (!filter || !filter.type) continue;
 
       const val = (item.fields || {})[fieldName];
-      if (val === undefined || val === '') {
-        // If no value and filter is active, exclude this item
-        if (filter.type === 'number' && (filter.min !== undefined || filter.max !== undefined || filter.equals !== undefined)) {
-          return false;
-        }
-        if (filter.type === 'string' && filter.values && filter.values.length > 0) {
-          return false;
-        }
-      }
+      const isBlank = val === undefined || val === '';
+
+      if (filter.nonBlank && isBlank) return false;
+
+      const hasActiveFilter = filter.type === 'number'
+        ? (filter.min !== undefined || filter.max !== undefined || filter.equals !== undefined)
+        : (filter.values && filter.values.length > 0);
+
+      if (!hasActiveFilter) continue; // nonBlank (checked above) is the only other condition
+      if (isBlank) return false; // active filter requires a value
 
       if (filter.type === 'number') {
         const num = parseFloat(val);
@@ -577,7 +578,7 @@ function getFilteredItems(cat, items, filters) {
         if (filter.min !== undefined && num < filter.min) return false;
         if (filter.max !== undefined && num > filter.max) return false;
         if (filter.equals !== undefined && num !== filter.equals) return false;
-      } else if (filter.type === 'string' && filter.values && filter.values.length > 0) {
+      } else if (filter.type === 'string') {
         if (!filter.values.includes(String(val))) return false;
       }
     }
@@ -608,7 +609,8 @@ function renderFilterUI(cat) {
   const catFilters = filterState[cat] || {};
   const activeCount = Object.values(catFilters).filter(f => f && (
     (f.type === 'number' && (f.min !== undefined || f.max !== undefined || f.equals !== undefined)) ||
-    (f.type === 'string' && f.values && f.values.length > 0)
+    (f.type === 'string' && f.values && f.values.length > 0) ||
+    f.nonBlank
   )).length;
 
   // Initialize collapse state (default to collapsed)
@@ -645,7 +647,15 @@ function renderFilterUI(cat) {
       const hasNumFilter = minVal !== '' || maxVal !== '' || eqVal !== '';
 
       html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem;transition:all 0.2s">
-        <div style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:0.6rem;text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+          <div style="font-size:12px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap">
+            <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
+              data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
+              onchange="updateFilter(this)" style="width:13px;height:13px;cursor:pointer">
+            Has value
+          </label>
+        </div>
         <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">
           <div style="display:flex;align-items:center;gap:4px;min-width:0">
             <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">≥</span>
@@ -675,7 +685,15 @@ function renderFilterUI(cat) {
       const selectedVals = filter.values || [];
 
       html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem">
-        <div style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:0.6rem;text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+          <div style="font-size:12px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap">
+            <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
+              data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
+              onchange="updateFilter(this)" style="width:13px;height:13px;cursor:pointer">
+            Has value
+          </label>
+        </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px">`;
       for (const val of uniqueVals) {
         const isChecked = selectedVals.includes(String(val));
@@ -722,14 +740,18 @@ function updateFilter(el) {
       filterState[cat][field][op] = parseFloat(val);
     }
   } else if (el.type === 'checkbox') {
-    const val = el.dataset.value;
-    if (!filterState[cat][field].values) filterState[cat][field].values = [];
-    if (el.checked) {
-      if (!filterState[cat][field].values.includes(val)) {
-        filterState[cat][field].values.push(val);
-      }
+    if (el.dataset.op === 'nonblank') {
+      filterState[cat][field].nonBlank = el.checked;
     } else {
-      filterState[cat][field].values = filterState[cat][field].values.filter(v => v !== val);
+      const val = el.dataset.value;
+      if (!filterState[cat][field].values) filterState[cat][field].values = [];
+      if (el.checked) {
+        if (!filterState[cat][field].values.includes(val)) {
+          filterState[cat][field].values.push(val);
+        }
+      } else {
+        filterState[cat][field].values = filterState[cat][field].values.filter(v => v !== val);
+      }
     }
   }
 
