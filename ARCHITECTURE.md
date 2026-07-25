@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.9.0` |
+| App version | `1.10.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -49,6 +49,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.7.0 | Smart pair selection: optional toggle in Rank tab, uses ELO-proximity instead of random pairing for all three ranking modes (VS, Podium, Tier); helps rankings converge faster with large pools |
 | 1.8.0 | Library search/filter: real-time search across titles and all field values, case-insensitive; useful for large categories (50+ items) |
 | 1.9.0 | History tab: view the last 50 rankings across all modes with timestamps and categories; undo button to reverse any ranking and restore ELO scores |
+| 1.10.0 | Field-based filtering: filter items by extra fields with smart type inference (numeric ranges with >=, <=, = operators; categorical with multi-select checkboxes); applies to Library view and all ranking modes; collapsible filter section to save screen space |
 
 ### Data schema version (DATA_SCHEMA_VERSION)
 
@@ -387,7 +388,7 @@ const CAT_DEFAULTS = {
 
 Also add to `BUILTIN_CATS` if you want it protected from deletion (currently all keys of `CAT_DEFAULTS` are built-in).
 
-### Add filtering or search to the library
+### Search the library
 
 Real-time search across item titles and all field values. The Library view includes a search card with a text input that filters the list as you type.
 
@@ -411,6 +412,42 @@ if (query) {
 ```
 
 **Use cases**: Find all movies by director, all books from a year, all restaurants of a cuisine type.
+
+### Add structured field filtering
+
+Field-based filtering allows ranking subsets of items by their extra fields. Items are filtered before being shown in the Library view, Leaderboard, and all ranking modes (VS, Podium, Tier).
+
+**Architecture**:
+- `filterState = {}` — global object tracking active filters per category: `{ [category]: { [fieldName]: { type, values, min, max, equals } } }`
+- `fieldTypeCache = {}` — caches type inference results to avoid re-scanning on every filter change
+- `filterCollapsed = {}` — tracks collapse state of filter section per category (defaults to collapsed)
+
+**Key functions**:
+- `inferFieldType(cat, fieldName)` — scans up to 20 non-empty values; if ≥80% are numeric, classifies as `"number"`, else `"string"` (categorical)
+- `getFilteredItems(cat, items, filters)` — applies all active filters with AND logic; numeric fields check `min`/`max`/`equals`; categorical fields check multi-select values
+- `renderFilterUI(cat)` — generates filter form based on inferred field types; numeric fields show min/max/exact inputs; categorical fields show checkboxes for all unique values; renders to both `lib-filters` and `rank-filters` containers with unique IDs to avoid conflicts
+- `updateFilter(el)` — onclick handler for filter inputs; updates `filterState[cat]` and re-renders affected views
+- `resetFilters(cat)` — clears filters for a category and re-renders filter UI
+- `clearAllFilters(cat)` — clears all active filters when user clicks "✕ Clear" button
+
+**Integration points**:
+- `renderLibrary()` calls `getFilteredItems(rankCat(), list, filterState)` before displaying items
+- `loadPair()`, `loadPodium()`, `loadTier()` all apply `getFilteredItems()` to their item pools
+- `renderLB()` applies filters to the leaderboard display
+
+**UI/UX**:
+- Filter section collapses by default (shows just the header with a ▶ chevron) to save screen space
+- Clicking the filter header toggles expand/collapse (chevron changes to ▼)
+- Collapse state is independent per container (lib vs rank) — each renders with a unique div ID (`filter-fields-lib-Movies` vs `filter-fields-rank-Movies`)
+- Shows count of active filters in the header (e.g., "Filter 2")
+- Filters persist across tab switches for the same category but clear when switching to a different category
+
+**Design notes**:
+- Type inference is deterministic for a given category — same field always gets same type across sessions (within `fieldTypeCache`)
+- Filters are session-specific and not persisted to localStorage — simpler UX, no stale filter state
+- Numeric fields use three separate inputs (min/max/exact) rather than a single operator dropdown — clearer semantics
+- Filters hidden items entirely rather than dimming them — no confusion about why they appear in leaderboard but not ranking
+- Filter logic is applied consistently: all filtering functions call `getFilteredItems()` to avoid drift
 
 ### Add notes/tags to items
 
