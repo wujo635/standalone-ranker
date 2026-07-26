@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.12.2` |
+| App version | `1.13.1` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -108,7 +108,8 @@ state = {
       },
       elo:    number,   // starts at 1000
       wins:   number,   // times chosen in a comparison
-      losses: number    // times not chosen in a comparison
+      losses: number,   // times not chosen in a comparison
+      hidden: boolean   // if true, excluded from ranking selection and the leaderboard; still visible/editable in Library
     }
   },
 
@@ -276,11 +277,12 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
 | `primaryLabel(cat)` | Returns the primary field label string for a category |
 | `extraFields(cat)` | Returns the extra fields array for a category |
-| `itemsForCat(cat)` | Returns a category's items with the active field filters applied; shared by Library, Leaderboard, and all three rank modes |
+| `itemsForCat(cat)` | Returns a category's items with the active field filters applied, excluding hidden items; shared by Leaderboard and all three rank modes (Library uses `libItems()` instead so hidden items stay visible for un-hiding) |
 | `deleteItemsInCat(cat)` | Permanently removes every item belonging to a category (no filters); used by category deletion and both import "replace" flows |
 | `renderAddForm()` | Dynamically renders the Add item form based on the active category's schema |
 | `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
 | `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
+| `toggleHidden(id)` | Flips an item's `hidden` flag, saves, re-renders library + leaderboard + stats |
 | `renderLibrary()` | Rebuilds selects + form, renders alphabetical item list |
 | `openNewCatModal()` | Resets pending state and switches to the new-category view |
 | `saveNewCat()` | Validates name + primary label, pushes to state, saves |
@@ -321,10 +323,11 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `bulkAddCSVImport(result)` | Matches incoming items to existing ones by title (case-insensitive); updates field values on matches, preserves ELO and win/loss record; adds unmatched items fresh at ELO 1000 |
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
-| `exportData()` | Wraps state with `_meta`, serializes to JSON, triggers download |
+| `itemsWithoutHidden()` | Returns a copy of `state.items` with the `hidden` key stripped from every item; used by `exportData()` so hidden status (a personal, per-browser preference) never travels in an exported file |
+| `exportData()` | Wraps state with `_meta`, serializes to JSON (items via `itemsWithoutHidden()`), triggers download |
 | `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
-| `importData(e)` | Reads JSON file, runs `migrateData()`, then prompts per category to replace or skip when conflicts exist |
+| `importData(e)` | Reads JSON file, runs `migrateData()`, then prompts per category to replace or skip when conflicts exist; forces `hidden: false` on every incoming item so a personal hide preference from another user's export can't apply locally |
 | `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID |
 | `esc(s)` | HTML-escapes strings before injecting into innerHTML |
@@ -425,9 +428,18 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 
 Extend the item object with `notes: string` and `tags: string[]`. Add inputs in `renderAddForm()`. Filter by tag in the library view. Tags could also drive a new "browse by tag" view.
 
-### Add a "not yet seen/heard/read" toggle
+### Hide items from ranking
 
-Add a `seen: boolean` field to items. Show unseen items in a separate Watchlist tab. Only include `seen: true` items in ranking and leaderboard.
+Items carry a `hidden: boolean` field (default `false`). Toggled per item in the Library via the ◎/◉ button next to Edit/Remove — `toggleHidden(id)` flips the flag, saves, and re-renders.
+
+Hidden items stay visible in the Library (dimmed via `.item-row.is-hidden`, tagged with a "hidden" badge) so they can be found and un-hidden, but `itemsForCat()` filters them out — since Leaderboard and all three rank modes (VS, Podium, Tier) source their item pool from `itemsForCat()`, hidden items never appear there. `libItems()` (Library's own item source) is untouched, so hiding never removes an item from view, only from ranking/leaderboard consideration.
+
+No data migration was needed: old items simply lack the `hidden` field, and `!i.hidden` treats `undefined` the same as `false`.
+
+`hidden` is treated as a personal, per-browser preference rather than shared library data, since users regularly pass exported JSON back and forth and don't want their hidden set imposed on each other:
+- `exportData()` calls `itemsWithoutHidden()` to strip the `hidden` key from every item before serializing, so exports never carry it
+- `importData()` forces `hidden: false` on every incoming item regardless of what the file contains, so importing (or hand-editing a file) can't set it either
+- CSV import/export never touches `hidden` at all (it only ever dealt with the primary field + schema fields), so this only needed handling on the JSON path
 
 ### Extend the CSV preload format
 
@@ -490,6 +502,7 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | CSV export (library only) | Share base data without rankings; recipient starts fresh | Export full JSON only |
 | Inline editing | Edit without leaving the library view | Separate edit screen |
 | History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
+| Hide items (vs. delete) | Reversible way to exclude items (e.g. duplicates, retired entries) from ranking without losing their ELO/history | Delete permanently, or a separate archive tab |
 
 ---
 
