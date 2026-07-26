@@ -387,7 +387,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.13.1';
+const APP_VERSION = '1.13.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1495,28 +1495,48 @@ function recordRanking(entry) {
   if (state.history.length > 50) state.history.shift();
 }
 
+// Every item id an entry's ELO reversal touches — standard mode via winner/loser,
+// podium/tier via the flat updates list.
+function entryItemIds(entry) {
+  if (entry.type === 'standard' && entry.winner && entry.loser) {
+    return [entry.winner.id, entry.loser.id];
+  } else if (entry.updates) {
+    const ids = [];
+    entry.updates.forEach(({ wid, lid }) => ids.push(wid, lid));
+    return ids;
+  }
+  return [];
+}
+
+// An entry can only be undone if every item it references still exists.
+// Reversing just the subset that still exists would silently leave other
+// items' ELO/wins/losses out of sync with no way to detect or retry it later.
+function canUndo(entry) {
+  return entryItemIds(entry).every(id => state.items[id]);
+}
+
 function undoRanking(idx) {
   if (idx < 0 || idx >= state.history.length) return;
   const entry = state.history[idx];
+  if (!canUndo(entry)) {
+    toast("Can't undo — an item in this ranking was deleted");
+    return;
+  }
   // Reverse ELO for all updates in this entry
   if (entry.type === 'standard' && entry.winner && entry.loser) {
     const w = state.items[entry.winner.id];
     const l = state.items[entry.loser.id];
-    if (w && l) {
-      w.elo -= entry.winner.eloChange;
-      l.elo -= entry.loser.eloChange;
-      w.wins--; l.losses--;
-    }
+    w.elo -= entry.winner.eloChange;
+    l.elo -= entry.loser.eloChange;
+    w.wins--; l.losses--;
   } else if (entry.updates) {
     // podium and tier both record a flat list of pairwise updates to reverse
     entry.updates.forEach(({ wid, lid, wChange, lChange }) => {
       const w = state.items[wid];
       const l = state.items[lid];
-      if (w && l) {
-        w.elo -= wChange;
-        l.elo -= lChange;
-        w.wins--; l.losses--;
-      }
+      w.elo -= wChange;
+      l.elo -= lChange;
+      w.wins--; l.losses--;
     });
   }
   state.history.splice(idx, 1);
@@ -1542,10 +1562,14 @@ function renderHistory() {
     } else if (entry.type === 'tier') {
       summary = `Tier session: ${entry.tiers.map((tier, t) => TIERS[t] + ' (' + tier.length + ')').filter(x => x.includes('(0)') === false).join(', ')}`;
     }
+    const undoable = canUndo(entry);
+    const undoBtn = undoable
+      ? `<button class="danger btn-sm" onclick="undoRanking(${idx})">↶ Undo</button>`
+      : `<button class="danger btn-sm" disabled title="An item in this ranking was deleted" style="opacity:.5;cursor:not-allowed">↶ Undo unavailable</button>`;
     return `<div class="card">
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:.5rem">${dt} · ${esc(entry.category)}</div>
       <div style="font-size:14px;margin-bottom:.75rem">${summary}</div>
-      <button class="danger btn-sm" onclick="undoRanking(${idx})">↶ Undo</button>
+      ${undoBtn}
     </div>`;
   }).join('');
 }
