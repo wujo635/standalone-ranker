@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.13.1` |
+| App version | `1.13.2` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -302,8 +302,10 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `removeTierPlacement(itemId)` | Returns an item from a tier lane back to untiered |
 | `submitTier()` | Derives all implied pairwise ELO updates from tier order (items in same tier not compared), saves, loads next session |
 | `recordRanking(entry)` | Appends a ranking to `state.history` with timestamp; keeps only last 50 entries (called after each vote/podium/tier session) |
-| `undoRanking(idx)` | Reverses ELO, wins, losses for all items involved in a ranking; removes entry from history; refreshes leaderboard and history views |
-| `renderHistory()` | Renders the last 50 rankings in reverse chronological order with undo buttons for each |
+| `entryItemIds(entry)` | Returns every item id a history entry's ELO reversal would touch (winner/loser for standard, the flat `wid`/`lid` list for podium/tier) |
+| `canUndo(entry)` | Returns `true` only if every id from `entryItemIds(entry)` still exists in `state.items`; used to refuse an undo up front rather than silently reversing a subset of it |
+| `undoRanking(idx)` | Refuses (toast, no state change) if `canUndo()` is false; otherwise reverses ELO, wins, losses for all items involved, removes the entry from history, refreshes leaderboard and history views |
+| `renderHistory()` | Renders the last 50 rankings in reverse chronological order; shows a disabled "Undo unavailable" button (via `canUndo()`) for entries referencing a deleted item instead of a clickable Undo |
 | `loadPodium()` | Picks 3–5 random items for a podium round, resets placement state, renders |
 | `renderPodium()` | Renders podium items with place assignment buttons; shows Confirm once 3 placed |
 | `assignPlace(itemId, place)` | Assigns a podium position (1/2/3) to an item, displacing any previous occupant |
@@ -532,6 +534,8 @@ The current algorithm picks two random items independently. This has two side ef
 ### Undo for rankings
 
 Undo is now available for rankings (Standard/Podium/Tier) via the History tab — users can reverse any ranking and restore ELO scores. However, deletions of items are still permanent (there's a confirm prompt, but no undo stack). To enable undo for deletions: implement soft-delete with a `deleted: true` flag and a "Recently deleted" view.
+
+Deleting an item or an entire category (`deleteItem()`, `confirmDeleteCat()`/`deleteItemsInCat()`) does not touch `state.history` — past ranking entries can end up referencing ids that no longer exist in `state.items`. `canUndo(entry)` guards against this: it checks that every id an entry's reversal needs is still present before allowing `undoRanking()` to proceed, and `renderHistory()` shows a disabled "Undo unavailable" button for any entry that fails the check. This was a deliberate fix for a real bug — the previous implementation reversed whichever pairs in an entry still had both items present and silently skipped the rest, so a podium/tier entry with one deleted item would leave the *other* items' ELO/wins/losses partially reverted while still reporting "Undo complete" and discarding the history entry, with no way to detect or correct it afterward. The entry itself is left in history (not auto-removed or purged on deletion) so it's still visible for context; it ages out naturally once the 50-entry cap is exceeded.
 
 ### Single-user
 
