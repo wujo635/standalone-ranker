@@ -36,6 +36,7 @@ Follows semantic versioning: `major.minor.patch`
 | 1.13.0 | Items can be hidden from the Library (◎/◉ toggle button, `toggleHidden(id)`); hidden items stay visible (dimmed, tagged) in the Library for un-hiding but are excluded from `itemsForCat()`, so they never appear in any rank mode or the Leaderboard |
 | 1.13.1 | `hidden` is now treated as a personal, per-browser preference: `exportData()` strips it from every item before serializing (`itemsWithoutHidden()`), and `importData()` forces `hidden: false` on every incoming item — so passing JSON exports between users no longer imposes one person's hidden set on another |
 | 1.13.2 | Bug fix: `undoRanking()` silently skipped ELO reversal for any pair in a history entry where an item had since been deleted, while still removing the entry and reporting "Undo complete" — for podium/tier entries this left the *other* items in the entry partially reverted with no way to detect it. Added `canUndo(entry)`/`entryItemIds(entry)` to check upfront that every item a reversal needs still exists; `undoRanking()` now refuses (toast, no state change) instead of partially applying, and `renderHistory()` shows a disabled "Undo unavailable" button for affected entries |
+| 1.14.0 | Library: "Hide all shown" / "Unhide all shown" bulk toolbar above the item list, scoped to the currently filtered + searched set (`filteredLibraryList()`/`bulkSetHidden()`) — lets a user filter down to a subset and hide or unhide the whole thing in one click |
 
 ## Data schema version (DATA_SCHEMA_VERSION)
 
