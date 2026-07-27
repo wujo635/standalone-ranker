@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.13.2` |
+| App version | `1.14.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -283,6 +283,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
 | `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
 | `toggleHidden(id)` | Flips an item's `hidden` flag, saves, re-renders library + leaderboard + stats |
+| `filteredLibraryList()` | Returns the Library's currently-shown items for the active category — search text and field filters both applied; `renderLibrary()` and `bulkSetHidden()` both call this so the bulk actions always act on exactly what's on screen |
+| `bulkSetHidden(hidden)` | Sets `hidden` on every item in `filteredLibraryList()` to the given value, saves, re-renders library + leaderboard + stats |
 | `renderLibrary()` | Rebuilds selects + form, renders alphabetical item list |
 | `openNewCatModal()` | Resets pending state and switches to the new-category view |
 | `saveNewCat()` | Validates name + primary label, pushes to state, saves |
@@ -404,9 +406,10 @@ Field-based filtering allows ranking subsets of items by their extra fields. Ite
 - `toggleFilterable(i)` — toggles the `filterable` flag for a field in the schema editor
 
 **Integration points**:
-- `renderLibrary()` calls `getFilteredItems(rankCat(), list, filterState)` before displaying items
+- `renderLibrary()` calls `filteredLibraryList()`, which applies `getFilteredItems(cat, list, filterState)` (plus search) before displaying items
 - `loadPair()`, `loadPodium()`, `loadTier()` all apply `getFilteredItems()` to their item pools
 - `renderLB()` applies filters to the leaderboard display
+- `bulkSetHidden(hidden)` (the Library's "Hide/Unhide all shown" toolbar) also calls `filteredLibraryList()`, so bulk hide/unhide always matches the currently filtered + searched set
 
 **UI/UX**:
 - Filter section collapses by default (shows just the header with a ▶ chevron) to save screen space
@@ -435,6 +438,8 @@ Extend the item object with `notes: string` and `tags: string[]`. Add inputs in 
 Items carry a `hidden: boolean` field (default `false`). Toggled per item in the Library via the ◎/◉ button next to Edit/Remove — `toggleHidden(id)` flips the flag, saves, and re-renders.
 
 Hidden items stay visible in the Library (dimmed via `.item-row.is-hidden`, tagged with a "hidden" badge) so they can be found and un-hidden, but `itemsForCat()` filters them out — since Leaderboard and all three rank modes (VS, Podium, Tier) source their item pool from `itemsForCat()`, hidden items never appear there. `libItems()` (Library's own item source) is untouched, so hiding never removes an item from view, only from ranking/leaderboard consideration.
+
+A bulk toolbar above the item list ("Hide all shown (n)" / "Unhide all shown (n)") applies `bulkSetHidden(hidden)` to every item in `filteredLibraryList()` — the same search + field-filter-applied set the list itself renders, so the counts and the action always match what's on screen. This lets a user filter down to a subset (e.g. `Director: Wachowski`, or a search term) and hide or unhide the whole matching set in one click, without touching anything outside it.
 
 No data migration was needed: old items simply lack the `hidden` field, and `!i.hidden` treats `undefined` the same as `false`.
 

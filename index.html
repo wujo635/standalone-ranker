@@ -387,7 +387,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.13.2';
+const APP_VERSION = '1.14.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1009,28 +1009,41 @@ function saveItem(id) {
   save(); renderLibrary(); toast('Saved');
 }
 
+// Items currently shown in the Library for the active category — search text and
+// field filters both applied, in the same order renderLibrary() applies them.
+// Bulk hide/show actions operate on exactly this set, so "what you see is what you hide."
+function filteredLibraryList() {
+  const cat = libCat();
+  let list = libItems().sort((a,b) => a.title.localeCompare(b.title));
+
+  const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
+  if (query) {
+    list = list.filter(i => {
+      if (i.title.toLowerCase().includes(query)) return true;
+      const itemFields = i.fields || {};
+      return Object.values(itemFields).some(v => String(v).toLowerCase().includes(query));
+    });
+  }
+
+  return getFilteredItems(cat, list, filterState);
+}
+
+function bulkSetHidden(hidden) {
+  const list = filteredLibraryList();
+  if (!list.length) { toast('No items match the current filter'); return; }
+  list.forEach(i => { state.items[i.id].hidden = hidden; });
+  save(); renderLibrary(); renderLB(); renderStats();
+  toast((hidden ? 'Hid ' : 'Unhid ') + list.length + ' item' + (list.length !== 1 ? 's' : ''));
+}
+
 function renderLibrary() {
   rebuildCatSelects();
   renderAddForm();
   if (expandedItemId && !libItems().find(i => i.id === expandedItemId)) expandedItemId = null;
   const cat = libCat();
   const fields = extraFields(cat);
-  let list = libItems().sort((a,b) => a.title.localeCompare(b.title));
-
-  // Apply search filter
   const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
-  if (query) {
-    list = list.filter(i => {
-      // Search in title
-      if (i.title.toLowerCase().includes(query)) return true;
-      // Search in fields
-      const itemFields = i.fields || {};
-      return Object.values(itemFields).some(v => String(v).toLowerCase().includes(query));
-    });
-  }
-
-  // Apply field filters
-  list = getFilteredItems(cat, list, filterState);
+  const list = filteredLibraryList();
 
   // Render filter UI
   renderFilterUI(cat);
@@ -1042,7 +1055,11 @@ function renderLibrary() {
       : '<div class="empty">No items yet — add one above.</div>';
     return;
   }
-  el.innerHTML = '<div class="card">' + list.map(i => {
+  const bulkBar = `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:.5rem">
+    <button class="ghost btn-sm" onclick="bulkSetHidden(true)" title="Hide every item currently shown below">◎ Hide all shown (${list.length})</button>
+    <button class="ghost btn-sm" onclick="bulkSetHidden(false)" title="Unhide every item currently shown below">◉ Unhide all shown (${list.length})</button>
+  </div>`;
+  el.innerHTML = bulkBar + '<div class="card">' + list.map(i => {
     const meta = itemMeta(i).map(l => `<span class="item-meta-line">${l}</span>`).join('');
     const isEditing = expandedItemId === i.id;
     const editInputs = fields.map(f =>
