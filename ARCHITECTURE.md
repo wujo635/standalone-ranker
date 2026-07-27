@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.14.0` |
+| App version | `1.15.0` |
 | Data schema version | `3` |
 | localStorage key | `ranker-v1` |
 
@@ -218,6 +218,10 @@ The leaderboard score bar is normalized: the top item always fills 100%, the bot
 
 Two random items shown side by side. Pick one. One ELO update per round. Good for deliberate, focused comparisons.
 
+**Keyboard voting**: `handleRankVoteKey(e)` is a single `document`-level `keydown` listener (registered once) that lets you vote without clicking — `ArrowLeft`/`1` picks the left card, `ArrowRight`/`2` picks the right card. It only acts when `rankMode === 'standard'`, the Rank tab is the active view, a pair is currently loaded (`currentPair`), and focus isn't in an `input`/`textarea`/`select` (so typing in Search, an Add-item field, or the category/mode selects is never intercepted). Each `vsCard()` shows its key hint (`(← or 1)` / `(→ or 2)`) next to "Pick this" so the shortcut is discoverable without a separate help screen.
+
+**Session counter**: `standardSessionVotes` counts comparisons made in standard mode since the category was last selected (`rank-cat`'s `onchange` resets it to 0; skipping a pair does not count). Shown next to "Which do you prefer?" once at least one vote has been cast this session — in-memory only, not persisted, and unrelated to the lifetime `Total comparisons` stat on the Data tab (which counts `wins` across all items and never resets).
+
 ### Podium
 
 3–5 random items shown at once (pool size scales with list size — minimum 3 items required). You assign 🥇 🥈 🥉 to your top three. On confirm, ELO updates are applied for every implied pair:
@@ -295,9 +299,10 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `saveItem(id)` | Validates and writes edited field values back to state, saves |
 | `initRankView()` | Entry point for the Rank tab — dispatches to `loadPair()` or `loadPodium()` based on current mode |
 | `setRankMode(mode)` | Switches between `standard` and `podium` modes, updates toggle UI, reloads |
-| `loadPair()` | Picks 2 random items from the active rank category, renders VS cards |
-| `vsCard(winner, loser)` | Returns HTML string for one side of a comparison card |
-| `vote(wid, lid)` | Runs ELO update, saves, re-renders leaderboard, loads next pair |
+| `loadPair()` | Picks 2 random items from the active rank category, stores them in `currentPair` (for keyboard voting), renders VS cards with the running session count |
+| `vsCard(winner, loser, keyHint)` | Returns HTML string for one side of a comparison card, with an optional keyboard-shortcut hint next to "Pick this" |
+| `handleRankVoteKey(e)` | `document`-level `keydown` listener (registered once); votes via `ArrowLeft`/`1` (left card) or `ArrowRight`/`2` (right card) when standard mode's Rank tab is active and a pair is loaded; ignores input/textarea/select focus |
+| `vote(wid, lid)` | Runs ELO update, increments `standardSessionVotes`, saves, re-renders leaderboard, loads next pair |
 | `loadTier()` | Prompts for session size, assembles pool prioritising zero-comparison items, resets placements, renders |
 | `renderTier()` | Renders tier lanes (S/A/B/C/D) with placed chips and untiered item list with tier buttons |
 | `assignTier(itemId, tier)` | Places an item into a tier lane |
