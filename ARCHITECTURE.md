@@ -14,8 +14,8 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.15.0` |
-| Data schema version | `3` |
+| App version | `1.16.0` |
+| Data schema version | `4` |
 | localStorage key | `ranker-v1` |
 
 Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage.
@@ -65,7 +65,7 @@ Everything lives in one file: `index.html`
 index.html
 ├── <style>       CSS custom properties + all component styles (~130 lines)
 ├── <body>        Seven views: Library, New Category, Schema Editor, Rank, Leaderboard, History, Data
-└── <script>      All app logic (~750 lines of vanilla JS)
+└── <script>      All app logic (~980 lines of vanilla JS)
 ```
 
 ---
@@ -97,19 +97,23 @@ state = {
   },
 
   items: {
-    "<uid>": {
-      id:     string,   // uid() — timestamp + random suffix, e.g. "m3x1k2ab"
-      cat:    string,   // must match a value in state.cats
-      title:  string,   // value of the primary field
-      fields: {         // values for all extra schema fields
+    "<id>": {
+      id:        string,   // itemKey(cat, title) — deterministic hash, e.g. "i1en785j". Two
+                            // devices adding "the same" item independently land on this same
+                            // id, so merging never needs an identity-matching/remap step.
+                            // Renaming an item's title changes its id (see itemKey()).
+      cat:       string,   // must match a value in state.cats
+      title:     string,   // value of the primary field
+      fields: {            // values for all extra schema fields
         "Artist": "Radiohead",
         "Album": "OK Computer",
         ...
       },
-      elo:    number,   // starts at 1000
-      wins:   number,   // times chosen in a comparison
-      losses: number,   // times not chosen in a comparison
-      hidden: boolean   // if true, excluded from ranking selection and the leaderboard; still visible/editable in Library
+      elo:       number,   // starts at 1000
+      wins:      number,   // times chosen in a comparison
+      losses:    number,   // times not chosen in a comparison
+      hidden:    boolean,  // if true, excluded from ranking selection and the leaderboard; still visible/editable in Library
+      updatedAt: number    // Date.now() of last title/field edit; used by mergeImport() for last-write-wins field merging
     }
   },
 
@@ -122,9 +126,29 @@ state = {
       loser: { id, title, eloChange },   // for standard mode only
       podium: [...],      // for podium mode: [{id, title, place}, ...]
       tiers: [...],       // for tier mode: [S_items[], A_items[], B_items[], C_items[], D_items[]]
-      updates: [...]      // for podium/tier: [{wid, lid, wChange, lChange}, ...] for undo reversal
+      updates: [...],     // for podium/tier: [{wid, lid, wChange, lChange}, ...] for undo reversal
+      matchIds: [...]     // ids of the matchLog entries this ranking created — removed from
+                           // matchLog on undo, so an undone comparison is never later merged in
     }
-  ]
+  ],
+
+  // Append-only, unbounded log of every pairwise result since the last sync baseline —
+  // separate from `history` (which is capped at 50, display/undo only). This is the source
+  // of truth mergeImport() replays to reconcile rankings made independently on two devices.
+  matchLog: [
+    { id: string, cat: string, wid: string, lid: string, ts: number, seq: number }
+  ],
+
+  // The last agreed-upon rating snapshot two devices merged from. mergeImport() folds
+  // matchLog forward from `ratings` to recompute final ELO deterministically, regardless
+  // of merge order — see "Merging rankings between devices" below.
+  syncBase: {
+    id:       string,           // random, regenerated every time a new baseline is established
+    parentId: string | null,    // id of the baseline this one superseded, for fast-forward detection
+    rev:      number,           // monotonic counter, display-only
+    ts:       number,           // Date.now() when this baseline was established
+    ratings:  { "<itemId>": { elo, wins, losses } }
+  }
 }
 ```
 
@@ -135,15 +159,19 @@ Exported JSON wraps `state` with a `_meta` block:
 ```json
 {
   "_meta": {
-    "appVersion": "1.2.0",
-    "dataSchemaVersion": 3,
+    "appVersion": "1.16.0",
+    "dataSchemaVersion": 4,
     "exportedAt": "2026-07-05T12:00:00.000Z"
   },
   "cats": [...],
   "schema": {...},
-  "items": {...}
+  "items": {...},
+  "matchLog": [...],
+  "syncBase": {...}
 }
 ```
+
+`settings.deviceId` and `settings.userName` are stripped before export (see `exportData()`) — they're personal, per-browser identifiers, same treatment as `hidden`.
 
 ### CSV preload format
 
@@ -178,18 +206,23 @@ The "Export category as CSV" button in the Data tab produces a file in this exac
 
 `save()` serializes the full `state` object on every write. `load()` deserializes it on page load, applying any needed migrations. The app also checks for the legacy `media-ranker-v1` key and migrates it automatically on first load.
 
-### Import conflict resolution
+### Merging rankings between devices
 
-JSON imports are resolved per category:
+JSON import always goes through `mergeImport()`. New items are unioned in unconditionally (deterministic ids make this collision-free); what happens to *rankings* depends on how the incoming file's `syncBase` relates to the local one, via `relateBaselines()`:
 
-| Situation | Behaviour |
-|---|---|
-| Category in file does not exist locally | Imported freely, no prompt |
-| Category in file already exists locally | Confirm dialog: **OK** replaces local category entirely; **Cancel** skips it |
+| Relation | Meaning | Behaviour |
+|---|---|---|
+| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward. Result becomes a new baseline (`rev + 1`), both devices' `matchLog`s clear. |
+| `incoming-ahead` (`incoming.syncBase.parentId === local.syncBase.id`), local has no unsynced comparisons | Incoming is a clean continuation of exactly where local already is | **Fast-forward**: adopt incoming's items/baseline/matchLog wholesale, no prompt. |
+| `incoming-ahead`, local *does* have unsynced comparisons | Same shared ancestor, but local has since ranked something too | Falls through to the same replay merge as `same` — safe, because `local.syncBase.ratings` is still a valid common starting point. |
+| `local-ahead` (`local.syncBase.parentId === incoming.syncBase.id`) | Local is already past where incoming is | Union any new items only; no rating changes; toast explains why. |
+| `diverged` (no relation found) | The two files don't share a recognizable common point (e.g. a sync hop was skipped) | **Confirm dialog** — no silent guessing: **OK** discards local's unsynced comparisons (reverted to the last local baseline) and adopts the incoming file as-is; **Cancel** aborts with no changes. A brand-new/empty local library always treats this as a clean adopt (nothing to lose). |
 
-Replacing a category removes all local items for that category before writing the imported ones — no duplicates possible. The toast on completion reports how many items were imported and which categories were skipped.
+Because `relateBaselines()` only looks one hop back (`parentId`), it recognizes the two common cases automatically (same starting point; immediate continuation) and safely falls back to an explicit prompt for anything more exotic, rather than mis-detecting a real conflict as safe. See `mergeImport()`, `replayMatches()`, and `unionItemsAndSchema()`.
 
-This means importing is safe to use as an update mechanism: import a file with corrected data, choose Replace for the affected category, and the local copy is cleanly overwritten.
+Non-ranking field edits on an item both sides have use last-write-wins via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`). `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
+
+**Why this design, not full event-sourcing from scratch:** replaying pairwise ELO from the very first comparison would require every historical match ever made, but existing installs only ever kept the last 50 (`history`, display/undo only) and mutate item ratings in place. Rather than require reconstructing lost history, migration to schema v4 snapshots *current* ratings as a trusted baseline (`syncBase`, `rev: 0`) and only logs matches going forward (`matchLog`) — bounding replay cost to "comparisons since the last sync," not lifetime volume. See the "Single-user" entry under Known limitations for the tradeoff this implies.
 
 ---
 
@@ -336,9 +369,18 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `exportData()` | Wraps state with `_meta`, serializes to JSON (items via `itemsWithoutHidden()`), triggers download |
 | `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
-| `importData(e)` | Reads JSON file, runs `migrateData()`, then prompts per category to replace or skip when conflicts exist; forces `hidden: false` on every incoming item so a personal hide preference from another user's export can't apply locally |
+| `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
+| `mergeImport(incoming)` | Reconciles rankings from another device — see "Merging rankings between devices" above |
+| `relateBaselines(localBase, incBase)` | Returns `'same'` \| `'incoming-ahead'` \| `'local-ahead'` \| `'diverged'` by comparing `syncBase.id`/`parentId` |
+| `unionItemsAndSchema(incoming)` | Adds items/cats/schema fields only present in `incoming`; last-write-wins on shared items' `fields` via `updatedAt` |
+| `adoptIncomingWholesale(incoming)` | Mirrors local state to `incoming`'s items/baseline/matchLog; used by fast-forward and (after `resetItemsToBaseline()`) the diverged-discard path |
+| `replayMatches(baselineRatings, matches)` | Pure function: folds a chronologically-sorted match list forward from a baseline snapshot using `eloUpdatePure()`, returns final `{elo,wins,losses}` per item |
+| `eloUpdatePure(w, l)` | Same math as `eloUpdate()` but operates on plain rating records instead of live item objects, for replay |
+| `resetItemsToBaseline(base)` | Reverts every item in `base.ratings` back to that snapshot — used to actually discard local unsynced comparisons (matchLog alone isn't enough; votes mutate items live) |
+| `recordMatch(cat, wid, lid)` | Appends one entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
+| `itemKey(cat, title)` | Deterministic hash of `(cat, title)` — the item id scheme since schema v4 |
 | `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
-| `uid()` | Generates a short collision-resistant ID |
+| `uid()` | Generates a short collision-resistant ID — still used for `syncBase.id` and legacy fallbacks |
 | `esc(s)` | HTML-escapes strings before injecting into innerHTML |
 
 ---
@@ -492,7 +534,7 @@ Because it's a single HTML file, it deploys anywhere static files are served:
 - **Netlify / Vercel**: drag and drop the file in their dashboards
 - **Cloudflare Pages**: same drag-and-drop flow
 
-For multi-device sync, you'd need a backend (see above) or use the export/import flow manually.
+For multi-device *live* sync, you'd still need a backend (see above). For two-or-a-few people sharing a single accumulating file by hand, the export/import flow now merges rankings automatically — see "Merging rankings between devices" above.
 
 ---
 
@@ -515,6 +557,9 @@ For multi-device sync, you'd need a backend (see above) or use the export/import
 | Inline editing | Edit without leaving the library view | Separate edit screen |
 | History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
 | Hide items (vs. delete) | Reversible way to exclude items (e.g. duplicates, retired entries) from ranking without losing their ELO/history | Delete permanently, or a separate archive tab |
+| Deterministic item ids (`itemKey(cat, title)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge | Random ids + title-based matching/remapping at merge time |
+| Snapshot baseline + incremental match log for merging | Bounds merge/replay cost to comparisons since the last sync, not lifetime volume; avoids requiring a full historical match log that doesn't exist for pre-v4 data | Full event-sourcing (replay every comparison ever made) |
+| Merge conflicts prompt only when genuinely ambiguous (`diverged`) | The common cases (same starting point, clean continuation) resolve silently; users aren't asked to make a decision that has an unambiguous right answer | Always prompt per category (old Replace/Skip behaviour) |
 
 ---
 
@@ -547,6 +592,11 @@ Undo is now available for rankings (Standard/Podium/Tier) via the History tab �
 
 Deleting an item or an entire category (`deleteItem()`, `confirmDeleteCat()`/`deleteItemsInCat()`) does not touch `state.history` — past ranking entries can end up referencing ids that no longer exist in `state.items`. `canUndo(entry)` guards against this: it checks that every id an entry's reversal needs is still present before allowing `undoRanking()` to proceed, and `renderHistory()` shows a disabled "Undo unavailable" button for any entry that fails the check. This was a deliberate fix for a real bug — the previous implementation reversed whichever pairs in an entry still had both items present and silently skipped the rest, so a podium/tier entry with one deleted item would leave the *other* items' ELO/wins/losses partially reverted while still reporting "Undo complete" and discarding the history entry, with no way to detect or correct it afterward. The entry itself is left in history (not auto-removed or purged on deletion) so it's still visible for context; it ages out naturally once the 50-entry cap is exceeded.
 
-### Single-user
+### Single-user (device-local by default, mergeable by hand)
 
-Data is local to one browser profile. No sync, no sharing. Fix: add a backend (see "Switch from localStorage to a backend" above).
+Data is local to one browser profile. As of schema v4, exporting/importing JSON between two devices merges rankings automatically (see "Merging rankings between devices") rather than requiring a full Replace — but it's still an asynchronous, manual hand-off, not live sync. For real-time multi-device sync, add a backend (see "Switch from localStorage to a backend" above).
+
+**Known gaps in the merge model** (acceptable tradeoffs for a manual-handoff workflow, worth knowing about):
+- **Deletions aren't tracked.** There's no tombstone log — if a locally-deleted item still exists in an incoming file, merging brings it back. Fine for the common case (items are rarely deleted); would need a delete log to fix properly.
+- **Renamed items lose their match history on the *other* device.** Since id = `itemKey(cat, title)`, renaming an item locally changes its id; matches recorded against the old id become orphaned (silently dropped on replay) unless the rename has also propagated. Same failure mode as an item being deleted.
+- **Baseline relation only looks one hop back.** `relateBaselines()` compares `syncBase.id`/`parentId` directly rather than walking a full ancestry chain, so a sync hop that gets skipped (e.g. a third device's export lands out of order) falls into the `diverged` case and requires a manual confirm rather than being silently reconciled. This is a deliberate conservative choice — see "Merging rankings between devices" above.
