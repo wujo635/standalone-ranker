@@ -434,6 +434,10 @@ let state = {
   items: {},
   cats: [...BUILTIN_CATS],
   schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)),
+  // userName is reserved but currently unused (not shown in any UI, not read anywhere) —
+  // stubbed in so it's stripped from exports like deviceId. Deliberately deferred: if
+  // added later, use it to show human-readable attribution (e.g. "you" vs "them") in the
+  // mergeImport() diverged-conflict prompt and history entries. See ARCHITECTURE.md.
   settings: { smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0 },
   history: [],
   matchLog: [],
