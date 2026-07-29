@@ -340,8 +340,12 @@
     </div>
     <div class="card">
       <div class="card-title">Import</div>
-      <div class="card-desc">Load a previously exported JSON file. Merges with your existing data — nothing is overwritten.</div>
+      <div class="card-desc">Load a previously exported JSON file. New items are always added. Comparisons made on both devices since the last sync are merged automatically; you're only asked to confirm when the file's history doesn't line up with yours.</div>
       <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
+    </div>
+    <div class="card">
+      <div class="card-title">Sync status</div>
+      <div id="sync-status"></div>
     </div>
     <div class="card">
       <div class="card-title">Preload from CSV</div>
@@ -387,7 +391,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -395,7 +399,12 @@ const APP_VERSION = '1.15.0';
 //   1 — original media-ranker; items had hardcoded `year` field, no schema object
 //   2 — schema introduced as a plain array per category, no primary label
 //   3 — schema is { primary, fields[] } per category; app renamed to Ranker
-const DATA_SCHEMA_VERSION = 3;
+//   4 — item ids are now a deterministic hash of (cat, title) instead of random,
+//       so two devices independently generate the same id for "the same" item.
+//       Adds state.syncBase (snapshot baseline for merging) and state.matchLog
+//       (append-only pairwise results since that baseline) to support merging
+//       rankings from two devices back into one file. See mergeImport().
+const DATA_SCHEMA_VERSION = 4;
 
 const CAT_DEFAULTS = {
   'Movies': {
@@ -418,12 +427,21 @@ const CAT_DEFAULTS = {
 const BUILTIN_CATS = Object.keys(CAT_DEFAULTS);
 
 // state.schema[cat] = { primary: string, fields: [{name, required}] }
+// state.syncBase = { rev, ts, ratings: { [itemId]: {elo,wins,losses} } } — the last
+// agreed-upon baseline for merging rankings from another device. state.matchLog is
+// the append-only list of pairwise results applied since that baseline. See mergeImport().
 let state = {
   items: {},
   cats: [...BUILTIN_CATS],
   schema: JSON.parse(JSON.stringify(CAT_DEFAULTS)),
-  settings: { smartPairMode: false },
-  history: []
+  // userName is reserved but currently unused (not shown in any UI, not read anywhere) —
+  // stubbed in so it's stripped from exports like deviceId. Deliberately deferred: if
+  // added later, use it to show human-readable attribution (e.g. "you" vs "them") in the
+  // mergeImport() diverged-conflict prompt and history entries. See ARCHITECTURE.md.
+  settings: { smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0 },
+  history: [],
+  matchLog: [],
+  syncBase: { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings: {} }
 };
 let lbCat = BUILTIN_CATS[0];
 let pendingFields = [];
@@ -469,11 +487,51 @@ function migrateData(data) {
     }
   }
 
-  // v < 4: add next migration block here when DATA_SCHEMA_VERSION becomes 4
+  if (v < 4) {
+    // v3 -> v4: item ids become a deterministic hash of (cat, title) instead of
+    // random, so two devices agree on the same id for "the same" item with no
+    // coordination. Remap existing items (and every id reference in history) to
+    // the new scheme, then snapshot current ratings as the initial sync baseline
+    // — comparisons made before this point are trusted as-is, not replayed.
+    const idMap = {};
+    const remapped = {};
+    Object.entries(data.items || {}).forEach(([oldId, item]) => {
+      const newId = itemKey(item.cat, item.title);
+      idMap[oldId] = newId;
+      remapped[newId] = { ...item, id: newId, updatedAt: item.updatedAt || Date.now() };
+    });
+    data.items = remapped;
+    (data.history || []).forEach(entry => {
+      if (entry.winner) entry.winner.id = idMap[entry.winner.id] || entry.winner.id;
+      if (entry.loser) entry.loser.id = idMap[entry.loser.id] || entry.loser.id;
+      (entry.updates || []).forEach(u => {
+        u.wid = idMap[u.wid] || u.wid;
+        u.lid = idMap[u.lid] || u.lid;
+      });
+      if (entry.podium) entry.podium.forEach(p => { p.id = idMap[p.id] || p.id; });
+    });
+    const ratings = {};
+    Object.values(data.items).forEach(item => {
+      ratings[item.id] = { elo: item.elo, wins: item.wins, losses: item.losses };
+    });
+    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings };
+    data.matchLog = [];
+  }
+
+  // v < 5: add next migration block here when DATA_SCHEMA_VERSION becomes 5
 
   // Ensure new optional fields exist (added in app updates, not schema migrations)
   if (!data.history) data.history = [];
+  if (!data.matchLog) data.matchLog = [];
+  if (!data.syncBase) {
+    const ratings = {};
+    Object.values(data.items || {}).forEach(item => { ratings[item.id] = { elo: item.elo, wins: item.wins, losses: item.losses }; });
+    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings };
+  }
   if (!data.settings) data.settings = { smartPairMode: false };
+  if (!data.settings.deviceId) data.settings.deviceId = makeDeviceId();
+  if (data.settings.userName === undefined) data.settings.userName = '';
+  if (data.settings.matchSeq === undefined) data.settings.matchSeq = 0;
 
   // Always stamp _meta so future loads know the current schema version
   data._meta = {
@@ -495,12 +553,7 @@ function load() {
       const parsed = JSON.parse(src);
       const migrated = migrateData(parsed);
       state = migrated;
-      // Safety: ensure schema exists for all cats
-      state.cats.forEach(c => {
-        if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
-        if (!state.schema[c].primary) state.schema[c].primary = 'Name';
-        if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
-      });
+      ensureSchemaWellFormed();
     }
   } catch(e) {}
   // Restore settings
@@ -513,6 +566,23 @@ function load() {
 
 // --- Utilities ---
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+
+// Deterministic id for an item: two devices adding "the same" item (same category +
+// title) independently land on the same id, so merging two files can union items by
+// id with no separate identity-matching/remap step. Renaming an item's title changes
+// its id (old id's matches become orphaned and are dropped on replay) — an accepted
+// tradeoff, same as the existing "item was deleted" case for undo.
+function itemKey(cat, title) {
+  const s = String(cat) + ' ' + String(title).trim().toLowerCase();
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return 'i' + h.toString(36);
+}
+
+// Random per-browser device label, generated once and persisted forever. Used to
+// namespace match ids so two devices' independently-generated matchLog entries can
+// never collide when unioned during a merge.
+function makeDeviceId() { return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function toast(msg) {
   const el = document.getElementById('toast');
@@ -954,8 +1024,9 @@ function addItem() {
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
     fieldValues[f.name] = val;
   }
-  const id = uid();
-  state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false };
+  const id = itemKey(cat, t);
+  if (state.items[id]) { toast('An item with this ' + primary + ' already exists'); return; }
+  state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
   document.getElementById('inp-primary').value = '';
   fields.forEach(f => { const el = document.getElementById('field-' + f.name); if (el) el.value = ''; });
   save(); renderLibrary(); toast('Added: ' + t);
@@ -999,13 +1070,26 @@ function saveItem(id) {
     const val = el ? el.value.trim() : '';
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
   }
-  item.title = t;
   if (!item.fields) item.fields = {};
   fields.forEach(f => {
     const el = document.getElementById('edit-field-' + id + '-' + f.name);
     if (el) item.fields[f.name] = el.value.trim();
   });
-  expandedItemId = null;
+  item.updatedAt = Date.now();
+  if (t !== item.title) {
+    // Title changed -> id (derived from cat+title) changes too. Rekey the item;
+    // any match log / history entries pointing at the old id become orphaned,
+    // same as if the item had been deleted (see itemKey()).
+    const newId = itemKey(cat, t);
+    if (state.items[newId]) { toast('An item with this ' + primary + ' already exists'); return; }
+    item.title = t;
+    item.id = newId;
+    delete state.items[id];
+    state.items[newId] = item;
+    expandedItemId = null;
+  } else {
+    expandedItemId = null;
+  }
   save(); renderLibrary(); toast('Saved');
 }
 
@@ -1239,15 +1323,30 @@ function applyEloUpdate(winner, loser) {
   return { wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 };
 }
 
+// Appends one pairwise result to the unbounded match log (separate from the
+// 50-entry-capped `history` used for the undo UI). This is the source of truth
+// mergeImport() replays to reconcile rankings from two devices — every implied
+// pairwise result needs its own entry, e.g. all C(n,2) pairs from one podium/tier
+// submission, in the exact order they were applied (order matters: ELO is sequential).
+function recordMatch(cat, wid, lid) {
+  state.settings.matchSeq = (state.settings.matchSeq || 0) + 1;
+  const seq = state.settings.matchSeq;
+  const id = state.settings.deviceId + '-' + seq;
+  state.matchLog.push({ id, cat, wid, lid, ts: Date.now(), seq });
+  return id;
+}
+
 function vote(wid, lid) {
   const winner = state.items[wid];
   const loser = state.items[lid];
   const { wChange, lChange } = applyEloUpdate(winner, loser);
+  const matchId = recordMatch(rankCat(), wid, lid);
   recordRanking({
     type: 'standard',
     category: rankCat(),
     winner: { id: wid, title: winner.title, eloChange: wChange },
-    loser: { id: lid, title: loser.title, eloChange: lChange }
+    loser: { id: lid, title: loser.title, eloChange: lChange },
+    matchIds: [matchId]
   });
   standardSessionVotes++;
   save(); renderLB(); renderStats(); loadPair(); toast('\u2713 Voted');
@@ -1337,6 +1436,8 @@ function submitPodium() {
   const ordered = [...ranked, ...unranked]; // full order for ELO
   let updates = 0;
   const historyUpdates = [];
+  const matchIds = [];
+  const cat = rankCat();
   // Apply ELO for every pair where higher rank beats lower rank
   // Only apply when both are in the explicitly ranked top 3, OR winner is ranked and loser is unranked
   for (let i = 0; i < ranked.length; i++) {
@@ -1345,6 +1446,7 @@ function submitPodium() {
       const loser  = state.items[ordered[j]];
       if (winner && loser) {
         historyUpdates.push(applyEloUpdate(winner, loser));
+        matchIds.push(recordMatch(cat, winner.id, loser.id));
         updates++;
       }
     }
@@ -1355,10 +1457,11 @@ function submitPodium() {
   });
   recordRanking({
     type: 'podium',
-    category: rankCat(),
+    category: cat,
     podium: podium.filter(p => p.id),
     unranked: unranked.map(id => state.items[id]?.title || ''),
-    updates: historyUpdates
+    updates: historyUpdates,
+    matchIds
   });
   save(); renderLB(); renderStats();
   toast(`Podium confirmed — ${updates} ELO updates applied`);
@@ -1506,6 +1609,8 @@ function submitTier() {
   const placed = tierPool.filter(i => tierPlacements[i.id]);
   let updates = 0;
   const historyUpdates = [];
+  const matchIds = [];
+  const cat = rankCat();
   const tiers = [[], [], [], [], []]; // S, A, B, C, D
   for (let i = 0; i < placed.length; i++) {
     for (let j = i + 1; j < placed.length; j++) {
@@ -1515,15 +1620,17 @@ function submitTier() {
       const winner = ti < tj ? placed[i] : placed[j];
       const loser  = ti < tj ? placed[j] : placed[i];
       historyUpdates.push(applyEloUpdate(winner, loser));
+      matchIds.push(recordMatch(cat, winner.id, loser.id));
       updates++;
     }
     tiers[TIERS.indexOf(tierPlacements[placed[i].id])].push(placed[i].title);
   }
   recordRanking({
     type: 'tier',
-    category: rankCat(),
+    category: cat,
     tiers: tiers,
-    updates: historyUpdates
+    updates: historyUpdates,
+    matchIds
   });
   save(); renderLB(); renderStats();
   toast('Tier confirmed — ' + updates + ' ELO updates applied');
@@ -1580,6 +1687,12 @@ function undoRanking(idx) {
       l.elo -= lChange;
       w.wins--; l.losses--;
     });
+  }
+  // Undoing must also retract the match log entries this action created —
+  // otherwise a later merge would replay a comparison the user reversed locally.
+  if (entry.matchIds && entry.matchIds.length) {
+    const idSet = new Set(entry.matchIds);
+    state.matchLog = state.matchLog.filter(m => !idSet.has(m.id));
   }
   state.history.splice(idx, 1);
   save(); renderLB(); renderHistory();
@@ -1790,11 +1903,12 @@ function bulkAddCSVImport({ category, items }) {
     if (match) {
       // Update field values, preserve ELO and record
       match.fields = Object.assign(match.fields || {}, fieldValues);
+      match.updatedAt = Date.now();
       updated++;
     } else {
       // New item — add fresh
-      const id = uid();
-      state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false };
+      const id = itemKey(category, title);
+      state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
       added++;
     }
   });
@@ -1805,8 +1919,8 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
   if (!state.cats.includes(category)) state.cats.push(category);
   if (updateSchema) state.schema[category] = { primary, fields };
   items.forEach(({ title, fields: fieldValues }) => {
-    const id = uid();
-    state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false };
+    const id = itemKey(category, title);
+    state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
   });
 }
 
@@ -1827,6 +1941,20 @@ function renderStats() {
   const rows = [['Total items',total],['Total comparisons',totalVotes],...Object.entries(counts).map(([c,n])=>[c,n])];
   document.getElementById('stats-list').innerHTML = rows.map(([l,v]) =>
     `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${v}</span></div>`).join('');
+
+  renderSyncStatus();
+}
+
+function renderSyncStatus() {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  const rows = [
+    ['Baseline revision', state.syncBase.rev],
+    ['Last synced', new Date(state.syncBase.ts).toLocaleString()],
+    ['Unsynced comparisons', state.matchLog.length]
+  ];
+  el.innerHTML = rows.map(([l,v]) =>
+    `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${esc(String(v))}</span></div>`).join('');
 }
 
 // `hidden` is a personal, per-browser preference — never part of a shared export.
@@ -1841,6 +1969,9 @@ function itemsWithoutHidden() {
 }
 
 function exportData() {
+  // deviceId/userName are personal, per-browser identifiers used only to namespace
+  // this device's own match ids — never meant to be adopted by whoever imports the file.
+  const { deviceId, userName, ...settingsToExport } = state.settings;
   const exportPayload = {
     _meta: {
       appVersion: APP_VERSION,
@@ -1848,7 +1979,8 @@ function exportData() {
       exportedAt: new Date().toISOString()
     },
     ...state,
-    items: itemsWithoutHidden()
+    items: itemsWithoutHidden(),
+    settings: settingsToExport
   };
   const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -1899,6 +2031,163 @@ function csvCell(val) {
   return s;
 }
 
+// --- Sync / merge ---
+// Pure ELO step operating on plain {elo,wins,losses} rating records rather than
+// live item objects — used by replayMatches() to recompute ratings deterministically
+// from a baseline, independent of whatever order the two devices happened to merge in.
+function eloUpdatePure(w, l) {
+  const K = 32, E = 1 / (1 + Math.pow(10, (l.elo - w.elo) / 400));
+  w.elo = Math.round(w.elo + K * (1 - E));
+  l.elo = Math.round(l.elo + K * (0 - 1 + E));
+  w.wins++; l.losses++;
+}
+
+// Folds a baseline snapshot forward through a chronologically-sorted match list.
+// Matches referencing an item that no longer exists on this device are skipped
+// (same "item was deleted" precedent as undoRanking's canUndo).
+function replayMatches(baselineRatings, matches) {
+  const ratings = {};
+  Object.entries(baselineRatings).forEach(([id, r]) => { ratings[id] = { elo: r.elo, wins: r.wins, losses: r.losses }; });
+  matches.forEach(m => {
+    if (!state.items[m.wid] || !state.items[m.lid]) return;
+    if (!ratings[m.wid]) ratings[m.wid] = { elo: 1000, wins: 0, losses: 0 };
+    if (!ratings[m.lid]) ratings[m.lid] = { elo: 1000, wins: 0, losses: 0 };
+    eloUpdatePure(ratings[m.wid], ratings[m.lid]);
+  });
+  return ratings;
+}
+
+function applyRatings(ratings) {
+  Object.entries(ratings).forEach(([id, r]) => {
+    if (state.items[id]) { state.items[id].elo = r.elo; state.items[id].wins = r.wins; state.items[id].losses = r.losses; }
+  });
+}
+
+function snapshotRatings() {
+  const out = {};
+  Object.values(state.items).forEach(i => { out[i.id] = { elo: i.elo, wins: i.wins, losses: i.losses }; });
+  return out;
+}
+
+function dedupeMatches(matches) {
+  const seen = new Set(), out = [];
+  matches.forEach(m => { if (!seen.has(m.id)) { seen.add(m.id); out.push(m); } });
+  return out;
+}
+
+// Resets every item present in `base` back to its baseline rating — used to discard
+// local unsynced comparisons that turned out to be against a stale baseline (see
+// the 'diverged' case in mergeImport). Reverting item.elo directly (not just clearing
+// matchLog) matters because votes mutate items live; matchLog is a parallel audit trail.
+function resetItemsToBaseline(base) { applyRatings(base.ratings); }
+
+// New items are unioned in (added is always safe). For items both sides already have,
+// custom field edits use last-write-wins via updatedAt — title never conflicts because
+// item ids are derived from (cat, title), so a title edit is a rename to a new id, not
+// an edit of the existing one (see itemKey()).
+function unionItemsAndSchema(incoming) {
+  let added = 0;
+  Object.values(incoming.items || {}).forEach(inc => {
+    const cur = state.items[inc.id];
+    if (!cur) {
+      state.items[inc.id] = { ...inc, hidden: false };
+      if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
+      added++;
+    } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
+      cur.fields = inc.fields;
+      cur.updatedAt = inc.updatedAt;
+    }
+  });
+  (incoming.cats || []).forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
+  Object.keys(incoming.schema || {}).forEach(c => { if (!state.schema[c]) state.schema[c] = incoming.schema[c]; });
+  return { added };
+}
+
+// Makes local state a mirror of `incoming`'s items/baseline/matchLog — used both for
+// the clean fast-forward case (local hasn't ranked anything since the last sync) and,
+// after resetItemsToBaseline(), for the diverged/discard case. Local-only items (not
+// present in `incoming`) are left untouched, so nothing locally unique is ever dropped.
+function adoptIncomingWholesale(incoming) {
+  Object.values(incoming.items || {}).forEach(inc => {
+    const localHidden = state.items[inc.id] ? state.items[inc.id].hidden : false;
+    state.items[inc.id] = { ...inc, hidden: localHidden };
+  });
+  (incoming.cats || []).forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
+  Object.keys(incoming.schema || {}).forEach(c => { if (!state.schema[c]) state.schema[c] = incoming.schema[c]; });
+  state.syncBase = incoming.syncBase;
+  state.matchLog = (incoming.matchLog || []).slice();
+}
+
+// How local's current baseline relates to the incoming file's baseline, using a
+// single-hop parent pointer rather than a full ancestry chain — enough to recognize
+// the two common cases (same starting point; incoming is an immediate continuation of
+// local's current point) automatically, while anything else safely falls back to an
+// explicit prompt instead of guessing.
+function ensureSchemaWellFormed() {
+  state.cats.forEach(c => {
+    if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
+    if (!state.schema[c].primary) state.schema[c].primary = 'Name';
+    if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
+  });
+}
+
+function relateBaselines(localBase, incBase) {
+  if (localBase.id === incBase.id) return 'same';
+  if (incBase.parentId === localBase.id) return 'incoming-ahead';
+  if (localBase.parentId === incBase.id) return 'local-ahead';
+  return 'diverged';
+}
+
+function mergeImport(incoming) {
+  const localBase = state.syncBase, incBase = incoming.syncBase;
+  const localEmpty = Object.keys(state.items).length === 0;
+  let rel = relateBaselines(localBase, incBase);
+  if (rel === 'diverged' && localEmpty) rel = 'incoming-ahead'; // first-ever load on this device — not a real conflict
+
+  if (rel === 'diverged') {
+    const n = state.matchLog.length;
+    const proceed = confirm(
+      "This file's ranking history doesn't line up with your device's — it was synced from a different point than where your unsynced comparisons started" +
+      (n ? ' (you have ' + n + ' unsynced comparison' + (n !== 1 ? 's' : '') + ').' : '.') + '\n\n' +
+      "These can't be merged automatically.\n\n" +
+      'OK = discard your unsynced comparisons and adopt this file as-is\n' +
+      'Cancel = abort import (export your copy first, then reconcile manually)'
+    );
+    if (!proceed) { toast('Import cancelled'); return; }
+    resetItemsToBaseline(localBase);
+    adoptIncomingWholesale(incoming);
+    ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
+    toast('Adopted incoming file — unsynced comparisons discarded');
+    return;
+  }
+
+  if (rel === 'local-ahead') {
+    const { added } = unionItemsAndSchema(incoming);
+    ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
+    toast('Your copy is already ahead — merged ' + added + ' new item' + (added !== 1 ? 's' : '') + ', no ranking changes');
+    return;
+  }
+
+  if (rel === 'incoming-ahead' && state.matchLog.length === 0) {
+    const { added } = unionItemsAndSchema(incoming);
+    adoptIncomingWholesale(incoming);
+    ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
+    toast('Synced — adopted ' + (incoming.matchLog || []).length + ' comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
+    return;
+  }
+
+  // rel === 'same', or 'incoming-ahead' with local unsynced comparisons still against
+  // the same shared baseline — either way a true concurrent merge via replay.
+  const { added } = unionItemsAndSchema(incoming);
+  const allMatches = dedupeMatches([...state.matchLog, ...(incoming.matchLog || [])]);
+  allMatches.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+  applyRatings(replayMatches(localBase.ratings, allMatches));
+  state.syncBase = { id: uid(), parentId: localBase.id, rev: Math.max(localBase.rev, incBase.rev) + 1, ts: Date.now(), ratings: snapshotRatings() };
+  state.matchLog = [];
+  ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
+  toast('Synced — ' + allMatches.length + ' comparison(s) merged, ' + added + ' new item' + (added !== 1 ? 's' : ''));
+}
+
 function importData(e) {
   const file = e.target.files[0]; if (!file) return;
   const r = new FileReader();
@@ -1906,64 +2195,11 @@ function importData(e) {
     try {
       const d = JSON.parse(ev.target.result);
       const migrated = migrateData(d);
-      const srcVer = migrated._meta ? 'v' + migrated._meta.appVersion + ', schema ' + migrated._meta.dataSchemaVersion : 'legacy (pre-v1.2)';
-
-      // Group incoming items by category
-      const incomingCats = migrated.cats || [];
-      const incomingItems = migrated.items || {};
-      const incomingSchema = migrated.schema || {};
-
-      let totalImported = 0;
-      let skipped = [];
-
-      for (const cat of incomingCats) {
-        const existingCount = Object.values(state.items).filter(i => i.cat === cat).length;
-        const incomingCount = Object.values(incomingItems).filter(i => i.cat === cat).length;
-
-        if (existingCount > 0) {
-          // Category exists locally — ask user what to do
-          const itemWord = existingCount !== 1 ? 's' : '';
-          const inWord = incomingCount !== 1 ? 's' : '';
-          const nl = String.fromCharCode(10);
-          const msgParts = ['Category [' + cat + '] already exists with ' + existingCount + ' item' + itemWord + '.', 'Imported file has ' + incomingCount + ' item' + inWord + '.', 'OK = Replace  |  Cancel = Skip'];
-          const replace = confirm(msgParts.join(nl + nl));
-          if (replace) {
-            // Remove all existing items for this category
-            deleteItemsInCat(cat);
-            // Import incoming items and schema for this category
-            Object.entries(incomingItems).forEach(([id, item]) => {
-              if (item.cat === cat) { state.items[id] = { ...item, hidden: false }; totalImported++; }
-            });
-            if (!state.cats.includes(cat)) state.cats.push(cat);
-            if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
-          } else {
-            skipped.push(cat);
-          }
-        } else {
-          // Category does not exist locally — import freely
-          Object.entries(incomingItems).forEach(([id, item]) => {
-            if (item.cat === cat) { state.items[id] = { ...item, hidden: false }; totalImported++; }
-          });
-          if (!state.cats.includes(cat)) state.cats.push(cat);
-          if (incomingSchema[cat]) state.schema[cat] = incomingSchema[cat];
-        }
-      }
-
-      // Safety: ensure schema is well-formed for all cats
-      state.cats.forEach(c => {
-        if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
-        if (!state.schema[c].primary) state.schema[c].primary = 'Name';
-        if (!Array.isArray(state.schema[c].fields)) state.schema[c].fields = [];
-      });
-
-      save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
-
-      let msg = 'Imported ' + totalImported + ' items from ' + srcVer;
-      if (skipped.length) msg += ' (' + skipped.join(', ') + ' skipped)';
-      toast(msg);
+      mergeImport(migrated);
     } catch(err) { toast('Invalid JSON file: ' + err.message); }
   };
   r.readAsText(file);
+  e.target.value = '';
 }
 
 function clearAllData() {
