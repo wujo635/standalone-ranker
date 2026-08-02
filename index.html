@@ -344,6 +344,16 @@
       <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
     </div>
     <div class="card">
+      <div class="card-title">Cloud sync</div>
+      <div class="card-desc">Upload/pull your rankings through a shared Firestore document instead of passing files by hand. Uses the same merge logic as JSON import — Upload writes your current state; Pull fetches the shared copy and merges it in.</div>
+      <div id="cloud-auth"></div>
+      <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:.6rem">
+        <button onclick="uploadToFirestore()" id="cloud-upload-btn" disabled>&#8593; Upload rankings</button>
+        <button onclick="pullFromFirestore()" id="cloud-pull-btn" disabled>&#8595; Pull rankings</button>
+      </div>
+      <div id="cloud-sync-times" style="margin-top:.6rem"></div>
+    </div>
+    <div class="card">
       <div class="card-title">Sync status</div>
       <div id="sync-status"></div>
     </div>
@@ -385,13 +395,20 @@ Stephen Curry,Warriors,PG,2009</pre>
 
 <div id="toast"></div>
 
+<!-- Firebase compat SDK — loaded via CDN (no build step, matches the rest of the app).
+     The compat build exposes a global `firebase` object, so no <script type="module">
+     or bundler is needed. See "Cloud sync" in ARCHITECTURE.md. -->
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
+
 <script>
 // --- Versioning ---
 // APP_VERSION: bump when UI or logic changes.
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1968,11 +1985,13 @@ function itemsWithoutHidden() {
   return out;
 }
 
-function exportData() {
-  // deviceId/userName are personal, per-browser identifiers used only to namespace
-  // this device's own match ids — never meant to be adopted by whoever imports the file.
+// Shared by exportData() (file download) and uploadToFirestore() (cloud sync) so both
+// transports serialize state identically. deviceId/userName are personal, per-browser
+// identifiers used only to namespace this device's own match ids — never meant to be
+// adopted by whoever imports/pulls the file.
+function buildExportPayload() {
   const { deviceId, userName, ...settingsToExport } = state.settings;
-  const exportPayload = {
+  return {
     _meta: {
       appVersion: APP_VERSION,
       dataSchemaVersion: DATA_SCHEMA_VERSION,
@@ -1982,6 +2001,10 @@ function exportData() {
     items: itemsWithoutHidden(),
     settings: settingsToExport
   };
+}
+
+function exportData() {
+  const exportPayload = buildExportPayload();
   const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'ranker.json'; a.click(); toast('Exported!');
@@ -2209,6 +2232,124 @@ function clearAllData() {
   localStorage.removeItem('ranker-v1');
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
   toast('All data cleared');
+}
+
+// --- Cloud sync (Firestore) ---
+// Optional transport alongside file export/import — same buildExportPayload() and
+// migrateData()/mergeImport() pipeline either way, just a different way to move bytes
+// between two devices. See "Cloud sync" in ARCHITECTURE.md for the security model.
+//
+// The config below is not a secret (Firestore's real access control is the security
+// rule on the document, not hiding this object) — safe to commit as-is.
+const firebaseConfig = {
+  apiKey: "AIzaSyC_8fsOpdg2dH-qhi40c04kprAW-NMzvHQ",
+  authDomain: "ranker-sync.firebaseapp.com",
+  projectId: "ranker-sync",
+  storageBucket: "ranker-sync.firebasestorage.app",
+  messagingSenderId: "412941843465",
+  appId: "1:412941843465:web:e2358a5d69179677964cd8"
+};
+const CLOUD_COLLECTION = 'rankers';
+const CLOUD_DOC = 'shared';
+
+let cloudAvailable = false; // false if the SDK failed to load/init — cloud UI degrades to a disabled/explanatory state instead of throwing
+let cloudAuth = null, cloudDb = null;
+let cloudUser = null;
+let cloudSyncTimes = { lastUpload: null, lastPull: null }; // in-memory only; resets on reload
+
+// Defensive: this runs as top-level script code, so any uncaught error here would halt
+// the rest of the file (rank/library/etc never initialize) — never let a blocked CDN,
+// ad-blocker, or bad config take down the whole app over an optional feature.
+try {
+  if (typeof firebase !== 'undefined') {
+    firebase.initializeApp(firebaseConfig);
+    cloudAuth = firebase.auth();
+    cloudDb = firebase.firestore();
+    cloudAvailable = true;
+    cloudAuth.onAuthStateChanged(user => { cloudUser = user; renderCloudAuthUI(); });
+  }
+} catch (e) {
+  cloudAvailable = false;
+}
+renderCloudAuthUI(); // shows "unavailable" state immediately if init failed above; onAuthStateChanged re-renders once real auth state is known
+
+function renderCloudAuthUI() {
+  const authEl = document.getElementById('cloud-auth');
+  const uploadBtn = document.getElementById('cloud-upload-btn');
+  const pullBtn = document.getElementById('cloud-pull-btn');
+  if (!authEl) return; // Data tab not yet rendered
+
+  if (!cloudAvailable) {
+    authEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Cloud sync unavailable (couldn\'t reach Firebase).</div>';
+    uploadBtn.disabled = true; pullBtn.disabled = true;
+    return;
+  }
+  if (cloudUser) {
+    authEl.innerHTML = '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+      '<span style="font-size:13px;color:var(--text-secondary)">Signed in as ' + esc(cloudUser.email || cloudUser.displayName || 'unknown') + '</span>' +
+      '<button class="ghost btn-sm" onclick="cloudSignOut()">Sign out</button>' +
+      '</div>';
+    uploadBtn.disabled = false; pullBtn.disabled = false;
+  } else {
+    authEl.innerHTML = '<button onclick="cloudSignIn()">Sign in with Google</button>';
+    uploadBtn.disabled = true; pullBtn.disabled = true;
+  }
+  renderCloudSyncTimes();
+}
+
+function renderCloudSyncTimes() {
+  const el = document.getElementById('cloud-sync-times');
+  if (!el) return;
+  const fmt = t => t ? new Date(t).toLocaleString() : 'never (this session)';
+  el.innerHTML = '<div class="stat-row"><span class="stat-label">Last uploaded</span><span class="stat-val">' + esc(fmt(cloudSyncTimes.lastUpload)) + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Last pulled</span><span class="stat-val">' + esc(fmt(cloudSyncTimes.lastPull)) + '</span></div>';
+}
+
+function cloudSignIn() {
+  if (!cloudAvailable) return;
+  cloudAuth.signInWithPopup(new firebase.auth.GoogleAuthProvider())
+    .catch(e => toast('Sign-in failed: ' + e.message));
+}
+
+function cloudSignOut() {
+  if (!cloudAvailable) return;
+  cloudAuth.signOut();
+}
+
+// Same payload buildExportPayload() produces for file export, stored as a single JSON
+// string field rather than native Firestore fields — history entries from Tier mode
+// contain arrays nested directly in arrays (`tiers: [[],[],...]`), which Firestore's
+// native document format rejects; a JSON string sidesteps that (and undefined-value
+// restrictions) entirely and keeps this transport byte-identical to the file export.
+function uploadToFirestore() {
+  if (!cloudAvailable || !cloudUser) return;
+  const payload = buildExportPayload();
+  cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).set({
+    json: JSON.stringify(payload),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedBy: cloudUser.email || cloudUser.uid
+  }).then(() => {
+    cloudSyncTimes.lastUpload = Date.now();
+    renderCloudSyncTimes();
+    toast('Uploaded to cloud');
+  }).catch(e => toast(cloudErrorMessage(e)));
+}
+
+function pullFromFirestore() {
+  if (!cloudAvailable || !cloudUser) return;
+  cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).get().then(doc => {
+    if (!doc.exists) { toast('Nothing uploaded to the cloud yet'); return; }
+    const migrated = migrateData(JSON.parse(doc.data().json));
+    mergeImport(migrated);
+    cloudSyncTimes.lastPull = Date.now();
+    renderCloudSyncTimes();
+  }).catch(e => toast(cloudErrorMessage(e)));
+}
+
+function cloudErrorMessage(e) {
+  if (e.code === 'permission-denied') return "Cloud sync denied — your Google account isn't authorized";
+  if (e.code === 'unavailable') return "Can't reach the cloud — check your connection";
+  return 'Cloud sync error: ' + e.message;
 }
 
 // --- Tabs ---
