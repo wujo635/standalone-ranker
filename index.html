@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.17.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2161,6 +2161,9 @@ function relateBaselines(localBase, incBase) {
   return 'diverged';
 }
 
+// Returns true if the merge completed (including the "nothing to do" cases), false if
+// the user cancelled a diverged-history prompt — callers that chain further action on
+// the result (uploadToFirestore()) need to know not to proceed when it's false.
 function mergeImport(incoming) {
   const localBase = state.syncBase, incBase = incoming.syncBase;
   const localEmpty = Object.keys(state.items).length === 0;
@@ -2176,19 +2179,19 @@ function mergeImport(incoming) {
       'OK = discard your unsynced comparisons and adopt this file as-is\n' +
       'Cancel = abort import (export your copy first, then reconcile manually)'
     );
-    if (!proceed) { toast('Import cancelled'); return; }
+    if (!proceed) { toast('Import cancelled'); return false; }
     resetItemsToBaseline(localBase);
     adoptIncomingWholesale(incoming);
     ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
     toast('Adopted incoming file — unsynced comparisons discarded');
-    return;
+    return true;
   }
 
   if (rel === 'local-ahead') {
     const { added } = unionItemsAndSchema(incoming);
     ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats();
     toast('Your copy is already ahead — merged ' + added + ' new item' + (added !== 1 ? 's' : '') + ', no ranking changes');
-    return;
+    return true;
   }
 
   if (rel === 'incoming-ahead' && state.matchLog.length === 0) {
@@ -2196,7 +2199,7 @@ function mergeImport(incoming) {
     adoptIncomingWholesale(incoming);
     ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
     toast('Synced — adopted ' + (incoming.matchLog || []).length + ' comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
-    return;
+    return true;
   }
 
   // rel === 'same', or 'incoming-ahead' with local unsynced comparisons still against
@@ -2209,6 +2212,7 @@ function mergeImport(incoming) {
   state.matchLog = [];
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
   toast('Synced — ' + allMatches.length + ' comparison(s) merged, ' + added + ' new item' + (added !== 1 ? 's' : ''));
+  return true;
 }
 
 function importData(e) {
@@ -2321,18 +2325,36 @@ function cloudSignOut() {
 // contain arrays nested directly in arrays (`tiers: [[],[],...]`), which Firestore's
 // native document format rejects; a JSON string sidesteps that (and undefined-value
 // restrictions) entirely and keeps this transport byte-identical to the file export.
-function uploadToFirestore() {
+//
+// Pulls-and-merges whatever's currently in Firestore before pushing, rather than
+// blindly overwriting the document. A raw overwrite meant: User A uploads, User B
+// (who never pulled A's change) uploads next — B's push would silently destroy A's
+// data with no merge, no warning. Reading the doc and running it through the same
+// mergeImport() pipeline Pull uses closes that gap; Upload can no longer lose data,
+// only add a superfluous new baseline in the rare case there was nothing to merge.
+async function uploadToFirestore() {
   if (!cloudAvailable || !cloudUser) return;
-  const payload = buildExportPayload();
-  cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).set({
-    json: JSON.stringify(payload),
-    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-    updatedBy: cloudUser.email || cloudUser.uid
-  }).then(() => {
+  try {
+    const doc = await cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).get();
+    let mergedFirst = false;
+    if (doc.exists) {
+      const migrated = migrateData(JSON.parse(doc.data().json));
+      if (!mergeImport(migrated)) { toast('Upload cancelled'); return; } // diverged case, user declined
+      mergedFirst = true;
+      cloudSyncTimes.lastPull = Date.now();
+    }
+    const payload = buildExportPayload();
+    await cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).set({
+      json: JSON.stringify(payload),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedBy: cloudUser.email || cloudUser.uid
+    });
     cloudSyncTimes.lastUpload = Date.now();
     renderCloudSyncTimes();
-    toast('Uploaded to cloud');
-  }).catch(e => toast(cloudErrorMessage(e)));
+    toast(mergedFirst ? 'Uploaded (merged with existing cloud data first)' : 'Uploaded to cloud');
+  } catch (e) {
+    toast(cloudErrorMessage(e));
+  }
 }
 
 function pullFromFirestore() {
