@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.16.0` |
+| App version | `1.17.0` |
 | Data schema version | `4` |
 | localStorage key | `ranker-v1` |
 
@@ -224,6 +224,35 @@ Non-ranking field edits on an item both sides have use last-write-wins via `upda
 
 **Why this design, not full event-sourcing from scratch:** replaying pairwise ELO from the very first comparison would require every historical match ever made, but existing installs only ever kept the last 50 (`history`, display/undo only) and mutate item ratings in place. Rather than require reconstructing lost history, migration to schema v4 snapshots *current* ratings as a trusted baseline (`syncBase`, `rev: 0`) and only logs matches going forward (`matchLog`) — bounding replay cost to "comparisons since the last sync," not lifetime volume. See the "Single-user" entry under Known limitations for the tradeoff this implies.
 
+### Cloud sync (Firestore)
+
+An optional second transport alongside the file export/import flow above — same `buildExportPayload()` and `migrateData()` → `mergeImport()` pipeline either way, just a different way to move the payload between two devices. The Data tab's "Cloud sync" card adds Upload/Pull buttons next to the existing file Export/Import controls; neither replaces the other.
+
+**Why Firestore, not a custom backend:** the merge logic already runs entirely client-side (`mergeImport()`), so all a backend needs to do is store and serve one JSON blob to whoever's authorized. Firestore's free tier does that with no server code to write or host, and its security rules give real per-user access control — a meaningfully better fit than, say, a GitHub Gist with an access token embedded in the page.
+
+**Setup** (see `log/firestore-sync-plan.md` for the full walkthrough, not committed — it's gitignored):
+1. Create a Firebase project, enable Firestore, enable the Google sign-in provider
+2. Register a Web app to get a `firebaseConfig` object
+3. Both users sign in once so Firebase records their UIDs
+4. Write a security rule restricting the shared document to those two UIDs
+
+**Loaded via CDN, not npm** — three `<script src="https://www.gstatic.com/firebasejs/...">` tags for the Firebase compat SDK, placed just before the app's own `<script>` block. The compat build exposes a global `firebase` object (`firebase.initializeApp()`, `firebase.auth()`, `firebase.firestore()`), avoiding any need for `type="module"`/a bundler/`npm install` — consistent with the rest of the app having zero build step. This is the app's first external dependency; everything else is still self-contained.
+
+**The `firebaseConfig` object (apiKey, projectId, etc.) is intentionally committed in plain text in `index.html`.** It is not a secret — Firebase's web config is designed to be public; the actual gate is the Firestore security rule on the document, which checks the signed-in user's UID, not knowledge of this object. (A real secret — e.g. a Firebase Admin SDK service-account key — would be a different story and must never be committed; there's none in this app, which only uses the client SDK.)
+
+**Defensive init:** Firebase initialization runs as top-level code in the same `<script>` block as the rest of the app, so it's wrapped in `try/catch` — an uncaught error there (CDN blocked, ad-blocker, offline, bad config) would otherwise halt every subsequent statement in the file, breaking ranking/library/everything over an optional feature. `cloudAvailable` tracks whether init succeeded; `renderCloudAuthUI()` shows a plain "unavailable" message and leaves Upload/Pull disabled when it's `false`, rather than throwing.
+
+**Storage shape — a JSON string, not native Firestore fields.** The shared document is `{ json: string, updatedAt, updatedBy }` rather than writing `buildExportPayload()`'s object directly as Firestore fields. Reason: Firestore rejects arrays nested directly inside arrays, and Tier-mode history entries contain exactly that (`tiers: [[],[],[],[],[]]`) — a native-fields write would throw. Serializing to a JSON string sidesteps that restriction entirely (and Firestore's dislike of `undefined` values), and keeps this transport byte-identical to the file export format. `pullFromFirestore()` just `JSON.parse()`s it back before handing off to `migrateData()`.
+
+**Key functions:**
+- `cloudSignIn()` / `cloudSignOut()` — Google auth via `signInWithPopup(GoogleAuthProvider)`
+- `renderCloudAuthUI()` — reflects auth state into the Data tab card; enables/disables Upload/Pull
+- `uploadToFirestore()` — `buildExportPayload()` → `set()` on the shared doc
+- `pullFromFirestore()` — `get()` the shared doc → `migrateData()` → `mergeImport()` (identical to the tail end of `importData()`)
+- `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
+
+**Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, not used for any merge decision (that's still `syncBase`/`matchLog`, unaffected by this transport). The live Upload/Pull round-trip against a real Firestore project can't be verified without that project existing and a real signed-in Google session — the merge logic itself was unit-verified in isolation (see git history), but the Firestore plumbing specifically needs a real account to exercise the OAuth popup.
+
 ---
 
 ## ELO ranking
@@ -297,7 +326,7 @@ The skip button is hidden in Tier mode — session control is handled by the ini
 | Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()`, `loadTier()`, `submitTier()` |
 | Leaderboard | `view-leaderboard` | `renderLB()` |
 | History | `view-history` | `renderHistory()`, `recordRanking()`, `undoRanking()` |
-| Data | `view-data` | `exportData()`, `importData()`, `renderStats()`, `clearAllData()` |
+| Data | `view-data` | `exportData()`, `importData()`, `uploadToFirestore()`, `pullFromFirestore()`, `renderStats()`, `clearAllData()` |
 
 Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav buttons and view divs. New Category and Schema Editor are modal-style views with no nav tab — they're entered programmatically and return to Library on save or cancel.
 
@@ -365,8 +394,14 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `bulkAddCSVImport(result)` | Matches incoming items to existing ones by title (case-insensitive); updates field values on matches, preserves ELO and win/loss record; adds unmatched items fresh at ELO 1000 |
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
-| `itemsWithoutHidden()` | Returns a copy of `state.items` with the `hidden` key stripped from every item; used by `exportData()` so hidden status (a personal, per-browser preference) never travels in an exported file |
-| `exportData()` | Wraps state with `_meta`, serializes to JSON (items via `itemsWithoutHidden()`), triggers download |
+| `itemsWithoutHidden()` | Returns a copy of `state.items` with the `hidden` key stripped from every item; used by `buildExportPayload()` so hidden status (a personal, per-browser preference) never travels in an exported file |
+| `buildExportPayload()` | Builds the `_meta` + state object shared by `exportData()` (file download) and `uploadToFirestore()` (cloud sync) — one place defining what "exported state" means |
+| `exportData()` | Serializes `buildExportPayload()` to JSON, triggers download |
+| `cloudSignIn()` / `cloudSignOut()` | Google auth via Firebase's `signInWithPopup(GoogleAuthProvider)` / `signOut()` |
+| `renderCloudAuthUI()` | Reflects current auth/availability state into the Data tab's Cloud sync card; enables/disables Upload/Pull |
+| `uploadToFirestore()` | `buildExportPayload()` → JSON string → `set()` on the shared Firestore document |
+| `pullFromFirestore()` | `get()` the shared document → `JSON.parse()` → `migrateData()` → `mergeImport()`, same tail as `importData()` |
+| `cloudErrorMessage(e)` | Maps Firestore error codes to a plain-language toast string |
 | `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
 | `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
@@ -534,7 +569,17 @@ Because it's a single HTML file, it deploys anywhere static files are served:
 - **Netlify / Vercel**: drag and drop the file in their dashboards
 - **Cloudflare Pages**: same drag-and-drop flow
 
-For multi-device *live* sync, you'd still need a backend (see above). For two-or-a-few people sharing a single accumulating file by hand, the export/import flow now merges rankings automatically — see "Merging rankings between devices" above.
+For two-or-a-few people, the app now has two sync transports that both go through the same merge pipeline: the export/import file flow (see "Merging rankings between devices") for a manual hand-off, and Firestore (see "Cloud sync" below) for an in-app Upload/Pull button instead of passing files around. Neither is live/real-time sync — both are "sync whenever someone decides to."
+
+### Expand cloud sync access beyond two users
+
+Deliberately out of scope for now (this app is built around "a couple of people ranking things together"), but noted here so the tradeoff isn't re-litigated from scratch if it comes up later.
+
+**Current model:** the Firestore security rule hardcodes the two authorized UIDs directly in the rule text (`request.auth.uid in ['<uid-A>', '<uid-B>']`). Adding a person means editing and redeploying that rule in the Firebase console — manual, and not something that can be done from the app or from a code commit, since it's config that lives in Firebase, not in `index.html`.
+
+**If you occasionally add a few more people:** switch the rule to check an **allowlist collection** instead of a hardcoded list — `exists(/databases/$(database)/documents/allowlist/$(request.auth.uid))`. Granting access then becomes "add a document to that collection" (doable from the Firestore console's data view, or a small admin UI in the app later) rather than editing rule syntax each time. Still a manual, one-at-a-time step, but lower-friction and lower-risk than touching the rule itself.
+
+**If you want self-serve growth (anyone can sign up and join):** that's a different shape of application, not a tweak. The single-shared-document model (one `rankers/shared` doc) doesn't scale to multiple independent groups — it would need per-group documents, a real invite/join flow, and rules scoped per-group rather than per-app. Worth treating as a from-scratch redesign of the sync layer if that need materializes, not an incremental change to what exists today.
 
 ---
 
@@ -560,6 +605,8 @@ For multi-device *live* sync, you'd still need a backend (see above). For two-or
 | Deterministic item ids (`itemKey(cat, title)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge | Random ids + title-based matching/remapping at merge time |
 | Snapshot baseline + incremental match log for merging | Bounds merge/replay cost to comparisons since the last sync, not lifetime volume; avoids requiring a full historical match log that doesn't exist for pre-v4 data | Full event-sourcing (replay every comparison ever made) |
 | Merge conflicts prompt only when genuinely ambiguous (`diverged`) | The common cases (same starting point, clean continuation) resolve silently; users aren't asked to make a decision that has an unambiguous right answer | Always prompt per category (old Replace/Skip behaviour) |
+| Firestore for cloud sync, loaded via CDN (not npm) | Free tier, real per-user security rules, zero server code to write/host, fits the zero-build-step single-file design | Custom backend, GitHub Gist + embedded token |
+| Cloud sync stores payload as a JSON string field, not native Firestore fields | Firestore rejects arrays nested directly in arrays (Tier-mode history has these); a string sidesteps all of Firestore's document type restrictions and stays byte-identical to the file export | Reshape history data to avoid nested arrays |
 
 ---
 
@@ -592,9 +639,9 @@ Undo is now available for rankings (Standard/Podium/Tier) via the History tab �
 
 Deleting an item or an entire category (`deleteItem()`, `confirmDeleteCat()`/`deleteItemsInCat()`) does not touch `state.history` — past ranking entries can end up referencing ids that no longer exist in `state.items`. `canUndo(entry)` guards against this: it checks that every id an entry's reversal needs is still present before allowing `undoRanking()` to proceed, and `renderHistory()` shows a disabled "Undo unavailable" button for any entry that fails the check. This was a deliberate fix for a real bug — the previous implementation reversed whichever pairs in an entry still had both items present and silently skipped the rest, so a podium/tier entry with one deleted item would leave the *other* items' ELO/wins/losses partially reverted while still reporting "Undo complete" and discarding the history entry, with no way to detect or correct it afterward. The entry itself is left in history (not auto-removed or purged on deletion) so it's still visible for context; it ages out naturally once the 50-entry cap is exceeded.
 
-### Single-user (device-local by default, mergeable by hand)
+### Single-user (device-local by default, mergeable on demand)
 
-Data is local to one browser profile. As of schema v4, exporting/importing JSON between two devices merges rankings automatically (see "Merging rankings between devices") rather than requiring a full Replace — but it's still an asynchronous, manual hand-off, not live sync. For real-time multi-device sync, add a backend (see "Switch from localStorage to a backend" above).
+Data is local to one browser profile. As of schema v4, exporting/importing JSON between two devices merges rankings automatically (see "Merging rankings between devices") rather than requiring a full Replace, and as of 1.17.0 there's also an optional Firestore-backed Upload/Pull button (see "Cloud sync") so that merge doesn't require passing a file by hand. Both are still "sync whenever someone clicks the button," not live/real-time sync across open tabs.
 
 **Known gaps in the merge model** (acceptable tradeoffs for a manual-handoff workflow, worth knowing about):
 - **Deletions aren't tracked.** There's no tombstone log — if a locally-deleted item still exists in an incoming file, merging brings it back. Fine for the common case (items are rarely deleted); would need a delete log to fix properly.
