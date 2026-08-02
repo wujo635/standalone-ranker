@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.17.0` |
+| App version | `1.17.1` |
 | Data schema version | `4` |
 | localStorage key | `ranker-v1` |
 
@@ -251,9 +251,11 @@ An optional second transport alongside the file export/import flow above — sam
 **Key functions:**
 - `cloudSignIn()` / `cloudSignOut()` — Google auth via `signInWithPopup(GoogleAuthProvider)`
 - `renderCloudAuthUI()` — reflects auth state into the Data tab card; enables/disables Upload/Pull
-- `uploadToFirestore()` — `buildExportPayload()` → `set()` on the shared doc
+- `uploadToFirestore()` — reads the shared doc first and runs it through `mergeImport()` (same as Pull) *before* pushing, so a push can never silently overwrite another device's already-uploaded changes; only pushes `buildExportPayload()` after that merge completes (or immediately if the doc didn't exist yet)
 - `pullFromFirestore()` — `get()` the shared doc → `migrateData()` → `mergeImport()` (identical to the tail end of `importData()`)
 - `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
+
+**Upload merges before it pushes (fixed in 1.17.1).** The initial implementation had `uploadToFirestore()` do a blind `set()` — if User A uploaded, then User B uploaded without ever pulling A's change first, B's push silently overwrote the whole document and A's data was just gone, no warning, no conflict. `uploadToFirestore()` now `get()`s the current doc first and runs it through the same `mergeImport()` Pull uses, *then* pushes — so Upload can no longer lose data, only (rarely) create a superfluous baseline revision if there was nothing to actually merge. If that pre-merge hits the `diverged` case and the user declines the prompt, the upload aborts entirely rather than pushing anyway.
 
 **Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, not used for any merge decision (that's still `syncBase`/`matchLog`, unaffected by this transport).
 
@@ -405,7 +407,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `exportData()` | Serializes `buildExportPayload()` to JSON, triggers download |
 | `cloudSignIn()` / `cloudSignOut()` | Google auth via Firebase's `signInWithPopup(GoogleAuthProvider)` / `signOut()` |
 | `renderCloudAuthUI()` | Reflects current auth/availability state into the Data tab's Cloud sync card; enables/disables Upload/Pull |
-| `uploadToFirestore()` | `buildExportPayload()` → JSON string → `set()` on the shared Firestore document |
+| `uploadToFirestore()` | `get()`s the shared doc, merges it in via `mergeImport()` first if it exists (prevents one device's push from clobbering another's), then `buildExportPayload()` → JSON string → `set()` |
 | `pullFromFirestore()` | `get()` the shared document → `JSON.parse()` → `migrateData()` → `mergeImport()`, same tail as `importData()` |
 | `cloudErrorMessage(e)` | Maps Firestore error codes to a plain-language toast string |
 | `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
