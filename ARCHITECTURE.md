@@ -236,6 +236,10 @@ An optional second transport alongside the file export/import flow above — sam
 3. Both users sign in once so Firebase records their UIDs
 4. Write a security rule restricting the shared document to those two UIDs
 
+**Must be served over http(s) — `file://` does not work.** Google sign-in's `signInWithPopup()` requires a real origin; opening `index.html` directly from disk fails with `location.protocol must be http`. This is a hard OAuth requirement, not fixable in app code — it means cloud sync effectively requires the app to be hosted (see "Host it online"), not just opened locally. A quick local static server (`npx serve .`, `python -m http.server`) works for testing against `http://localhost`, which Firebase authorizes by default.
+
+**New domains must be added to Firebase's Authorized domains list.** `localhost` and the project's own `*.firebaseapp.com`/`*.web.app` domains are authorized automatically, but a domain like GitHub Pages' `<username>.github.io` is not — sign-in fails with *"The current domain is not authorized for OAuth operations"* until it's added manually under Firebase Console → Authentication → Settings → Authorized domains. One-time step per hosting domain, not something a code change or redeploy affects.
+
 **Loaded via CDN, not npm** — three `<script src="https://www.gstatic.com/firebasejs/...">` tags for the Firebase compat SDK, placed just before the app's own `<script>` block. The compat build exposes a global `firebase` object (`firebase.initializeApp()`, `firebase.auth()`, `firebase.firestore()`), avoiding any need for `type="module"`/a bundler/`npm install` — consistent with the rest of the app having zero build step. This is the app's first external dependency; everything else is still self-contained.
 
 **The `firebaseConfig` object (apiKey, projectId, etc.) is intentionally committed in plain text in `index.html`.** It is not a secret — Firebase's web config is designed to be public; the actual gate is the Firestore security rule on the document, which checks the signed-in user's UID, not knowledge of this object. (A real secret — e.g. a Firebase Admin SDK service-account key — would be a different story and must never be committed; there's none in this app, which only uses the client SDK.)
@@ -251,7 +255,9 @@ An optional second transport alongside the file export/import flow above — sam
 - `pullFromFirestore()` — `get()` the shared doc → `migrateData()` → `mergeImport()` (identical to the tail end of `importData()`)
 - `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
 
-**Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, not used for any merge decision (that's still `syncBase`/`matchLog`, unaffected by this transport). The live Upload/Pull round-trip against a real Firestore project can't be verified without that project existing and a real signed-in Google session — the merge logic itself was unit-verified in isolation (see git history), but the Firestore plumbing specifically needs a real account to exercise the OAuth popup.
+**Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, not used for any merge decision (that's still `syncBase`/`matchLog`, unaffected by this transport).
+
+**Verification status:** the single-account round-trip (sign in → Upload → Pull the same data back → correct no-op merge) has been confirmed live against a real Firestore project. A real two-account *concurrent* merge (two people ranking independently, then reconciling) has not yet been exercised live — the merge logic itself was unit-verified in isolation beforehand (see git history around `mergeImport()`), so this is about confirming the live plumbing carries it correctly end to end, not the underlying algorithm.
 
 ---
 
