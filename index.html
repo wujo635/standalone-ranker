@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.17.1';
+const APP_VERSION = '1.18.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -421,7 +421,13 @@ const APP_VERSION = '1.17.1';
 //       Adds state.syncBase (snapshot baseline for merging) and state.matchLog
 //       (append-only pairwise results since that baseline) to support merging
 //       rankings from two devices back into one file. See mergeImport().
-const DATA_SCHEMA_VERSION = 4;
+//   5 — syncBase gains `ancestry` (full chain of past baseline ids, not just the
+//       immediate `parentId`), so relateBaselines() can recognize "local/incoming is
+//       ahead by several hops" instead of only ever recognizing exactly one hop —
+//       fixes a real bug where a device that had synced more than once could be
+//       misclassified as 'diverged' and its more-advanced local comparisons
+//       discarded in favor of an older cloud copy. See relateBaselines().
+const DATA_SCHEMA_VERSION = 5;
 
 const CAT_DEFAULTS = {
   'Movies': {
@@ -458,7 +464,7 @@ let state = {
   settings: { smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0 },
   history: [],
   matchLog: [],
-  syncBase: { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings: {} }
+  syncBase: { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings: {}, ancestry: [] }
 };
 let lbCat = BUILTIN_CATS[0];
 let pendingFields = [];
@@ -531,11 +537,19 @@ function migrateData(data) {
     Object.values(data.items).forEach(item => {
       ratings[item.id] = { elo: item.elo, wins: item.wins, losses: item.losses };
     });
-    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings };
+    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings, ancestry: [] };
     data.matchLog = [];
   }
 
-  // v < 5: add next migration block here when DATA_SCHEMA_VERSION becomes 5
+  if (v < 5) {
+    // v4 -> v5: syncBase gains `ancestry` — the full chain of past baseline ids, not
+    // just the immediate parentId. A v4 baseline has no known ancestors yet (it's
+    // wherever this device happens to be right now), so it starts empty; ancestry
+    // accumulates from here via mergeImport()'s replay branch. See relateBaselines().
+    if (data.syncBase && !data.syncBase.ancestry) data.syncBase.ancestry = [];
+  }
+
+  // v < 6: add next migration block here when DATA_SCHEMA_VERSION becomes 6
 
   // Ensure new optional fields exist (added in app updates, not schema migrations)
   if (!data.history) data.history = [];
@@ -543,7 +557,7 @@ function migrateData(data) {
   if (!data.syncBase) {
     const ratings = {};
     Object.values(data.items || {}).forEach(item => { ratings[item.id] = { elo: item.elo, wins: item.wins, losses: item.losses }; });
-    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings };
+    data.syncBase = { id: uid(), parentId: null, rev: 0, ts: Date.now(), ratings, ancestry: [] };
   }
   if (!data.settings) data.settings = { smartPairMode: false };
   if (!data.settings.deviceId) data.settings.deviceId = makeDeviceId();
@@ -2141,11 +2155,6 @@ function adoptIncomingWholesale(incoming) {
   state.matchLog = (incoming.matchLog || []).slice();
 }
 
-// How local's current baseline relates to the incoming file's baseline, using a
-// single-hop parent pointer rather than a full ancestry chain — enough to recognize
-// the two common cases (same starting point; incoming is an immediate continuation of
-// local's current point) automatically, while anything else safely falls back to an
-// explicit prompt instead of guessing.
 function ensureSchemaWellFormed() {
   state.cats.forEach(c => {
     if (!state.schema[c]) state.schema[c] = { primary: 'Name', fields: [] };
@@ -2154,10 +2163,22 @@ function ensureSchemaWellFormed() {
   });
 }
 
+// How local's current baseline relates to the incoming file's baseline. Uses each
+// side's full `ancestry` chain (every past baseline id, not just the immediate
+// `parentId`), so "local/incoming is ahead by several hops" is recognized correctly —
+// not just the single-hop case. Without this, a device that had synced more than once
+// since the other side's copy would be misclassified as 'diverged' even though it's
+// simply further along the same lineage, and the diverged path's only confirmed action
+// is destructive (discard local, adopt incoming) — a real bug, not just an inconvenience.
+// `ancestry` defaults to [] for older data that predates schema v5, which just means
+// those baselines can't be recognized as ancestors beyond what parentId already gave —
+// same single-hop behavior as before, not a regression.
 function relateBaselines(localBase, incBase) {
   if (localBase.id === incBase.id) return 'same';
-  if (incBase.parentId === localBase.id) return 'incoming-ahead';
-  if (localBase.parentId === incBase.id) return 'local-ahead';
+  const incAncestry = incBase.ancestry || [];
+  const localAncestry = localBase.ancestry || [];
+  if (incAncestry.includes(localBase.id) || incBase.parentId === localBase.id) return 'incoming-ahead';
+  if (localAncestry.includes(incBase.id) || localBase.parentId === incBase.id) return 'local-ahead';
   return 'diverged';
 }
 
@@ -2172,9 +2193,14 @@ function mergeImport(incoming) {
 
   if (rel === 'diverged') {
     const n = state.matchLog.length;
+    // rev is just a hint (not proof — true forks can have any rev on either side), but
+    // it's cheap context that would have caught the exact bug this dialog can otherwise
+    // cause: discarding a local copy that was actually further along than the incoming one.
+    const revHint = '\n\n(Your revision: ' + localBase.rev + ' · Incoming file’s revision: ' + incBase.rev +
+      (localBase.rev > incBase.rev ? ' — yours looks more advanced, discarding it may lose more than it keeps.' : '') + ')';
     const proceed = confirm(
       "This file's ranking history doesn't line up with your device's — it was synced from a different point than where your unsynced comparisons started" +
-      (n ? ' (you have ' + n + ' unsynced comparison' + (n !== 1 ? 's' : '') + ').' : '.') + '\n\n' +
+      (n ? ' (you have ' + n + ' unsynced comparison' + (n !== 1 ? 's' : '') + ').' : '.') + revHint + '\n\n' +
       "These can't be merged automatically.\n\n" +
       'OK = discard your unsynced comparisons and adopt this file as-is\n' +
       'Cancel = abort import (export your copy first, then reconcile manually)'
@@ -2208,7 +2234,12 @@ function mergeImport(incoming) {
   const allMatches = dedupeMatches([...state.matchLog, ...(incoming.matchLog || [])]);
   allMatches.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
   applyRatings(replayMatches(localBase.ratings, allMatches));
-  state.syncBase = { id: uid(), parentId: localBase.id, rev: Math.max(localBase.rev, incBase.rev) + 1, ts: Date.now(), ratings: snapshotRatings() };
+  // New baseline's ancestry is the union of both sides' known history plus their own
+  // current ids — so a future relateBaselines() call from either lineage (or a third
+  // device that descends from one of them) can recognize this baseline as a multi-hop
+  // descendant, not just whoever happens to check it exactly one hop later.
+  const newAncestry = [...new Set([...(localBase.ancestry || []), localBase.id, ...(incBase.ancestry || []), incBase.id])];
+  state.syncBase = { id: uid(), parentId: localBase.id, rev: Math.max(localBase.rev, incBase.rev) + 1, ts: Date.now(), ratings: snapshotRatings(), ancestry: newAncestry };
   state.matchLog = [];
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory();
   toast('Synced — ' + allMatches.length + ' comparison(s) merged, ' + added + ' new item' + (added !== 1 ? 's' : ''));
