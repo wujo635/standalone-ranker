@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.0.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -430,12 +430,13 @@ const APP_VERSION = '2.0.0';
 //   6 — removed state.syncBase entirely. Three real merge bugs in a row all traced
 //       back to the same root cause: client-side snapshot/ancestry reconciliation is
 //       inherently fragile. Replaced with a true append-only model — state.matchLog
-//       is now the full permanent match history (not "unsynced comparisons since a
-//       baseline"), and new state.itemDeletes holds tombstones for deletions. Ratings
-//       are always a pure function of replaying matchLog (see replayAllMatches());
-//       merging two histories is now an unconditional set-union by id (see
-//       mergeImport()) — there's no "which side is ahead" question to get wrong,
-//       because nothing is ever overwritten or compacted, only added to.
+//       is now the full permanent match history going forward (not "unsynced
+//       comparisons since a baseline"), and new state.itemDeletes holds tombstones
+//       for deletions. Merging two histories is now an unconditional set-union by id
+//       (see mergeImport()) — there's no "which side is ahead" question to get wrong,
+//       because nothing is ever overwritten or compacted, only added to. Note: ratings
+//       are NOT derived by replaying matchLog from scratch — see applyNewMatches() for
+//       why (matchLog isn't guaranteed complete for devices upgrading from pre-v6).
 const DATA_SCHEMA_VERSION = 6;
 
 const CAT_DEFAULTS = {
@@ -459,12 +460,14 @@ const CAT_DEFAULTS = {
 const BUILTIN_CATS = Object.keys(CAT_DEFAULTS);
 
 // state.schema[cat] = { primary: string, fields: [{name, required}] }
-// state.matchLog is the full, permanent, append-only list of every pairwise result
-// this device knows about — never compacted into a baseline. state.itemDeletes is
-// the equivalent permanent list of deletion tombstones. Ratings are always derived
-// by replaying matchLog (see replayAllMatches()); merging two histories is a plain
-// set-union by id (see mergeImport()). See "Merging rankings between devices" in
-// ARCHITECTURE.md.
+// state.matchLog is the append-only list of every pairwise result this device knows
+// about, going forward from the v6 migration — never compacted into a baseline again.
+// state.itemDeletes is the equivalent permanent list of deletion tombstones. Merging
+// two histories is a plain set-union by id (see mergeImport()), applying only matches
+// this device hasn't already counted directly onto live item ratings (see
+// applyNewMatches()) — not a from-scratch replay, since matchLog isn't guaranteed to
+// be a device's *complete* history (see the schema v6 comment above). See "Merging
+// rankings between devices" in ARCHITECTURE.md.
 function freshState() {
   return {
     items: {},
@@ -579,10 +582,16 @@ function migrateData(data) {
     // true append-only model — matches and item deletions are now permanent,
     // individually-identified facts unioned by id, never compacted or classified as
     // "ahead"/"diverged". Nothing to migrate the baseline into: current item ratings
-    // are trusted as-is (same bootstrap philosophy as v4), matchLog carries forward
-    // unchanged as real permanent history, itemDeletes starts empty (no retroactive
-    // tombstones for deletions that already happened — nothing to reconstruct). See
-    // mergeImport()/replayAllMatches() and "Item deletions" in ARCHITECTURE.md.
+    // (elo/wins/losses) are trusted as-is (same bootstrap philosophy as v4) and are
+    // NOT recomputed from matchLog — pre-v6 matchLog was periodically compacted into
+    // the old baseline and cleared, so it's only the tail since this device's last
+    // pre-rewrite sync, not the complete history. mergeImport() only ever applies
+    // matches it hasn't already counted on top of whatever ratings are already there
+    // (see applyNewMatches()) — it never resets and replays from scratch, specifically
+    // because doing that once wiped pre-compacted history on upgrade (real incident,
+    // fixed same-day). itemDeletes starts empty (no retroactive tombstones for
+    // deletions that already happened — nothing to reconstruct). See mergeImport()
+    // and "Item deletions" in ARCHITECTURE.md.
     delete data.syncBase;
     if (!data.itemDeletes) data.itemDeletes = [];
     if (data.lastSyncedServerTs === undefined) data.lastSyncedServerTs = null;
@@ -2126,37 +2135,25 @@ function csvCell(val) {
 // way that needs reconciling, because nothing is ever overwritten, only added to. See
 // "Merging rankings between devices" in ARCHITECTURE.md.
 
-// Pure ELO step operating on plain {elo,wins,losses} rating records rather than live
-// item objects — used by replayAllMatches() to recompute ratings deterministically.
-function eloUpdatePure(w, l) {
-  const K = 32, E = 1 / (1 + Math.pow(10, (l.elo - w.elo) / 400));
-  w.elo = Math.round(w.elo + K * (1 - E));
-  l.elo = Math.round(l.elo + K * (0 - 1 + E));
-  w.wins++; l.losses++;
-}
-
-function applyRatings(ratings) {
-  Object.entries(ratings).forEach(([id, r]) => {
-    if (state.items[id]) { state.items[id].elo = r.elo; state.items[id].wins = r.wins; state.items[id].losses = r.losses; }
-  });
-}
-
-// Recomputes elo/wins/losses for every current item from scratch by replaying the full
-// matchLog in chronological order — the only source of truth for ratings now that
-// there's no baseline snapshot to trust instead. Matches referencing a deleted/missing
-// item are skipped (same "item was deleted" precedent as undoRanking's canUndo). Only
-// called at merge boundaries (mergeImport) — live voting mutates items directly via
-// eloUpdate() for responsiveness and just appends to matchLog, it doesn't replay
-// everything on every single vote.
-function replayAllMatches() {
-  const ratings = {};
-  Object.values(state.items).forEach(i => { ratings[i.id] = { elo: 1000, wins: 0, losses: 0 }; });
-  const sorted = [...state.matchLog].sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+// Applies matches this device hasn't already counted, directly onto the live item
+// ratings that are already sitting in state.items — NOT a from-scratch replay. This
+// matters because state.matchLog is not guaranteed to be this device's *complete*
+// history: pre-2.0.0 data compacted matchLog into a baseline snapshot after every
+// sync and cleared it, so an upgraded device's matchLog is only the tail since its
+// last pre-rewrite sync, while its item ratings already correctly reflect everything
+// before that. A from-scratch replay (resetting every item to 1000/0/0 first) would
+// silently discard that pre-rewrite history — a real data-loss bug found via a live
+// report right after 2.0.0 shipped. Applying only genuinely-new matches on top of
+// whatever ratings are already there avoids ever needing a complete historical log.
+// Matches referencing a deleted/missing item are skipped (same "item was deleted"
+// precedent as undoRanking's canUndo).
+function applyNewMatches(newMatches) {
+  const sorted = [...newMatches].sort((a, b) => a.ts - b.ts || a.seq - b.seq);
   sorted.forEach(m => {
-    if (!ratings[m.wid] || !ratings[m.lid]) return;
-    eloUpdatePure(ratings[m.wid], ratings[m.lid]);
+    const w = state.items[m.wid], l = state.items[m.lid];
+    if (!w || !l) return;
+    eloUpdate(w, l);
   });
-  applyRatings(ratings);
 }
 
 function dedupeById(list) {
@@ -2177,13 +2174,26 @@ function dedupeByItemId(list) {
 // an edit of the existing one (see itemKey()). Items whose id is in `tombstoneIds` are
 // skipped entirely — a delete always wins over an item doc for the same id, regardless
 // of which side's file/pull brought the item along.
+//
+// New items always get elo/wins/losses defaulted to 1000/0/0 rather than trusting
+// whatever `inc` happens to carry — file imports include real values (buildExportPayload()
+// exports full items), but Firestore item docs deliberately don't store ratings at all
+// (see "Cloud sync" in ARCHITECTURE.md), so an item pulled fresh from Firestore for the
+// first time would otherwise get elo: undefined, which turns into NaN the moment any
+// match touches it in applyNewMatches().
 function unionItemsAndSchema(incoming, tombstoneIds) {
   let added = 0;
   Object.values(incoming.items || {}).forEach(inc => {
     if (tombstoneIds.has(inc.id)) return;
     const cur = state.items[inc.id];
     if (!cur) {
-      state.items[inc.id] = { ...inc, hidden: false };
+      state.items[inc.id] = {
+        ...inc,
+        elo: inc.elo !== undefined ? inc.elo : 1000,
+        wins: inc.wins || 0,
+        losses: inc.losses || 0,
+        hidden: false
+      };
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
     } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
@@ -2210,8 +2220,6 @@ function ensureSchemaWellFormed() {
 // doc for the same id (see "Item deletions" in ARCHITECTURE.md) — deletion has no undo,
 // consistent with today's local delete.
 function mergeImport(incoming) {
-  const beforeMatchCount = state.matchLog.length;
-
   const mergedTombstones = dedupeByItemId([...state.itemDeletes, ...(incoming.itemDeletes || [])]);
   const tombstoneIds = new Set(mergedTombstones.map(t => t.itemId));
   // Remove any item this merge newly learns was deleted, before unioning items in, so
@@ -2221,12 +2229,15 @@ function mergeImport(incoming) {
 
   const { added } = unionItemsAndSchema(incoming, tombstoneIds);
 
-  state.matchLog = dedupeById([...state.matchLog, ...(incoming.matchLog || [])]);
-  replayAllMatches();
+  // Only matches this device hasn't already counted get applied — see the comment on
+  // applyNewMatches() for why this must not be a from-scratch replay.
+  const localIds = new Set(state.matchLog.map(m => m.id));
+  const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id));
+  applyNewMatches(newMatches);
+  state.matchLog = dedupeById([...state.matchLog, ...newMatches]);
 
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory(); renderSyncStatus();
-  const newMatches = state.matchLog.length - beforeMatchCount;
-  toast('Synced — ' + newMatches + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
+  toast('Synced — ' + newMatches.length + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
   return true;
 }
 
