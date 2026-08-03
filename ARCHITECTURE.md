@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.0.0` |
+| App version | `2.0.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -132,12 +132,13 @@ state = {
     }
   ],
 
-  // Append-only, permanent log of every pairwise result this device knows about — never
-  // compacted or reset, separate from `history` (which is capped at 50, display/undo
-  // only). This is the sole source of truth for ratings: replayAllMatches() recomputes
-  // every item's elo/wins/losses from scratch by folding matchLog forward in (ts, seq)
-  // order. mergeImport() unions two matchLogs by id and re-replays — see "Merging
-  // rankings between devices" below.
+  // Append-only log of every pairwise result this device knows about, going forward
+  // from the v6 migration — never compacted or reset again. NOT guaranteed to be a
+  // device's complete lifetime history: pre-v6 data compacted matchLog into a baseline
+  // snapshot after every sync and cleared it, so an upgraded device's matchLog may only
+  // be the tail since its last pre-rewrite sync, with everything before that already
+  // baked into item.elo/wins/losses instead. mergeImport() accounts for this — see
+  // "Merging rankings between devices" below and applyNewMatches().
   matchLog: [
     { id: string, cat: string, wid: string, lid: string, ts: number, seq: number }
   ],
@@ -220,14 +221,17 @@ JSON import (and Firestore pull) always goes through `mergeImport()`, which is n
 `mergeImport(incoming)` does, in order:
 1. **Union tombstones** — `state.itemDeletes` and `incoming.itemDeletes` combined, deduped by `itemId`. Any item whose id is now tombstoned is deleted locally if still present, *before* items are unioned in, so an incoming copy that doesn't yet know about a delete can't resurrect it. See "Item deletions" below.
 2. **Union items** — new items (not in `tombstoneIds`) are added unconditionally (deterministic ids make this collision-free); items both sides already have use last-write-wins on `fields` via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`).
-3. **Union matches** — `state.matchLog` and `incoming.matchLog` combined, deduped by match `id` (already globally unique via `settings.deviceId` namespacing).
-4. **Replay from scratch** — `replayAllMatches()` resets every current item to `{elo:1000, wins:0, losses:0}` and folds the *entire* merged `matchLog` forward in `(ts, seq)` order via `eloUpdatePure()`. No baseline, no partial replay — always the full history, every time.
+3. **Apply only genuinely new matches** — `applyNewMatches()` filters `incoming.matchLog` down to entries whose `id` isn't already in local `state.matchLog`, sorts just those by `(ts, seq)`, and applies each directly onto whatever live item ratings are already there (same `eloUpdate()` a real vote uses), then adds them to `state.matchLog`.
 
-This is safe and idempotent by construction: importing/pulling the same file twice is a no-op the second time (nothing new to union), and it doesn't matter what order two devices push/pull in, because nothing is ever overwritten — only added to. `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
+This is safe and idempotent by construction: importing/pulling the same file twice is a no-op the second time (no match id is "new" anymore), and it doesn't matter what order two devices push/pull in, because nothing is ever overwritten — only added to. `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
 
-**Known, accepted tradeoff — replay order across two devices' interleaved matches isn't reconstructed globally.** `replayAllMatches()` sorts the *merged* `matchLog` by `(ts, seq)` and replays it once, which is deterministic and safe (every match still counts exactly once, nothing is ever dropped) but isn't necessarily "what the ELO would have been had these two people voted in true wall-clock real time on a shared list" — client clocks can disagree, and `seq` is only comparable within one device's own log. This is fine for the app's actual goal (no data loss, same result no matter what order devices sync in) and is a much simpler, more robust property than the old baseline/ancestry system ever guaranteed in practice.
+**Critical: this must NOT be a from-scratch replay, and briefly was — a real data-loss incident, fixed same-day.** The first cut of this rewrite had step 3 reset every item to `{elo:1000, wins:0, losses:0}` and replay the *entire* merged `matchLog` forward (`replayAllMatches()`, since removed). That's wrong because `state.matchLog` is **not guaranteed to be a device's complete lifetime history** — pre-2.0.0 data compacted `matchLog` into a baseline snapshot after every sync and cleared it, so any device that had synced before upgrading carried forward only the *tail* since its last pre-rewrite sync, with everything before that already baked into `item.elo`/`wins`/`losses` instead (untouched by the v6 migration, which correctly left item ratings alone). A from-scratch replay reset those already-correct items to 1000 and rebuilt them from only the short tail, silently discarding everything the old baseline had compacted — live, on the very first Pull/Upload/Import after upgrading. `applyNewMatches()` never resets anything; it only ever adds deltas on top of whatever's already there, so it works correctly regardless of whether `matchLog` happens to be complete or not.
 
-**Why not this from the start:** the original schema-v4 design (baseline snapshot + incremental match log) was built to bound replay cost to "comparisons since the last sync," not lifetime volume — reasonable-looking on paper, but the actual cost was a steady stream of client-side reconciliation bugs, because "which snapshot is ahead" is a surprisingly easy question to get subtly wrong. Full replay-from-scratch on every merge is simpler, has no classification step to get wrong, and is cheap enough at realistic two-person casual-ranking volumes (see "Known limitation" under Cloud sync) that the bounded-replay optimization wasn't worth what it cost in fragility.
+**Known, accepted tradeoff — match order across two devices isn't globally reconstructed.** `applyNewMatches()` sorts only the *newly incoming* matches by `(ts, seq)` and applies them on top of current live ratings — deterministic and safe (every match still counts exactly once, nothing is ever dropped), but the resulting ELO isn't necessarily "what it would have been had these two people voted in true wall-clock real time on a shared list," since it depends on what each side's ratings already were at merge time. Client clocks can also disagree, and `seq` is only comparable within one device's own log. This is fine for the app's actual goal (no data loss, same *matches counted* regardless of sync order) and is a much simpler, more robust property than the old baseline/ancestry system ever guaranteed in practice.
+
+**Why not full replay-from-scratch, then:** it's the more obviously "correct-looking" design (deterministic, no dependence on what's already there) and was the original implementation — but as above, it silently assumes `matchLog` is a complete history, which isn't true for anyone upgrading from pre-2.0.0. Applying only new deltas on top of live ratings has no such assumption baked in.
+
+**Why not the original baseline/ancestry design either:** that design was built to bound replay cost to "comparisons since the last sync," not lifetime volume — reasonable-looking on paper, but the actual cost was a steady stream of client-side reconciliation bugs (1.17.1, 1.18.0, 1.18.1), because "which snapshot is ahead" is a surprisingly easy question to get subtly wrong. The current design has no classification step to get wrong, at the cost of the ordering caveat noted above.
 
 ### Item deletions
 
@@ -237,6 +241,7 @@ Deletion is tracked the same way matches are — a permanent, replayable fact, n
 - `mergeImport()` unions tombstones from both sides by `itemId` first, then removes any newly-tombstoned item locally *before* unioning items in — see "Merging rankings between devices" above.
 - A tombstone always wins over an item doc for the same id, regardless of arrival order — deletion is permanent, there is no un-delete path (consistent with the existing local-delete confirm, which also has no undo).
 - Deliberately **not** extended to field edits (title/fields changes) — those stay last-write-wins via `updatedAt`. Low collision risk, low stakes if it does collide, and full edit-history replay isn't something this app needs. Deletion got the tombstone treatment because it was the one case with an actual, documented failure mode (item resurrection on merge).
+- **Known limitation: a surviving item's win/loss count can differ slightly by device when a match against a since-deleted item is still propagating.** Deleting an item never retroactively undoes the ELO it already applied to its opponent's *live* rating (same as before 2.0.0 — deletion has no undo). On the device where the vote happened, that effect is permanently baked into the opponent's rating regardless of the later delete. On a *different* device merging in both the tombstone and that match as new facts at once, `applyNewMatches()` skips the match (the tombstoned item is already gone locally by the time matches are applied — see `mergeImport()`), so the opponent never incurs it there. Not data loss (the discrepancy is a few ELO points/one win-loss count on the *surviving* item, not a missing item or a wiped history), and rare in practice (only visible when a delete and a match against that item reach a third device via different merge timing) — documented here rather than engineered around, given the complexity a full fix would need (retaining per-match opponent-elo-at-time-of-match, which the app doesn't otherwise track).
 - Firestore's `itemDeletes` subcollection needs the same two-UID security rule as `items`/`matches` — see "Cloud sync" below.
 
 ### Cloud sync (Firestore)
@@ -246,7 +251,7 @@ An optional second transport alongside the file export/import flow above — sam
 **Firestore is a real append-only log, not a blob (as of 2.0.0).** Previously the entire `state` was serialized to one JSON string stored in a single document — simple, but it meant the client-side merge logic had to reconcile two full snapshots on every sync, which is exactly the fragility that produced three real bugs in a row (1.17.1, 1.18.0, 1.18.1). As of 2.0.0, Firestore itself holds one document per fact:
 
 - `rankers/shared` (root doc) — small, low-churn blob: `{ cats, schema, updatedAt, updatedBy }`
-- `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings are always derived locally via `replayAllMatches()`, never synced directly.
+- `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings live only in each device's local `state.items`, kept current by applying new matches directly (see `applyNewMatches()`), never synced as a value in their own right.
 - `rankers/shared/matches/{matchId}` — one doc per pairwise comparison, ever: `{ cat, wid, lid, ts, seq, syncedAt }`
 - `rankers/shared/itemDeletes/{itemId}` — one tombstone doc per deleted item: `{ itemId, ts, deviceId, syncedAt }`
 
@@ -467,9 +472,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
 | `mergeImport(incoming)` | Unconditional set-union merge — see "Merging rankings between devices" above |
 | `unionItemsAndSchema(incoming, tombstoneIds)` | Adds items/cats/schema fields only present in `incoming` (skipping any id in `tombstoneIds`); last-write-wins on shared items' `fields` via `updatedAt` |
-| `replayAllMatches()` | Resets every current item to `{elo:1000,wins:0,losses:0}` and replays the full `state.matchLog` (sorted by `(ts,seq)`) forward via `eloUpdatePure()` — the only source of truth for ratings, called at merge boundaries |
-| `eloUpdatePure(w, l)` | Same math as `eloUpdate()` but operates on plain rating records instead of live item objects, for replay |
-| `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `matchLog`s (by `.id`) or two `itemDeletes` lists (by `.itemId`) |
+| `applyNewMatches(newMatches)` | Sorts `newMatches` by `(ts,seq)` and applies each directly onto whatever live item ratings are already in `state.items` via `eloUpdate()` — never resets/replays from scratch, since `state.matchLog` isn't guaranteed to be a device's complete history (see "Merging rankings between devices") |
+| `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `itemDeletes` lists (by `.itemId`) or a `matchLog` against itself (by `.id`) |
 | `recordMatch(cat, wid, lid)` | Appends one permanent entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
 | `deleteItem(id)` / `deleteItemsInCat(cat)` | Confirms, removes item(s), appends a tombstone per removed item to `state.itemDeletes` — see "Item deletions" above |
 | `itemKey(cat, title)` | Deterministic hash of `(cat, title)` — the item id scheme since schema v4 |
@@ -663,7 +667,7 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 | History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
 | Hide items (vs. delete) | Reversible way to exclude items (e.g. duplicates, retired entries) from ranking without losing their ELO/history | Delete permanently, or a separate archive tab |
 | Deterministic item ids (`itemKey(cat, title)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge | Random ids + title-based matching/remapping at merge time |
-| Append-only matches/tombstones, unioned by id and always fully replayed (2.0.0) | No baseline/ancestry classification step to get wrong (the root cause of three real merge bugs in a row); push/pull become order-independent | Snapshot baseline + incremental match log (the pre-2.0.0 design — bounded replay cost, but repeatedly buggy in practice) |
+| Append-only matches/tombstones, unioned by id, applied as incremental deltas onto live ratings (2.0.0, corrected in 2.0.1) | No baseline/ancestry classification step to get wrong (the root cause of three real merge bugs in a row); push/pull become order-independent; unlike a from-scratch replay, doesn't assume `matchLog` is a device's complete history (2.0.0 briefly did, causing a real data-loss incident — see "Merging rankings between devices") | Snapshot baseline + incremental match log (the pre-2.0.0 design — bounded replay cost, but repeatedly buggy in practice); full replay-from-scratch (2.0.0's first cut — simpler-looking but broke on upgrade) |
 | Merges never prompt — union is always unambiguous | Nothing is ever overwritten or compacted, so there's no case where the "right" resolution is unclear; removes an entire class of confirm-dialog misclicks (the exact failure mode of the old `diverged` prompt) | Prompt when a `diverged`/ambiguous case is detected (the pre-2.0.0 design) |
 | Item deletions are tombstoned, field edits stay last-write-wins | Deletion had an actual documented failure mode (resurrection on merge); field edits don't — matching the fix to the real problem instead of over-engineering both | Track all edits as replayable events too |
 | Firestore for cloud sync, loaded via CDN (not npm) | Free tier, real per-user security rules, zero server code to write/host, fits the zero-build-step single-file design | Custom backend, GitHub Gist + embedded token |
