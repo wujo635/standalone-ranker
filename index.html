@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.18.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2118,6 +2118,27 @@ function dedupeMatches(matches) {
 // matchLog) matters because votes mutate items live; matchLog is a parallel audit trail.
 function resetItemsToBaseline(base) { applyRatings(base.ratings); }
 
+// Seals local's current (already-live) ratings as a fresh baseline and clears matchLog
+// — used after uploadToFirestore() successfully pushes, so local never ends up with
+// matchLog entries it still thinks are "unsynced" even though they're now on the server
+// too. That exact inconsistency was the root trigger of a real data-loss bug: a device
+// whose first-ever upload had nothing to merge against (empty doc) never advanced past
+// it, so a later pull replayed its "unsynced" matchLog against its own stale baseline
+// instead of recognizing those matches were already reflected in the server's more
+// advanced one — silently dropping a second person's comparisons from view.
+function advanceLocalBaseline() {
+  const oldBase = state.syncBase;
+  state.syncBase = {
+    id: uid(),
+    parentId: oldBase.id,
+    rev: oldBase.rev + 1,
+    ts: Date.now(),
+    ratings: snapshotRatings(),
+    ancestry: [...new Set([...(oldBase.ancestry || []), oldBase.id])]
+  };
+  state.matchLog = [];
+}
+
 // New items are unioned in (added is always safe). For items both sides already have,
 // custom field edits use last-write-wins via updatedAt — title never conflicts because
 // item ids are derived from (cat, title), so a title edit is a rename to a new id, not
@@ -2230,10 +2251,20 @@ function mergeImport(incoming) {
 
   // rel === 'same', or 'incoming-ahead' with local unsynced comparisons still against
   // the same shared baseline — either way a true concurrent merge via replay.
+  //
+  // Which side's `ratings` snapshot to replay from matters and is NOT interchangeable:
+  // for 'same' they're identical by definition, but for 'incoming-ahead' incBase is a
+  // more-advanced descendant of localBase (established by someone else's earlier merge)
+  // — its `ratings` already encodes history that isn't reconstructable from raw matchLog
+  // alone, since establishing a baseline "compacts" whatever matchLog produced it away
+  // to []. Replaying from the stale `localBase.ratings` here would silently drop that
+  // already-compacted history. This was a real bug: found via a live report where a
+  // second person's ranking vanished from a first person's view after a subsequent pull.
   const { added } = unionItemsAndSchema(incoming);
+  const replayBase = rel === 'incoming-ahead' ? incBase.ratings : localBase.ratings;
   const allMatches = dedupeMatches([...state.matchLog, ...(incoming.matchLog || [])]);
   allMatches.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
-  applyRatings(replayMatches(localBase.ratings, allMatches));
+  applyRatings(replayMatches(replayBase, allMatches));
   // New baseline's ancestry is the union of both sides' known history plus their own
   // current ids — so a future relateBaselines() call from either lineage (or a third
   // device that descends from one of them) can recognize this baseline as a multi-hop
@@ -2374,6 +2405,11 @@ async function uploadToFirestore() {
       mergedFirst = true;
       cloudSyncTimes.lastPull = Date.now();
     }
+    // Whatever's about to be pushed becomes the new agreed state — advance local past
+    // any matchLog still sitting there (e.g. there was nothing to merge against yet, or
+    // mergeImport()'s 'local-ahead' branch intentionally left it untouched) so local
+    // never ends up "unsynced" relative to data it just successfully pushed itself.
+    if (state.matchLog.length > 0) { advanceLocalBaseline(); save(); }
     const payload = buildExportPayload();
     await cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).set({
       json: JSON.stringify(payload),
@@ -2382,6 +2418,7 @@ async function uploadToFirestore() {
     });
     cloudSyncTimes.lastUpload = Date.now();
     renderCloudSyncTimes();
+    renderSyncStatus();
     toast(mergedFirst ? 'Uploaded (merged with existing cloud data first)' : 'Uploaded to cloud');
   } catch (e) {
     toast(cloudErrorMessage(e));

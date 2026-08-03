@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.18.0` |
+| App version | `1.18.1` |
 | Data schema version | `5` |
 | localStorage key | `ranker-v1` |
 
@@ -214,13 +214,17 @@ JSON import always goes through `mergeImport()`. New items are unioned in uncond
 
 | Relation | Meaning | Behaviour |
 |---|---|---|
-| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward. Result becomes a new baseline (`rev + 1`, `ancestry` = union of both sides' known history), both devices' `matchLog`s clear. |
+| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward (both sides' `ratings` are identical here, so which one doesn't matter). Result becomes a new baseline (`rev + 1`, `ancestry` = union of both sides' known history), both devices' `matchLog`s clear. |
 | `incoming-ahead` (local's id appears in incoming's `ancestry`, or the one-hop `parentId` check), local has no unsynced comparisons | Incoming is a continuation of somewhere local already was, any number of syncs later | **Fast-forward**: adopt incoming's items/baseline/matchLog wholesale, no prompt. |
-| `incoming-ahead`, local *does* have unsynced comparisons | Same shared ancestor, but local has since ranked something too | Falls through to the same replay merge as `same` — safe, because `local.syncBase.ratings` is still a valid common starting point. |
+| `incoming-ahead`, local *does* have unsynced comparisons | Incoming's baseline is a more-advanced descendant of local's (established by someone else's earlier merge), but local has since ranked something too | Replay merge, but from **`incBase.ratings`**, not local's — see note below, this distinction is load-bearing. |
 | `local-ahead` (incoming's id appears in local's `ancestry`, or the one-hop `parentId` check) | Local is already past where incoming is, any number of syncs ahead | Union any new items only; no rating changes; toast explains why. |
 | `diverged` (no relation found in either direction) | The two files don't share a recognizable common point at all (e.g. a genuinely unrelated device/lineage) | **Confirm dialog** — no silent guessing: **OK** discards local's unsynced comparisons (reverted to the last local baseline) and adopts the incoming file as-is; **Cancel** aborts with no changes. A brand-new/empty local library always treats this as a clean adopt (nothing to lose). |
 
 `relateBaselines()` checks each side's full `ancestry` chain (every baseline id that lineage has ever passed through), not just the immediate `parentId` — so "ahead by several syncs" is recognized correctly, not just "ahead by exactly one." This matters: a device that had synced more than once could otherwise be misclassified as `diverged` relative to an older copy — and the `diverged` path's only confirmed action is destructive (discard local, adopt incoming). Getting that misclassification wrong meant discarding the *more advanced* copy in favor of the older one, with no way for the user to know that's what they were agreeing to. Fixed in 1.18.0 (schema v5) after being caught via a real bug report — see `git log` around `relateBaselines()`. A genuine fork (no shared ancestry in either direction — e.g. an unrelated device) still correctly falls to `diverged`. See `mergeImport()`, `replayMatches()`, and `unionItemsAndSchema()`.
+
+**Which side's `ratings` snapshot the replay starts from is not interchangeable, and getting it wrong silently drops data (fixed in 1.18.1).** For `same` it doesn't matter — both baselines' `ratings` are identical by definition. But for `incoming-ahead`, `incBase` is a more-advanced descendant of `localBase` (established by someone else's earlier merge), and its `ratings` already encodes history that isn't reconstructable from raw `matchLog` alone — establishing a baseline "compacts" whatever `matchLog` produced it away to `[]`. The bug: replaying from the stale `localBase.ratings` instead silently dropped that already-compacted history. Concretely — User A's first-ever upload had nothing to merge against (empty Firestore doc), so it skipped the pre-merge and pushed without ever advancing A's local baseline or clearing A's local `matchLog`; when User B then merged A's upload with B's own and pushed the combined result, and A later pulled, A's stale leftover `matchLog` (a vote already reflected in the server's more-advanced baseline) triggered this exact branch — and using `localBase.ratings` as the replay foundation silently dropped B's contribution from A's view. Two fixes, one root cause:
+- The replay branch now picks `replayBase = rel === 'incoming-ahead' ? incBase.ratings : localBase.ratings`.
+- `uploadToFirestore()` now calls `advanceLocalBaseline()` after any successful push (whether or not a pre-merge happened) whenever local still has a non-empty `matchLog` — sealing it into a fresh baseline so local is never left thinking something is "unsynced" when it's actually already reflected on the server. This preserves the invariant the whole design depends on: a baseline's `ratings` and a lineage's `matchLog` are complementary and never overlap.
 
 Non-ranking field edits on an item both sides have use last-write-wins via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`). `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
 
@@ -422,6 +426,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `replayMatches(baselineRatings, matches)` | Pure function: folds a chronologically-sorted match list forward from a baseline snapshot using `eloUpdatePure()`, returns final `{elo,wins,losses}` per item |
 | `eloUpdatePure(w, l)` | Same math as `eloUpdate()` but operates on plain rating records instead of live item objects, for replay |
 | `resetItemsToBaseline(base)` | Reverts every item in `base.ratings` back to that snapshot — used to actually discard local unsynced comparisons (matchLog alone isn't enough; votes mutate items live) |
+| `advanceLocalBaseline()` | Seals local's current ratings as a fresh baseline and clears `matchLog` — called by `uploadToFirestore()` after any successful push so local is never left thinking something is "unsynced" when it's already on the server (see "Merging rankings between devices") |
 | `recordMatch(cat, wid, lid)` | Appends one entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
 | `itemKey(cat, title)` | Deterministic hash of `(cat, title)` — the item id scheme since schema v4 |
 | `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
