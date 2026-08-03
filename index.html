@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.0.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2181,8 +2181,15 @@ function dedupeByItemId(list) {
 // (see "Cloud sync" in ARCHITECTURE.md), so an item pulled fresh from Firestore for the
 // first time would otherwise get elo: undefined, which turns into NaN the moment any
 // match touches it in applyNewMatches().
+//
+// Returns the ids of items just created in `freshlySeeded` — mergeImport() uses this to
+// avoid double-counting: a file-imported item's elo/wins/losses already reflect every
+// match touching it in that same export's matchLog (they're two views of the same live
+// history on the source device), so re-applying those matches on top would double-count
+// them. See the comment on mergeImport()'s match-filtering step below.
 function unionItemsAndSchema(incoming, tombstoneIds) {
   let added = 0;
+  const freshlySeeded = new Set();
   Object.values(incoming.items || {}).forEach(inc => {
     if (tombstoneIds.has(inc.id)) return;
     const cur = state.items[inc.id];
@@ -2194,6 +2201,7 @@ function unionItemsAndSchema(incoming, tombstoneIds) {
         losses: inc.losses || 0,
         hidden: false
       };
+      freshlySeeded.add(inc.id);
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
     } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
@@ -2203,7 +2211,7 @@ function unionItemsAndSchema(incoming, tombstoneIds) {
   });
   (incoming.cats || []).forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
   Object.keys(incoming.schema || {}).forEach(c => { if (!state.schema[c]) state.schema[c] = incoming.schema[c]; });
-  return { added };
+  return { added, freshlySeeded };
 }
 
 function ensureSchemaWellFormed() {
@@ -2227,17 +2235,30 @@ function mergeImport(incoming) {
   tombstoneIds.forEach(id => { if (state.items[id]) delete state.items[id]; });
   state.itemDeletes = mergedTombstones;
 
-  const { added } = unionItemsAndSchema(incoming, tombstoneIds);
+  const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds);
 
   // Only matches this device hasn't already counted get applied — see the comment on
   // applyNewMatches() for why this must not be a from-scratch replay.
+  //
+  // Matches touching a freshly-seeded item (just created above, this exact merge) are
+  // excluded from application AND left out of local matchLog entirely — not just
+  // skipped. A freshly-seeded item's elo/wins/losses already reflect every match that
+  // touches it in this same incoming payload (see unionItemsAndSchema()), so applying
+  // them here would double-count. Leaving them out of matchLog (rather than recording
+  // them as "seen but not applied") means a future merge — once the item is no longer
+  // fresh, i.e. any merge after this one — can still pick up and correctly apply a
+  // match here that also touched an item that already existed locally (that item's own
+  // rating does need the delta; this device just can't cleanly apply "half" of a paired
+  // ELO update). A real bug found via manual review: importing a full export into an
+  // empty device double-counted every match, because every item was "freshly seeded."
   const localIds = new Set(state.matchLog.map(m => m.id));
   const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id));
-  applyNewMatches(newMatches);
-  state.matchLog = dedupeById([...state.matchLog, ...newMatches]);
+  const matchesToApply = newMatches.filter(m => !freshlySeeded.has(m.wid) && !freshlySeeded.has(m.lid));
+  applyNewMatches(matchesToApply);
+  state.matchLog = dedupeById([...state.matchLog, ...matchesToApply]);
 
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory(); renderSyncStatus();
-  toast('Synced — ' + newMatches.length + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
+  toast('Synced — ' + matchesToApply.length + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
   return true;
 }
 
