@@ -604,7 +604,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 // its id (old id's matches become orphaned and are dropped on replay) — an accepted
 // tradeoff, same as the existing "item was deleted" case for undo.
 function itemKey(cat, title) {
-  const s = String(cat) + ' ' + String(title).trim().toLowerCase();
+  const s = String(cat) + ' ' + String(title).trim().toLowerCase();
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return 'i' + h.toString(36);
