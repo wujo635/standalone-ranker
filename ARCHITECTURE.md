@@ -14,8 +14,8 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.18.1` |
-| Data schema version | `5` |
+| App version | `2.0.0` |
+| Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
 Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage.
@@ -132,25 +132,30 @@ state = {
     }
   ],
 
-  // Append-only, unbounded log of every pairwise result since the last sync baseline —
-  // separate from `history` (which is capped at 50, display/undo only). This is the source
-  // of truth mergeImport() replays to reconcile rankings made independently on two devices.
+  // Append-only, permanent log of every pairwise result this device knows about — never
+  // compacted or reset, separate from `history` (which is capped at 50, display/undo
+  // only). This is the sole source of truth for ratings: replayAllMatches() recomputes
+  // every item's elo/wins/losses from scratch by folding matchLog forward in (ts, seq)
+  // order. mergeImport() unions two matchLogs by id and re-replays — see "Merging
+  // rankings between devices" below.
   matchLog: [
     { id: string, cat: string, wid: string, lid: string, ts: number, seq: number }
   ],
 
-  // The last agreed-upon rating snapshot two devices merged from. mergeImport() folds
-  // matchLog forward from `ratings` to recompute final ELO deterministically, regardless
-  // of merge order — see "Merging rankings between devices" below.
-  syncBase: {
-    id:       string,           // random, regenerated every time a new baseline is established
-    parentId: string | null,    // id of the baseline this one immediately superseded
-    ancestry: string[],         // every past baseline id in this lineage, not just parentId — lets
-                                 // relateBaselines() recognize "ahead by several hops", not just one
-    rev:      number,           // monotonic counter, display-only
-    ts:       number,           // Date.now() when this baseline was established
-    ratings:  { "<itemId>": { elo, wins, losses } }
-  }
+  // Append-only, permanent log of deletion tombstones — the same "never compact, union
+  // by id" treatment as matchLog, but for item removals. A tombstone always wins over an
+  // item doc for the same id on merge, regardless of arrival order. See "Item deletions"
+  // below.
+  itemDeletes: [
+    { itemId: string, ts: number, deviceId: string }
+  ],
+
+  // Local-only cursor (ms since epoch) marking how far this device has pulled from
+  // Firestore, so pullFromFirestore() only fetches what's new. Not part of the merge
+  // model itself — a fresh device with lastSyncedServerTs === null just fetches
+  // everything on its first pull, same as any other pull. Stripped from file exports
+  // (see buildExportPayload()) since it means nothing to whoever imports the file.
+  lastSyncedServerTs: number | null
 }
 ```
 
@@ -161,19 +166,19 @@ Exported JSON wraps `state` with a `_meta` block:
 ```json
 {
   "_meta": {
-    "appVersion": "1.16.0",
-    "dataSchemaVersion": 4,
+    "appVersion": "2.0.0",
+    "dataSchemaVersion": 6,
     "exportedAt": "2026-07-05T12:00:00.000Z"
   },
   "cats": [...],
   "schema": {...},
   "items": {...},
   "matchLog": [...],
-  "syncBase": {...}
+  "itemDeletes": [...]
 }
 ```
 
-`settings.deviceId` and `settings.userName` are stripped before export (see `exportData()`) — they're personal, per-browser identifiers, same treatment as `hidden`.
+`settings.deviceId`, `settings.userName`, and `lastSyncedServerTs` are stripped before export (see `buildExportPayload()`) — they're personal, per-browser bookkeeping, same treatment as `hidden`.
 
 ### CSV preload format
 
@@ -210,37 +215,52 @@ The "Export category as CSV" button in the Data tab produces a file in this exac
 
 ### Merging rankings between devices
 
-JSON import always goes through `mergeImport()`. New items are unioned in unconditionally (deterministic ids make this collision-free); what happens to *rankings* depends on how the incoming file's `syncBase` relates to the local one, via `relateBaselines()`:
+JSON import (and Firestore pull) always goes through `mergeImport()`, which is now an **unconditional set union by id** — there is no "which side is ahead" question, no baseline, no ancestry chain, and no confirm dialog. Three real bugs in a row (1.17.1, 1.18.0, 1.18.1) all traced back to the same root cause: classifying how two client-side snapshots relate before picking a replay strategy is inherently fragile. As of 2.0.0 (schema v6) that classification step is gone entirely, not patched again.
 
-| Relation | Meaning | Behaviour |
-|---|---|---|
-| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward (both sides' `ratings` are identical here, so which one doesn't matter). Result becomes a new baseline (`rev + 1`, `ancestry` = union of both sides' known history), both devices' `matchLog`s clear. |
-| `incoming-ahead` (local's id appears in incoming's `ancestry`, or the one-hop `parentId` check), local has no unsynced comparisons | Incoming is a continuation of somewhere local already was, any number of syncs later | **Fast-forward**: adopt incoming's items/baseline/matchLog wholesale, no prompt. |
-| `incoming-ahead`, local *does* have unsynced comparisons | Incoming's baseline is a more-advanced descendant of local's (established by someone else's earlier merge), but local has since ranked something too | Replay merge, but from **`incBase.ratings`**, not local's — see note below, this distinction is load-bearing. |
-| `local-ahead` (incoming's id appears in local's `ancestry`, or the one-hop `parentId` check) | Local is already past where incoming is, any number of syncs ahead | Union any new items only; no rating changes; toast explains why. |
-| `diverged` (no relation found in either direction) | The two files don't share a recognizable common point at all (e.g. a genuinely unrelated device/lineage) | **Confirm dialog** — no silent guessing: **OK** discards local's unsynced comparisons (reverted to the last local baseline) and adopts the incoming file as-is; **Cancel** aborts with no changes. A brand-new/empty local library always treats this as a clean adopt (nothing to lose). |
+`mergeImport(incoming)` does, in order:
+1. **Union tombstones** — `state.itemDeletes` and `incoming.itemDeletes` combined, deduped by `itemId`. Any item whose id is now tombstoned is deleted locally if still present, *before* items are unioned in, so an incoming copy that doesn't yet know about a delete can't resurrect it. See "Item deletions" below.
+2. **Union items** — new items (not in `tombstoneIds`) are added unconditionally (deterministic ids make this collision-free); items both sides already have use last-write-wins on `fields` via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`).
+3. **Union matches** — `state.matchLog` and `incoming.matchLog` combined, deduped by match `id` (already globally unique via `settings.deviceId` namespacing).
+4. **Replay from scratch** — `replayAllMatches()` resets every current item to `{elo:1000, wins:0, losses:0}` and folds the *entire* merged `matchLog` forward in `(ts, seq)` order via `eloUpdatePure()`. No baseline, no partial replay — always the full history, every time.
 
-`relateBaselines()` checks each side's full `ancestry` chain (every baseline id that lineage has ever passed through), not just the immediate `parentId` — so "ahead by several syncs" is recognized correctly, not just "ahead by exactly one." This matters: a device that had synced more than once could otherwise be misclassified as `diverged` relative to an older copy — and the `diverged` path's only confirmed action is destructive (discard local, adopt incoming). Getting that misclassification wrong meant discarding the *more advanced* copy in favor of the older one, with no way for the user to know that's what they were agreeing to. Fixed in 1.18.0 (schema v5) after being caught via a real bug report — see `git log` around `relateBaselines()`. A genuine fork (no shared ancestry in either direction — e.g. an unrelated device) still correctly falls to `diverged`. See `mergeImport()`, `replayMatches()`, and `unionItemsAndSchema()`.
+This is safe and idempotent by construction: importing/pulling the same file twice is a no-op the second time (nothing new to union), and it doesn't matter what order two devices push/pull in, because nothing is ever overwritten — only added to. `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
 
-**Which side's `ratings` snapshot the replay starts from is not interchangeable, and getting it wrong silently drops data (fixed in 1.18.1).** For `same` it doesn't matter — both baselines' `ratings` are identical by definition. But for `incoming-ahead`, `incBase` is a more-advanced descendant of `localBase` (established by someone else's earlier merge), and its `ratings` already encodes history that isn't reconstructable from raw `matchLog` alone — establishing a baseline "compacts" whatever `matchLog` produced it away to `[]`. The bug: replaying from the stale `localBase.ratings` instead silently dropped that already-compacted history. Concretely — User A's first-ever upload had nothing to merge against (empty Firestore doc), so it skipped the pre-merge and pushed without ever advancing A's local baseline or clearing A's local `matchLog`; when User B then merged A's upload with B's own and pushed the combined result, and A later pulled, A's stale leftover `matchLog` (a vote already reflected in the server's more-advanced baseline) triggered this exact branch — and using `localBase.ratings` as the replay foundation silently dropped B's contribution from A's view. Two fixes, one root cause:
-- The replay branch now picks `replayBase = rel === 'incoming-ahead' ? incBase.ratings : localBase.ratings`.
-- `uploadToFirestore()` now calls `advanceLocalBaseline()` after any successful push (whether or not a pre-merge happened) whenever local still has a non-empty `matchLog` — sealing it into a fresh baseline so local is never left thinking something is "unsynced" when it's actually already reflected on the server. This preserves the invariant the whole design depends on: a baseline's `ratings` and a lineage's `matchLog` are complementary and never overlap.
+**Known, accepted tradeoff — replay order across two devices' interleaved matches isn't reconstructed globally.** `replayAllMatches()` sorts the *merged* `matchLog` by `(ts, seq)` and replays it once, which is deterministic and safe (every match still counts exactly once, nothing is ever dropped) but isn't necessarily "what the ELO would have been had these two people voted in true wall-clock real time on a shared list" — client clocks can disagree, and `seq` is only comparable within one device's own log. This is fine for the app's actual goal (no data loss, same result no matter what order devices sync in) and is a much simpler, more robust property than the old baseline/ancestry system ever guaranteed in practice.
 
-Non-ranking field edits on an item both sides have use last-write-wins via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`). `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
+**Why not this from the start:** the original schema-v4 design (baseline snapshot + incremental match log) was built to bound replay cost to "comparisons since the last sync," not lifetime volume — reasonable-looking on paper, but the actual cost was a steady stream of client-side reconciliation bugs, because "which snapshot is ahead" is a surprisingly easy question to get subtly wrong. Full replay-from-scratch on every merge is simpler, has no classification step to get wrong, and is cheap enough at realistic two-person casual-ranking volumes (see "Known limitation" under Cloud sync) that the bounded-replay optimization wasn't worth what it cost in fragility.
 
-**Why this design, not full event-sourcing from scratch:** replaying pairwise ELO from the very first comparison would require every historical match ever made, but existing installs only ever kept the last 50 (`history`, display/undo only) and mutate item ratings in place. Rather than require reconstructing lost history, migration to schema v4 snapshots *current* ratings as a trusted baseline (`syncBase`, `rev: 0`) and only logs matches going forward (`matchLog`) — bounding replay cost to "comparisons since the last sync," not lifetime volume. See the "Single-user" entry under Known limitations for the tradeoff this implies.
+### Item deletions
+
+Deletion is tracked the same way matches are — a permanent, replayable fact, not a silent local-only mutation. Previously (pre-2.0.0) deletions weren't tracked at all: deleting an item locally and later merging with a device that still had it just brought it back, with no way to detect or prevent that.
+
+- `deleteItem(id)` and `deleteItemsInCat(cat)` both append a tombstone `{ itemId, ts, deviceId }` to `state.itemDeletes` in addition to removing the item from `state.items` — the same pattern `recordMatch()` already uses for `state.matchLog`.
+- `mergeImport()` unions tombstones from both sides by `itemId` first, then removes any newly-tombstoned item locally *before* unioning items in — see "Merging rankings between devices" above.
+- A tombstone always wins over an item doc for the same id, regardless of arrival order — deletion is permanent, there is no un-delete path (consistent with the existing local-delete confirm, which also has no undo).
+- Deliberately **not** extended to field edits (title/fields changes) — those stay last-write-wins via `updatedAt`. Low collision risk, low stakes if it does collide, and full edit-history replay isn't something this app needs. Deletion got the tombstone treatment because it was the one case with an actual, documented failure mode (item resurrection on merge).
+- Firestore's `itemDeletes` subcollection needs the same two-UID security rule as `items`/`matches` — see "Cloud sync" below.
 
 ### Cloud sync (Firestore)
 
-An optional second transport alongside the file export/import flow above — same `buildExportPayload()` and `migrateData()` → `mergeImport()` pipeline either way, just a different way to move the payload between two devices. The Data tab's "Cloud sync" card adds Upload/Pull buttons next to the existing file Export/Import controls; neither replaces the other.
+An optional second transport alongside the file export/import flow above — same `mergeImport()` union-by-id pipeline either way, just a different way to move facts between two devices. The Data tab's "Cloud sync" card adds Upload/Pull buttons next to the existing file Export/Import controls; neither replaces the other.
 
-**Why Firestore, not a custom backend:** the merge logic already runs entirely client-side (`mergeImport()`), so all a backend needs to do is store and serve one JSON blob to whoever's authorized. Firestore's free tier does that with no server code to write or host, and its security rules give real per-user access control — a meaningfully better fit than, say, a GitHub Gist with an access token embedded in the page.
+**Firestore is a real append-only log, not a blob (as of 2.0.0).** Previously the entire `state` was serialized to one JSON string stored in a single document — simple, but it meant the client-side merge logic had to reconcile two full snapshots on every sync, which is exactly the fragility that produced three real bugs in a row (1.17.1, 1.18.0, 1.18.1). As of 2.0.0, Firestore itself holds one document per fact:
 
-**Setup** (see `log/firestore-sync-plan.md` for the full walkthrough, not committed — it's gitignored):
+- `rankers/shared` (root doc) — small, low-churn blob: `{ cats, schema, updatedAt, updatedBy }`
+- `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings are always derived locally via `replayAllMatches()`, never synced directly.
+- `rankers/shared/matches/{matchId}` — one doc per pairwise comparison, ever: `{ cat, wid, lid, ts, seq, syncedAt }`
+- `rankers/shared/itemDeletes/{itemId}` — one tombstone doc per deleted item: `{ itemId, ts, deviceId, syncedAt }`
+
+Every subcollection doc's ID is the fact's own id (`itemId`/`matchId`), so writing the same fact twice is an idempotent no-op overwrite, not a conflict — this is what makes push and pull order-independent (see below). `syncedAt` is a Firestore `serverTimestamp()` used only as a pull cursor (see `pullFromFirestore()`); it's separate from `updatedAt`/`ts`, which are client timestamps used for actual data (last-write-wins on item fields, match ordering).
+
+**Push and pull no longer need to happen in any particular order.** The old blob design required pulling before pushing to avoid clobbering another device's upload (fixed in 1.17.1 by merging-before-push) — but that was a workaround for the blob being a single overwritable unit. With one doc per fact, `uploadToFirestore()` just writes whatever's new; there's nothing to clobber.
+
+**Why Firestore, not a custom backend:** the merge logic already runs entirely client-side (`mergeImport()`), so all a backend needs to do is store and serve documents to whoever's authorized. Firestore's free tier does that with no server code to write or host, and its security rules give real per-user access control — a meaningfully better fit than, say, a GitHub Gist with an access token embedded in the page.
+
+**Setup** (see `log/firestore-sync-plan.md` and `log/firestore-append-only-history-plan.md` for the full walkthroughs, not committed — they're gitignored):
 1. Create a Firebase project, enable Firestore, enable the Google sign-in provider
 2. Register a Web app to get a `firebaseConfig` object
 3. Both users sign in once so Firebase records their UIDs
-4. Write a security rule restricting the shared document to those two UIDs
+4. Write a security rule restricting `rankers/shared` and its `items`/`matches`/`itemDeletes` subcollections to those two UIDs (see the rules snippet further down)
 
 **Must be served over http(s) — `file://` does not work.** Google sign-in's `signInWithPopup()` requires a real origin; opening `index.html` directly from disk fails with `location.protocol must be http`. This is a hard OAuth requirement, not fixable in app code — it means cloud sync effectively requires the app to be hosted (see "Host it online"), not just opened locally. A quick local static server (`npx serve .`, `python -m http.server`) works for testing against `http://localhost`, which Firebase authorizes by default.
 
@@ -252,20 +272,46 @@ An optional second transport alongside the file export/import flow above — sam
 
 **Defensive init:** Firebase initialization runs as top-level code in the same `<script>` block as the rest of the app, so it's wrapped in `try/catch` — an uncaught error there (CDN blocked, ad-blocker, offline, bad config) would otherwise halt every subsequent statement in the file, breaking ranking/library/everything over an optional feature. `cloudAvailable` tracks whether init succeeded; `renderCloudAuthUI()` shows a plain "unavailable" message and leaves Upload/Pull disabled when it's `false`, rather than throwing.
 
-**Storage shape — a JSON string, not native Firestore fields.** The shared document is `{ json: string, updatedAt, updatedBy }` rather than writing `buildExportPayload()`'s object directly as Firestore fields. Reason: Firestore rejects arrays nested directly inside arrays, and Tier-mode history entries contain exactly that (`tiers: [[],[],[],[],[]]`) — a native-fields write would throw. Serializing to a JSON string sidesteps that restriction entirely (and Firestore's dislike of `undefined` values), and keeps this transport byte-identical to the file export format. `pullFromFirestore()` just `JSON.parse()`s it back before handing off to `migrateData()`.
+**Upload only pushes what this device hasn't already pushed**, tracked via local per-device cursors in `state.settings`: `lastUploadedItemsAt` (compared against each item's `updatedAt`), `lastUploadedSeq` (compared against this device's own match `seq`, filtered by the `settings.deviceId` prefix on match ids — matches pulled in from elsewhere don't need pushing back), and `lastUploadedDeletesAt` (compared against each tombstone's `ts`). All three advance after a successful `batch.commit()`. This bounds upload cost to "what's new," not the whole history's write count — Firestore bills per document write, so re-writing everything every time would both cost more and be pointless now that writes are idempotent anyway.
+
+**Pull only fetches what's new since `state.lastSyncedServerTs`**, a local cursor (`null` on a fresh device, so the first pull fetches everything). Each subcollection doc carries a `syncedAt: serverTimestamp()` field used only for this — `pullFromFirestore()` queries `where('syncedAt', '>', cursor)` on `items`/`matches`/`itemDeletes`, unions the results in via `mergeImport()`, then advances the cursor to the newest `syncedAt` seen.
 
 **Key functions:**
 - `cloudSignIn()` / `cloudSignOut()` — Google auth via `signInWithPopup(GoogleAuthProvider)`
 - `renderCloudAuthUI()` — reflects auth state into the Data tab card; enables/disables Upload/Pull
-- `uploadToFirestore()` — reads the shared doc first and runs it through `mergeImport()` (same as Pull) *before* pushing, so a push can never silently overwrite another device's already-uploaded changes; only pushes `buildExportPayload()` after that merge completes (or immediately if the doc didn't exist yet)
-- `pullFromFirestore()` — `get()` the shared doc → `migrateData()` → `mergeImport()` (identical to the tail end of `importData()`)
+- `uploadToFirestore()` — batches new/changed items, this device's new matches, and new tombstones into per-doc writes (keyed by their own id, so re-sending is a safe no-op) plus a merge-write to the small root doc; advances the local upload cursors on success
+- `pullFromFirestore()` — queries `items`/`matches`/`itemDeletes` for anything newer than `state.lastSyncedServerTs`, builds an `incoming` object matching `mergeImport()`'s expected shape, merges it in, advances the cursor
 - `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
 
-**Upload merges before it pushes (fixed in 1.17.1).** The initial implementation had `uploadToFirestore()` do a blind `set()` — if User A uploaded, then User B uploaded without ever pulling A's change first, B's push silently overwrote the whole document and A's data was just gone, no warning, no conflict. `uploadToFirestore()` now `get()`s the current doc first and runs it through the same `mergeImport()` Pull uses, *then* pushes — so Upload can no longer lose data, only (rarely) create a superfluous baseline revision if there was nothing to actually merge. If that pre-merge hits the `diverged` case and the user declines the prompt, the upload aborts entirely rather than pushing anyway.
+**Push and pull can happen in any order, any time, from either device — no pre-pull-before-push workaround needed (unlike the pre-2.0.0 blob design).** Because every doc is keyed by its own fact's id, two devices independently pushing "the same" match or item just results in two identical writes to the same doc — not a conflict, not data loss, nothing to reconcile.
 
-**Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, not used for any merge decision (that's still `syncBase`/`matchLog`, unaffected by this transport).
+**Known limitation:** `cloudSyncTimes` (last upload/pull shown in the UI) is in-memory only and resets on reload — cosmetic, doesn't affect `lastSyncedServerTs`/the upload cursors, which are persisted in `state`.
 
-**Verification status:** the single-account round-trip (sign in → Upload → Pull the same data back → correct no-op merge) has been confirmed live against a real Firestore project. A real two-account *concurrent* merge (two people ranking independently, then reconciling) has not yet been exercised live — the merge logic itself was unit-verified in isolation beforehand (see git history around `mergeImport()`), so this is about confirming the live plumbing carries it correctly end to end, not the underlying algorithm.
+**Verification status:** see the testing notes and CHANGELOG entry for 2.0.0 — this was a substantial rewrite of the sync transport and was verified via multi-device simulation (push/pull in varying orders, overlapping items ranked on both "devices," deletions on one side merging with edits on the other) before being merged. Real two-account live verification against a hosted deployment remains the final check once a second user is available to run it, same as before.
+
+**Security rules (must be updated in the Firebase console for 2.0.0 — a code change alone doesn't do this).** The pre-2.0.0 rule only needed to cover the single `rankers/shared` document; the append-only model needs the same two-UID allowlist extended to all three subcollections:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rankers/shared {
+      allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
+      match /items/{itemId} {
+        allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
+      }
+      match /matches/{matchId} {
+        allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
+      }
+      match /itemDeletes/{itemId} {
+        allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
+      }
+    }
+  }
+}
+```
+
+This is a manual, one-time step in Firebase Console → Firestore Database → Rules — not something a code commit or redeploy affects (same caveat as "Expand cloud sync access beyond two users" below).
 
 ---
 
@@ -409,28 +455,27 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
 | `itemsWithoutHidden()` | Returns a copy of `state.items` with the `hidden` key stripped from every item; used by `buildExportPayload()` so hidden status (a personal, per-browser preference) never travels in an exported file |
-| `buildExportPayload()` | Builds the `_meta` + state object shared by `exportData()` (file download) and `uploadToFirestore()` (cloud sync) — one place defining what "exported state" means |
+| `buildExportPayload()` | Builds the `_meta` + state object for file export (`exportData()`); strips `deviceId`/`userName`/`lastSyncedServerTs`, the personal per-device bookkeeping fields |
 | `exportData()` | Serializes `buildExportPayload()` to JSON, triggers download |
 | `cloudSignIn()` / `cloudSignOut()` | Google auth via Firebase's `signInWithPopup(GoogleAuthProvider)` / `signOut()` |
 | `renderCloudAuthUI()` | Reflects current auth/availability state into the Data tab's Cloud sync card; enables/disables Upload/Pull |
-| `uploadToFirestore()` | `get()`s the shared doc, merges it in via `mergeImport()` first if it exists (prevents one device's push from clobbering another's), then `buildExportPayload()` → JSON string → `set()` |
-| `pullFromFirestore()` | `get()` the shared document → `JSON.parse()` → `migrateData()` → `mergeImport()`, same tail as `importData()` |
+| `uploadToFirestore()` | Batches per-doc writes for new/changed items, this device's new matches, and new tombstones (filtered against the local `lastUploaded*` cursors), plus a merge-write to the root doc's cats/schema; advances the cursors on success |
+| `pullFromFirestore()` | Queries `items`/`matches`/`itemDeletes` for anything newer than `state.lastSyncedServerTs`, builds an `incoming` object, hands it to `mergeImport()`, advances the cursor |
 | `cloudErrorMessage(e)` | Maps Firestore error codes to a plain-language toast string |
 | `exportCategoryCSV()` | Exports the currently selected library category as a preload-compatible CSV with schema directives; no ELO or ranking data |
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
 | `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
-| `mergeImport(incoming)` | Reconciles rankings from another device — see "Merging rankings between devices" above |
-| `relateBaselines(localBase, incBase)` | Returns `'same'` \| `'incoming-ahead'` \| `'local-ahead'` \| `'diverged'` by checking `syncBase.id` against each side's full `ancestry` chain (falls back to `parentId` for older pre-v5 data lacking `ancestry`) |
-| `unionItemsAndSchema(incoming)` | Adds items/cats/schema fields only present in `incoming`; last-write-wins on shared items' `fields` via `updatedAt` |
-| `adoptIncomingWholesale(incoming)` | Mirrors local state to `incoming`'s items/baseline/matchLog; used by fast-forward and (after `resetItemsToBaseline()`) the diverged-discard path |
-| `replayMatches(baselineRatings, matches)` | Pure function: folds a chronologically-sorted match list forward from a baseline snapshot using `eloUpdatePure()`, returns final `{elo,wins,losses}` per item |
+| `mergeImport(incoming)` | Unconditional set-union merge — see "Merging rankings between devices" above |
+| `unionItemsAndSchema(incoming, tombstoneIds)` | Adds items/cats/schema fields only present in `incoming` (skipping any id in `tombstoneIds`); last-write-wins on shared items' `fields` via `updatedAt` |
+| `replayAllMatches()` | Resets every current item to `{elo:1000,wins:0,losses:0}` and replays the full `state.matchLog` (sorted by `(ts,seq)`) forward via `eloUpdatePure()` — the only source of truth for ratings, called at merge boundaries |
 | `eloUpdatePure(w, l)` | Same math as `eloUpdate()` but operates on plain rating records instead of live item objects, for replay |
-| `resetItemsToBaseline(base)` | Reverts every item in `base.ratings` back to that snapshot — used to actually discard local unsynced comparisons (matchLog alone isn't enough; votes mutate items live) |
-| `advanceLocalBaseline()` | Seals local's current ratings as a fresh baseline and clears `matchLog` — called by `uploadToFirestore()` after any successful push so local is never left thinking something is "unsynced" when it's already on the server (see "Merging rankings between devices") |
-| `recordMatch(cat, wid, lid)` | Appends one entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
+| `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `matchLog`s (by `.id`) or two `itemDeletes` lists (by `.itemId`) |
+| `recordMatch(cat, wid, lid)` | Appends one permanent entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
+| `deleteItem(id)` / `deleteItemsInCat(cat)` | Confirms, removes item(s), appends a tombstone per removed item to `state.itemDeletes` — see "Item deletions" above |
 | `itemKey(cat, title)` | Deterministic hash of `(cat, title)` — the item id scheme since schema v4 |
-| `clearAllData()` | Confirms, resets state to defaults, clears localStorage |
-| `uid()` | Generates a short collision-resistant ID — still used for `syncBase.id` and legacy fallbacks |
+| `freshState()` | Returns a brand-new empty `state` object with all fields (including a fresh `deviceId`) — used by the initial `let state = freshState()` and by `clearAllData()`, so both start from the exact same shape |
+| `clearAllData()` | Confirms, resets state to `freshState()`, clears localStorage |
+| `uid()` | Generates a short collision-resistant ID — legacy fallback, no longer used by the sync/merge system as of 2.0.0 |
 | `esc(s)` | HTML-escapes strings before injecting into innerHTML |
 
 ---
@@ -618,10 +663,11 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 | History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
 | Hide items (vs. delete) | Reversible way to exclude items (e.g. duplicates, retired entries) from ranking without losing their ELO/history | Delete permanently, or a separate archive tab |
 | Deterministic item ids (`itemKey(cat, title)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge | Random ids + title-based matching/remapping at merge time |
-| Snapshot baseline + incremental match log for merging | Bounds merge/replay cost to comparisons since the last sync, not lifetime volume; avoids requiring a full historical match log that doesn't exist for pre-v4 data | Full event-sourcing (replay every comparison ever made) |
-| Merge conflicts prompt only when genuinely ambiguous (`diverged`) | The common cases (same starting point, clean continuation) resolve silently; users aren't asked to make a decision that has an unambiguous right answer | Always prompt per category (old Replace/Skip behaviour) |
+| Append-only matches/tombstones, unioned by id and always fully replayed (2.0.0) | No baseline/ancestry classification step to get wrong (the root cause of three real merge bugs in a row); push/pull become order-independent | Snapshot baseline + incremental match log (the pre-2.0.0 design — bounded replay cost, but repeatedly buggy in practice) |
+| Merges never prompt — union is always unambiguous | Nothing is ever overwritten or compacted, so there's no case where the "right" resolution is unclear; removes an entire class of confirm-dialog misclicks (the exact failure mode of the old `diverged` prompt) | Prompt when a `diverged`/ambiguous case is detected (the pre-2.0.0 design) |
+| Item deletions are tombstoned, field edits stay last-write-wins | Deletion had an actual documented failure mode (resurrection on merge); field edits don't — matching the fix to the real problem instead of over-engineering both | Track all edits as replayable events too |
 | Firestore for cloud sync, loaded via CDN (not npm) | Free tier, real per-user security rules, zero server code to write/host, fits the zero-build-step single-file design | Custom backend, GitHub Gist + embedded token |
-| Cloud sync stores payload as a JSON string field, not native Firestore fields | Firestore rejects arrays nested directly in arrays (Tier-mode history has these); a string sidesteps all of Firestore's document type restrictions and stays byte-identical to the file export | Reshape history data to avoid nested arrays |
+| Firestore stores one document per fact (item/match/tombstone), not a JSON blob (2.0.0) | Doc-ID-keyed writes are naturally idempotent, so push/pull don't need to happen in any particular order; also sidesteps Firestore's array-in-array restriction (Tier-mode history) without a JSON-string workaround | Single JSON-string blob document (the pre-2.0.0 design) |
 
 ---
 
@@ -658,8 +704,8 @@ Deleting an item or an entire category (`deleteItem()`, `confirmDeleteCat()`/`de
 
 Data is local to one browser profile. As of schema v4, exporting/importing JSON between two devices merges rankings automatically (see "Merging rankings between devices") rather than requiring a full Replace, and as of 1.17.0 there's also an optional Firestore-backed Upload/Pull button (see "Cloud sync") so that merge doesn't require passing a file by hand. Both are still "sync whenever someone clicks the button," not live/real-time sync across open tabs.
 
-**Known gaps in the merge model** (acceptable tradeoffs for a manual-handoff workflow, worth knowing about):
-- **Deletions aren't tracked.** There's no tombstone log — if a locally-deleted item still exists in an incoming file, merging brings it back. Fine for the common case (items are rarely deleted); would need a delete log to fix properly.
-- **Renamed items lose their match history on the *other* device.** Since id = `itemKey(cat, title)`, renaming an item locally changes its id; matches recorded against the old id become orphaned (silently dropped on replay) unless the rename has also propagated. Same failure mode as an item being deleted.
-- **Baseline relation now walks the full ancestry chain (fixed in 1.18.0/schema v5), not just one hop.** Previously `relateBaselines()` only compared `syncBase.id`/`parentId` directly, so a device that had synced more than once could be misclassified as `diverged` relative to an older copy — and since `diverged`'s only confirmed action was destructive (discard local, adopt incoming), this actually discarded the *more advanced* local copy in a real reported case. `ancestry` (every past baseline id in a lineage) fixes the common multi-hop case; a genuine fork (no shared ancestry either direction) still correctly requires the manual confirm — see "Merging rankings between devices" above.
-- **`settings.userName` is a deferred stub.** Added alongside `deviceId` (schema v4) but not wired into any UI — nothing reads or displays it yet. `deviceId` alone already guarantees match-id uniqueness, which was the actual technical requirement; `userName` was reserved for later human-readable attribution (e.g. "you" vs "them" in the `diverged` merge prompt, or on history entries) but deliberately deferred until that's actually needed. It is stripped from exports the same way `deviceId` is.
+**Known gaps in the merge model** (acceptable tradeoffs, worth knowing about):
+- **Deletions are now tracked (fixed in 2.0.0/schema v6).** Previously there was no tombstone log — a locally-deleted item still present in an incoming file would come back on merge. `state.itemDeletes` closes this; see "Item deletions" above. No known gap remains here.
+- **Renamed items lose their match history on the *other* device.** Since id = `itemKey(cat, title)`, renaming an item locally changes its id; matches recorded against the old id become orphaned (silently dropped on replay) unless the rename has also propagated. Same failure mode as an item being deleted — not tombstoned, since a rename isn't a delete-then-recreate from the app's perspective and treating it as one would lose the item's ELO history unnecessarily.
+- **Replay order across two devices' interleaved matches isn't reconstructed globally (accepted tradeoff, not a bug).** `mergeImport()` always fully replays the union of both matchLogs sorted by `(ts, seq)` — deterministic and never drops a match, but client clocks can disagree and `seq` is only comparable within one device's own log, so the exact ELO trajectory two people would have seen ranking in true real-time isn't guaranteed to match. See "Merging rankings between devices" above.
+- **`settings.userName` is a deferred stub.** Added alongside `deviceId` (schema v4) but not wired into any UI — nothing reads or displays it yet. `deviceId` alone already guarantees match-id uniqueness, which was the actual technical requirement; `userName` was reserved for later human-readable attribution (e.g. on history entries) but deliberately deferred until that's actually needed. It is stripped from exports the same way `deviceId` is.
