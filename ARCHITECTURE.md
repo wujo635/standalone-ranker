@@ -251,7 +251,7 @@ An optional second transport alongside the file export/import flow above — sam
 **Firestore is a real append-only log, not a blob (as of 2.0.0).** Previously the entire `state` was serialized to one JSON string stored in a single document — simple, but it meant the client-side merge logic had to reconcile two full snapshots on every sync, which is exactly the fragility that produced three real bugs in a row (1.17.1, 1.18.0, 1.18.1). As of 2.0.0, Firestore itself holds one document per fact:
 
 - `rankers/shared` (root doc) — small, low-churn blob: `{ cats, schema, updatedAt, updatedBy }`
-- `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings live only in each device's local `state.items`, kept current by applying new matches directly (see `applyNewMatches()`), never synced as a value in their own right.
+- `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings live only in each device's local `state.items`, kept current by applying new matches directly (see `applyNewMatches()`), never synced as a value in their own right. Because of this, `unionItemsAndSchema()` explicitly defaults a brand-new item's `elo`/`wins`/`losses` to `1000`/`0`/`0` rather than trusting whatever the incoming payload carries — a real bug, fixed same-day as the 2.0.1 replay fix, briefly left these `undefined` (turning into `NaN` on first match) for any item pulled fresh from Firestore.
 - `rankers/shared/matches/{matchId}` — one doc per pairwise comparison, ever: `{ cat, wid, lid, ts, seq, syncedAt }`
 - `rankers/shared/itemDeletes/{itemId}` — one tombstone doc per deleted item: `{ itemId, ts, deviceId, syncedAt }`
 
@@ -471,7 +471,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
 | `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
 | `mergeImport(incoming)` | Unconditional set-union merge — see "Merging rankings between devices" above |
-| `unionItemsAndSchema(incoming, tombstoneIds)` | Adds items/cats/schema fields only present in `incoming` (skipping any id in `tombstoneIds`); last-write-wins on shared items' `fields` via `updatedAt` |
+| `unionItemsAndSchema(incoming, tombstoneIds)` | Adds items/cats/schema fields only present in `incoming` (skipping any id in `tombstoneIds`), defaulting `elo`/`wins`/`losses` to `1000`/`0`/`0` if `incoming` doesn't carry them (Firestore item docs never do — see "Cloud sync"); last-write-wins on shared items' `fields` via `updatedAt` |
 | `applyNewMatches(newMatches)` | Sorts `newMatches` by `(ts,seq)` and applies each directly onto whatever live item ratings are already in `state.items` via `eloUpdate()` — never resets/replays from scratch, since `state.matchLog` isn't guaranteed to be a device's complete history (see "Merging rankings between devices") |
 | `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `itemDeletes` lists (by `.itemId`) or a `matchLog` against itself (by `.id`) |
 | `recordMatch(cat, wid, lid)` | Appends one permanent entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
