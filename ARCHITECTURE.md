@@ -14,8 +14,8 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `1.17.1` |
-| Data schema version | `4` |
+| App version | `1.18.0` |
+| Data schema version | `5` |
 | localStorage key | `ranker-v1` |
 
 Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage.
@@ -144,7 +144,9 @@ state = {
   // of merge order — see "Merging rankings between devices" below.
   syncBase: {
     id:       string,           // random, regenerated every time a new baseline is established
-    parentId: string | null,    // id of the baseline this one superseded, for fast-forward detection
+    parentId: string | null,    // id of the baseline this one immediately superseded
+    ancestry: string[],         // every past baseline id in this lineage, not just parentId — lets
+                                 // relateBaselines() recognize "ahead by several hops", not just one
     rev:      number,           // monotonic counter, display-only
     ts:       number,           // Date.now() when this baseline was established
     ratings:  { "<itemId>": { elo, wins, losses } }
@@ -212,13 +214,13 @@ JSON import always goes through `mergeImport()`. New items are unioned in uncond
 
 | Relation | Meaning | Behaviour |
 |---|---|---|
-| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward. Result becomes a new baseline (`rev + 1`), both devices' `matchLog`s clear. |
-| `incoming-ahead` (`incoming.syncBase.parentId === local.syncBase.id`), local has no unsynced comparisons | Incoming is a clean continuation of exactly where local already is | **Fast-forward**: adopt incoming's items/baseline/matchLog wholesale, no prompt. |
+| `same` (`syncBase.id` matches) | Both devices diverged from the exact same baseline | **Merge**: union `matchLog` from both sides by match id, sort by `(ts, seq)`, replay ELO from `syncBase.ratings` forward. Result becomes a new baseline (`rev + 1`, `ancestry` = union of both sides' known history), both devices' `matchLog`s clear. |
+| `incoming-ahead` (local's id appears in incoming's `ancestry`, or the one-hop `parentId` check), local has no unsynced comparisons | Incoming is a continuation of somewhere local already was, any number of syncs later | **Fast-forward**: adopt incoming's items/baseline/matchLog wholesale, no prompt. |
 | `incoming-ahead`, local *does* have unsynced comparisons | Same shared ancestor, but local has since ranked something too | Falls through to the same replay merge as `same` — safe, because `local.syncBase.ratings` is still a valid common starting point. |
-| `local-ahead` (`local.syncBase.parentId === incoming.syncBase.id`) | Local is already past where incoming is | Union any new items only; no rating changes; toast explains why. |
-| `diverged` (no relation found) | The two files don't share a recognizable common point (e.g. a sync hop was skipped) | **Confirm dialog** — no silent guessing: **OK** discards local's unsynced comparisons (reverted to the last local baseline) and adopts the incoming file as-is; **Cancel** aborts with no changes. A brand-new/empty local library always treats this as a clean adopt (nothing to lose). |
+| `local-ahead` (incoming's id appears in local's `ancestry`, or the one-hop `parentId` check) | Local is already past where incoming is, any number of syncs ahead | Union any new items only; no rating changes; toast explains why. |
+| `diverged` (no relation found in either direction) | The two files don't share a recognizable common point at all (e.g. a genuinely unrelated device/lineage) | **Confirm dialog** — no silent guessing: **OK** discards local's unsynced comparisons (reverted to the last local baseline) and adopts the incoming file as-is; **Cancel** aborts with no changes. A brand-new/empty local library always treats this as a clean adopt (nothing to lose). |
 
-Because `relateBaselines()` only looks one hop back (`parentId`), it recognizes the two common cases automatically (same starting point; immediate continuation) and safely falls back to an explicit prompt for anything more exotic, rather than mis-detecting a real conflict as safe. See `mergeImport()`, `replayMatches()`, and `unionItemsAndSchema()`.
+`relateBaselines()` checks each side's full `ancestry` chain (every baseline id that lineage has ever passed through), not just the immediate `parentId` — so "ahead by several syncs" is recognized correctly, not just "ahead by exactly one." This matters: a device that had synced more than once could otherwise be misclassified as `diverged` relative to an older copy — and the `diverged` path's only confirmed action is destructive (discard local, adopt incoming). Getting that misclassification wrong meant discarding the *more advanced* copy in favor of the older one, with no way for the user to know that's what they were agreeing to. Fixed in 1.18.0 (schema v5) after being caught via a real bug report — see `git log` around `relateBaselines()`. A genuine fork (no shared ancestry in either direction — e.g. an unrelated device) still correctly falls to `diverged`. See `mergeImport()`, `replayMatches()`, and `unionItemsAndSchema()`.
 
 Non-ranking field edits on an item both sides have use last-write-wins via `updatedAt` (title never conflicts — a title edit changes the item's id, see `itemKey()`). `hidden` continues to never travel in either direction (personal per-browser preference, stripped on export and forced to `false` on any newly-adopted item).
 
@@ -414,7 +416,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `csvCell(val)` | Escapes a value for CSV output — wraps in quotes if it contains commas, quotes, or newlines |
 | `importData(e)` | Reads JSON file, runs `migrateData()`, hands off to `mergeImport()` |
 | `mergeImport(incoming)` | Reconciles rankings from another device — see "Merging rankings between devices" above |
-| `relateBaselines(localBase, incBase)` | Returns `'same'` \| `'incoming-ahead'` \| `'local-ahead'` \| `'diverged'` by comparing `syncBase.id`/`parentId` |
+| `relateBaselines(localBase, incBase)` | Returns `'same'` \| `'incoming-ahead'` \| `'local-ahead'` \| `'diverged'` by checking `syncBase.id` against each side's full `ancestry` chain (falls back to `parentId` for older pre-v5 data lacking `ancestry`) |
 | `unionItemsAndSchema(incoming)` | Adds items/cats/schema fields only present in `incoming`; last-write-wins on shared items' `fields` via `updatedAt` |
 | `adoptIncomingWholesale(incoming)` | Mirrors local state to `incoming`'s items/baseline/matchLog; used by fast-forward and (after `resetItemsToBaseline()`) the diverged-discard path |
 | `replayMatches(baselineRatings, matches)` | Pure function: folds a chronologically-sorted match list forward from a baseline snapshot using `eloUpdatePure()`, returns final `{elo,wins,losses}` per item |
@@ -654,5 +656,5 @@ Data is local to one browser profile. As of schema v4, exporting/importing JSON 
 **Known gaps in the merge model** (acceptable tradeoffs for a manual-handoff workflow, worth knowing about):
 - **Deletions aren't tracked.** There's no tombstone log — if a locally-deleted item still exists in an incoming file, merging brings it back. Fine for the common case (items are rarely deleted); would need a delete log to fix properly.
 - **Renamed items lose their match history on the *other* device.** Since id = `itemKey(cat, title)`, renaming an item locally changes its id; matches recorded against the old id become orphaned (silently dropped on replay) unless the rename has also propagated. Same failure mode as an item being deleted.
-- **Baseline relation only looks one hop back.** `relateBaselines()` compares `syncBase.id`/`parentId` directly rather than walking a full ancestry chain, so a sync hop that gets skipped (e.g. a third device's export lands out of order) falls into the `diverged` case and requires a manual confirm rather than being silently reconciled. This is a deliberate conservative choice — see "Merging rankings between devices" above.
+- **Baseline relation now walks the full ancestry chain (fixed in 1.18.0/schema v5), not just one hop.** Previously `relateBaselines()` only compared `syncBase.id`/`parentId` directly, so a device that had synced more than once could be misclassified as `diverged` relative to an older copy — and since `diverged`'s only confirmed action was destructive (discard local, adopt incoming), this actually discarded the *more advanced* local copy in a real reported case. `ancestry` (every past baseline id in a lineage) fixes the common multi-hop case; a genuine fork (no shared ancestry either direction) still correctly requires the manual confirm — see "Merging rankings between devices" above.
 - **`settings.userName` is a deferred stub.** Added alongside `deviceId` (schema v4) but not wired into any UI — nothing reads or displays it yet. `deviceId` alone already guarantees match-id uniqueness, which was the actual technical requirement; `userName` was reserved for later human-readable attribution (e.g. "you" vs "them" in the `diverged` merge prompt, or on history entries) but deliberately deferred until that's actually needed. It is stripped from exports the same way `deviceId` is.
