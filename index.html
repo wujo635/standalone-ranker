@@ -2174,13 +2174,26 @@ function dedupeByItemId(list) {
 // an edit of the existing one (see itemKey()). Items whose id is in `tombstoneIds` are
 // skipped entirely — a delete always wins over an item doc for the same id, regardless
 // of which side's file/pull brought the item along.
+//
+// New items always get elo/wins/losses defaulted to 1000/0/0 rather than trusting
+// whatever `inc` happens to carry — file imports include real values (buildExportPayload()
+// exports full items), but Firestore item docs deliberately don't store ratings at all
+// (see "Cloud sync" in ARCHITECTURE.md), so an item pulled fresh from Firestore for the
+// first time would otherwise get elo: undefined, which turns into NaN the moment any
+// match touches it in applyNewMatches().
 function unionItemsAndSchema(incoming, tombstoneIds) {
   let added = 0;
   Object.values(incoming.items || {}).forEach(inc => {
     if (tombstoneIds.has(inc.id)) return;
     const cur = state.items[inc.id];
     if (!cur) {
-      state.items[inc.id] = { ...inc, hidden: false };
+      state.items[inc.id] = {
+        ...inc,
+        elo: inc.elo !== undefined ? inc.elo : 1000,
+        wins: inc.wins || 0,
+        losses: inc.losses || 0,
+        hidden: false
+      };
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
     } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
