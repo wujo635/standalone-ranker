@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.0.2';
+const APP_VERSION = '2.0.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2201,7 +2201,11 @@ function unionItemsAndSchema(incoming, tombstoneIds) {
         losses: inc.losses || 0,
         hidden: false
       };
-      freshlySeeded.add(inc.id);
+      // Only Firestore-less origins (file export/import) carry a real elo — a Firestore
+      // item doc never stores ratings, so a brand-new item pulled from the cloud has
+      // NOT already absorbed its own matches and must not be treated as freshly seeded,
+      // or its matches get silently dropped instead of applied.
+      if (inc.elo !== undefined) freshlySeeded.add(inc.id);
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
     } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
