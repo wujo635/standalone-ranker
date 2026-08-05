@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.0.4';
+const APP_VERSION = '2.1.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -646,15 +646,40 @@ function load() {
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 
 // Deterministic id for an item: two devices adding "the same" item (same category +
-// title) independently land on the same id, so merging two files can union items by
-// id with no separate identity-matching/remap step. Renaming an item's title changes
-// its id (old id's matches become orphaned and are dropped on replay) — an accepted
-// tradeoff, same as the existing "item was deleted" case for undo.
-function itemKey(cat, title) {
-  const s = String(cat) + ' ' + String(title).trim().toLowerCase();
+// title, plus any identity field values — see identitySuffixFor()) independently land
+// on the same id, so merging two files can union items by id with no separate
+// identity-matching/remap step. Renaming an item's title (or editing an identity
+// field's value) changes its id (old id's matches become orphaned and are dropped on
+// replay) — an accepted tradeoff, same as the existing "item was deleted" case for undo.
+//
+// identitySuffix defaults to '' so a category with no identity fields hashes exactly
+// like before this existed — this feature is purely additive/opt-in, no id changes
+// for anyone not using it.
+function itemKey(cat, title, identitySuffix = '') {
+  const s = String(cat) + ' ' + String(title).trim().toLowerCase() + (identitySuffix ? ' ' + identitySuffix : '');
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return 'i' + h.toString(36);
+}
+
+// Shared by identitySuffixFor() (reads the saved schema) and saveSchema()'s
+// pending-rekey check (reads the not-yet-saved editingFields) — the single canonical
+// place this computation happens, so every call site (addItem, saveItem, CSV import,
+// schema-driven rekey) stays consistent and can never silently drift into computing
+// different ids for what should be "the same" item.
+function identitySuffixForFields(idFields, fields) {
+  if (!idFields.length) return '';
+  return idFields
+    .map(f => f.name)
+    .sort()
+    .map(name => name + '=' + String(fields?.[name] || '').trim().toLowerCase())
+    .join('|');
+}
+
+// Builds itemKey()'s optional third argument from whichever of a category's *saved*
+// schema fields are flagged `identity: true`. See identitySuffixForFields() above.
+function identitySuffixFor(cat, fields) {
+  return identitySuffixForFields((state.schema[cat]?.fields || []).filter(f => f.identity), fields);
 }
 
 // Random per-browser device label, generated once and persisted forever. Used to
@@ -1036,12 +1061,23 @@ function renderEditingFields() {
       <button class="ghost btn-sm" onclick="toggleFilterable(${i})" title="Toggle in filter UI" style="font-size:11px;padding:4px 6px">
         ${f.filterable !== false ? '\ud83d\udd0d' : '\u2205'}
       </button>
+      <button class="ghost btn-sm" onclick="toggleIdentity(${i})" title="Toggle identity field \u2014 part of what makes two items with the same title distinct (e.g. Year for Movies)" style="font-size:11px;padding:4px 6px">
+        ${f.identity ? '\ud83d\udd11' : '\u2013'}
+      </button>
       <button class="ghost btn-sm" onclick="removeEditingField(${i})">\u2715</button>
     </div>`).join('');
 }
 
 function toggleRequired(i) { editingFields[i].required = !editingFields[i].required; renderEditingFields(); }
 function toggleFilterable(i) { editingFields[i].filterable = editingFields[i].filterable !== false ? false : true; renderEditingFields(); }
+// Identity fields distinguish otherwise-same-titled items (see itemKey()/identitySuffixFor())
+// \u2014 a blank identity value gives weak disambiguation, so turning identity on also forces
+// required on. Turning identity off leaves required as-is (no reason to force it back off).
+function toggleIdentity(i) {
+  editingFields[i].identity = !editingFields[i].identity;
+  if (editingFields[i].identity) editingFields[i].required = true;
+  renderEditingFields();
+}
 function removeEditingField(i) { editingFields.splice(i,1); renderEditingFields(); }
 
 function addSchemaField() {
@@ -1055,8 +1091,75 @@ function addSchemaField() {
   document.getElementById('schema-field-inp').focus();
 }
 
+// Rekeys every reference to an item's id per idMap {oldId: newId} — state.items,
+// state.matchLog (wid/lid), state.itemDeletes (itemId), and state.history
+// (winner/loser/podium/updates ids). Same remap shape as the v4 migration that
+// introduced itemKey() in the first place (see migrateData()'s `v < 4` block) —
+// used here for the schema-editor-triggered bulk rekey below, where a whole
+// category's worth of items/matches/history can change id at once.
+function remapItemIds(idMap) {
+  const remappedItems = {};
+  Object.values(state.items).forEach(item => {
+    const newId = idMap[item.id] || item.id;
+    remappedItems[newId] = { ...item, id: newId };
+  });
+  state.items = remappedItems;
+  state.matchLog.forEach(m => {
+    if (idMap[m.wid]) m.wid = idMap[m.wid];
+    if (idMap[m.lid]) m.lid = idMap[m.lid];
+  });
+  state.itemDeletes.forEach(t => { if (idMap[t.itemId]) t.itemId = idMap[t.itemId]; });
+  state.history.forEach(entry => {
+    if (entry.winner && idMap[entry.winner.id]) entry.winner.id = idMap[entry.winner.id];
+    if (entry.loser && idMap[entry.loser.id]) entry.loser.id = idMap[entry.loser.id];
+    (entry.updates || []).forEach(u => {
+      if (idMap[u.wid]) u.wid = idMap[u.wid];
+      if (idMap[u.lid]) u.lid = idMap[u.lid];
+    });
+    (entry.podium || []).forEach(p => { if (idMap[p.id]) p.id = idMap[p.id]; });
+    (entry.tiers || []).forEach(tier => tier.forEach(t => { if (idMap[t.id]) t.id = idMap[t.id]; }));
+  });
+}
+
 function saveSchema() {
   const primary = document.getElementById('schema-primary').value.trim() || 'Name';
+
+  // If which fields are flagged `identity` changed for this category, every existing
+  // item's id may need to change too (see identitySuffixFor()/itemKey()) — items not
+  // in this category are never affected.
+  const oldIdentityNames = (state.schema[editingCat]?.fields || []).filter(f => f.identity).map(f => f.name).sort().join('|');
+  const newIdentityNames = editingFields.filter(f => f.identity).map(f => f.name).sort().join('|');
+
+  if (oldIdentityNames !== newIdentityNames) {
+    const catItems = Object.values(state.items).filter(i => i.cat === editingCat);
+    const pendingIdFields = editingFields.filter(f => f.identity);
+    const idMap = {};
+    const newIdOwner = {}; // newId -> the original item that claimed it, to detect collisions
+    let collision = null;
+    catItems.forEach(item => {
+      const suffix = identitySuffixForFields(pendingIdFields, item.fields);
+      const newId = itemKey(editingCat, item.title, suffix);
+      idMap[item.id] = newId;
+      // Two DIFFERENT original items landing on the same new id is a real collision —
+      // comparing old item ids here, not titles, since colliding items necessarily
+      // share a title already (that's what makes them ambiguous without the identity
+      // field). Comparing titles would never actually catch this.
+      if (newIdOwner[newId] && newIdOwner[newId].id !== item.id) {
+        collision = { a: newIdOwner[newId].title, b: item.title };
+      }
+      newIdOwner[newId] = item;
+    });
+
+    if (collision) {
+      toast('Can\'t save — "' + collision.a + '" and "' + collision.b + '" would become the same item. Rename or remove one first.');
+      return;
+    }
+
+    remapItemIds(idMap);
+    const now = Date.now();
+    catItems.forEach(item => { const moved = state.items[idMap[item.id]]; if (moved) moved.updatedAt = now; });
+  }
+
   state.schema[editingCat] = { primary, fields: [...editingFields] };
   save(); renderLibrary(); switchTab('library'); toast('Fields saved');
 }
@@ -1107,7 +1210,7 @@ function addItem() {
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
     fieldValues[f.name] = val;
   }
-  const id = itemKey(cat, t);
+  const id = itemKey(cat, t, identitySuffixFor(cat, fieldValues));
   if (state.items[id]) { toast('An item with this ' + primary + ' already exists'); return; }
   state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
   document.getElementById('inp-primary').value = '';
@@ -1165,20 +1268,19 @@ function saveItem(id) {
     if (el) item.fields[f.name] = el.value.trim();
   });
   item.updatedAt = Date.now();
-  if (t !== item.title) {
-    // Title changed -> id (derived from cat+title) changes too. Rekey the item;
-    // any match log / history entries pointing at the old id become orphaned,
-    // same as if the item had been deleted (see itemKey()).
-    const newId = itemKey(cat, t);
-    if (state.items[newId]) { toast('An item with this ' + primary + ' already exists'); return; }
-    item.title = t;
+  item.title = t;
+  // id is derived from cat+title+identity field values (see itemKey()) — a title edit
+  // or an identity-flagged field's value changing both mean the id changes too. Rekey
+  // the item; any match log / history entries pointing at the old id become orphaned,
+  // same as if the item had been deleted (see itemKey()).
+  const newId = itemKey(cat, t, identitySuffixFor(cat, item.fields));
+  if (newId !== id) {
+    if (state.items[newId]) { toast('An item with this ' + primary + (fields.some(f=>f.identity) ? ' and these identity field values' : '') + ' already exists'); return; }
     item.id = newId;
     delete state.items[id];
     state.items[newId] = item;
-    expandedItemId = null;
-  } else {
-    expandedItemId = null;
   }
+  expandedItemId = null;
   save(); renderLibrary(); toast('Saved');
 }
 
@@ -1980,15 +2082,13 @@ function resolveCSVImport(result) {
 // New titles not found in existing items are added fresh at ELO 1000.
 // Schema directives in the CSV are ignored — existing schema is kept.
 function bulkAddCSVImport({ category, items }) {
-  // Build a lookup of existing items by lowercase title
-  const existing = {};
-  Object.values(state.items).forEach(item => {
-    if (item.cat === category) existing[item.title.toLowerCase()] = item;
-  });
-
   let added = 0, updated = 0;
   items.forEach(({ title, fields: fieldValues }) => {
-    const match = existing[title.toLowerCase()];
+    // Match by the same identity-aware id addItem()/saveItem() use — not title alone
+    // — so two rows sharing a title but differing on an identity field (e.g. Year)
+    // are correctly treated as different items instead of one overwriting the other.
+    const id = itemKey(category, title, identitySuffixFor(category, fieldValues));
+    const match = state.items[id];
     if (match) {
       // Update field values, preserve ELO and record
       match.fields = Object.assign(match.fields || {}, fieldValues);
@@ -1996,7 +2096,6 @@ function bulkAddCSVImport({ category, items }) {
       updated++;
     } else {
       // New item — add fresh
-      const id = itemKey(category, title);
       state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
       added++;
     }
@@ -2008,7 +2107,7 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
   if (!state.cats.includes(category)) state.cats.push(category);
   if (updateSchema) state.schema[category] = { primary, fields };
   items.forEach(({ title, fields: fieldValues }) => {
-    const id = itemKey(category, title);
+    const id = itemKey(category, title, identitySuffixFor(category, fieldValues));
     state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
   });
 }
