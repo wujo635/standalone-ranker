@@ -408,7 +408,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.0.3';
+const APP_VERSION = '2.0.4';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2388,44 +2388,50 @@ async function uploadToFirestore() {
   if (!cloudAvailable || !cloudUser) return;
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
-    const batch = cloudDb.batch();
 
     const itemsToPush = Object.values(state.items).filter(i => (i.updatedAt || 0) > (state.settings.lastUploadedItemsAt || 0));
-    itemsToPush.forEach(i => {
-      batch.set(sharedRef.collection('items').doc(i.id), {
-        cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt,
-        syncedAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-    });
 
     // Only this device's own matches — matches pulled in from elsewhere already came
     // from Firestore, they don't need pushing back.
     const devicePrefix = state.settings.deviceId + '-';
     const matchesToPush = state.matchLog.filter(m => m.id.startsWith(devicePrefix) && m.seq > (state.settings.lastUploadedSeq || 0));
-    matchesToPush.forEach(m => {
-      batch.set(sharedRef.collection('matches').doc(m.id), {
-        cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
-        syncedAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-    });
 
     const deletesToPush = state.itemDeletes.filter(t => t.ts > (state.settings.lastUploadedDeletesAt || 0));
-    deletesToPush.forEach(t => {
-      batch.set(sharedRef.collection('itemDeletes').doc(t.itemId), {
-        itemId: t.itemId, ts: t.ts, deviceId: t.deviceId,
-        syncedAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-    });
+
+    // Firestore hard-caps a single batch at 500 writes — collect every doc write as a
+    // [ref, data] pair first, then commit in chunks, instead of one unconditional
+    // batch. A single big backlog (long time offline, large CSV import, or a
+    // from-scratch full-history recovery upload) could otherwise exceed 500 writes
+    // and fail the entire upload outright, pushing nothing at all.
+    const writes = [];
+    itemsToPush.forEach(i => writes.push([sharedRef.collection('items').doc(i.id), {
+      cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+    matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
+      cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+    deletesToPush.forEach(t => writes.push([sharedRef.collection('itemDeletes').doc(t.itemId), {
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+
+    const BATCH_LIMIT = 500;
+    for (let i = 0; i < writes.length; i += BATCH_LIMIT) {
+      const batch = cloudDb.batch();
+      writes.slice(i, i + BATCH_LIMIT).forEach(([ref, data]) => batch.set(ref, data));
+      await batch.commit();
+    }
 
     // Root doc stays a small blob for cats/schema — low-churn enough that a plain
     // merge-write on every upload is fine, no per-field conflict handling needed.
-    batch.set(sharedRef, {
+    // Always its own single-write commit, independent of how many chunks preceded it.
+    await sharedRef.set({
       cats: state.cats, schema: state.schema,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: cloudUser.email || cloudUser.uid
     }, { merge: true });
-
-    await batch.commit();
 
     if (itemsToPush.length) state.settings.lastUploadedItemsAt = Math.max(...itemsToPush.map(i => i.updatedAt));
     if (matchesToPush.length) state.settings.lastUploadedSeq = Math.max(...matchesToPush.map(m => m.seq));
