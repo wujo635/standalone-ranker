@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.0.4` |
+| App version | `2.1.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -82,7 +82,10 @@ state = {
     "Movies": {
       primary: 'Title',             // label for the main field (e.g. "Name", "Title", "Place")
       fields: [
-        { name: 'Year', required: false, filterable: true },
+        // identity: true (2.1.0) — this field's value is folded into itemKey()'s hash,
+        // so items with the same title but different Year are distinct, not a collision.
+        // Setting identity also forces required (see "Item identity fields" below).
+        { name: 'Year', required: true, filterable: true, identity: true },
         { name: 'Director', required: false, filterable: true }
       ]
     },
@@ -98,10 +101,12 @@ state = {
 
   items: {
     "<id>": {
-      id:        string,   // itemKey(cat, title) — deterministic hash, e.g. "i1en785j". Two
-                            // devices adding "the same" item independently land on this same
-                            // id, so merging never needs an identity-matching/remap step.
-                            // Renaming an item's title changes its id (see itemKey()).
+      id:        string,   // itemKey(cat, title, identitySuffix) — deterministic hash, e.g.
+                            // "i1en785j". Two devices adding "the same" item independently
+                            // land on this same id, so merging never needs an identity-
+                            // matching/remap step. Renaming an item's title (or editing an
+                            // identity field's value — see "Item identity fields" below)
+                            // changes its id (see itemKey()).
       cat:       string,   // must match a value in state.cats
       title:     string,   // value of the primary field
       fields: {            // values for all extra schema fields
@@ -247,6 +252,21 @@ Deletion is tracked the same way matches are — a permanent, replayable fact, n
 - Deliberately **not** extended to field edits (title/fields changes) — those stay last-write-wins via `updatedAt`. Low collision risk, low stakes if it does collide, and full edit-history replay isn't something this app needs. Deletion got the tombstone treatment because it was the one case with an actual, documented failure mode (item resurrection on merge).
 - **Known limitation: a surviving item's win/loss count can differ slightly by device when a match against a since-deleted item is still propagating.** Deleting an item never retroactively undoes the ELO it already applied to its opponent's *live* rating (same as before 2.0.0 — deletion has no undo). On the device where the vote happened, that effect is permanently baked into the opponent's rating regardless of the later delete. On a *different* device merging in both the tombstone and that match as new facts at once, `applyNewMatches()` skips the match (the tombstoned item is already gone locally by the time matches are applied — see `mergeImport()`), so the opponent never incurs it there. Not data loss (the discrepancy is a few ELO points/one win-loss count on the *surviving* item, not a missing item or a wiped history), and rare in practice (only visible when a delete and a match against that item reach a third device via different merge timing) — documented here rather than engineered around, given the complexity a full fix would need (retaining per-match opponent-elo-at-time-of-match, which the app doesn't otherwise track).
 - Firestore's `itemDeletes` subcollection needs the same two-UID security rule as `items`/`matches` — see "Cloud sync" below.
+
+### Item identity fields (2.1.0)
+
+Lets two items in the same category share a title, distinguished by another field's value — e.g. two "Dune" movies distinguished by Year. Before this, `itemKey(cat, title)` hashed only category + title, so same-titled items always collided: `addItem()` blocked adding the second one outright, and — worse — `bulkAddCSVImport()` matched existing items by title alone and *silently overwrote* the existing item's fields on a "duplicate," destroying its distinguishing data with no warning beyond a generic "updated" count. Real report, confirmed live: importing a CSV row for "Dune" (2021) overwrote an existing "Dune" (1984) entry's Year/Director fields.
+
+- A schema field can be flagged `identity: true` in the Schema Editor (alongside `required`/`filterable`) — same per-field-toggle-button pattern as `filterable`. Marking a field identity also forces `required: true` on it: a blank identity value gives weak disambiguation (two items with the same title and both blank would still collide).
+- `identitySuffixForFields(idFields, fields)` builds a deterministic suffix string from whichever fields are flagged identity, sorted by field name (so multiple identity fields are supported, order-independent) and value-normalized the same way title already is (`trim().toLowerCase()`). `identitySuffixFor(cat, fields)` is the version that reads a category's *saved* schema; `saveSchema()`'s pending-rekey check uses `identitySuffixForFields()` directly against the not-yet-saved `editingFields`, since the new schema isn't in `state.schema` yet at that point.
+- `itemKey(cat, title, identitySuffix = '')` folds this into its hash. **Purely additive and backward compatible**: a category with no identity fields produces a suffix of `''`, making the hash byte-identical to before this feature existed — no `DATA_SCHEMA_VERSION` bump, no migration needed for anyone not using it.
+- Every call site that computes an item id (`addItem()`, `saveItem()`, `bulkAddCSVImport()`, `applyCSVImport()`) goes through `identitySuffixFor()`/`identitySuffixForFields()` — there is deliberately no second, parallel notion of "same item" anywhere (the old `bulkAddCSVImport()` title-only lookup was exactly that kind of drift, and it's what caused the overwrite bug above).
+- **Editing an identity field's value is a rename**, same as editing the title already is — `saveItem()`'s rekey condition is now "does the computed id change" (covers both title and identity-field edits) rather than "did the title string change." Same accepted tradeoff as an ordinary rename: local-only, `matchLog`/`history` referencing the old id are not remapped here (see "Known limitations" below) — that gap predates this feature and is out of scope for it.
+- **Toggling which fields are identity for an existing category is a bulk operation**, handled inside `saveSchema()`: it diffs old vs. new identity-flagged field names, and if changed, computes every existing item's new id, then either applies the rekey or blocks the save entirely.
+  - `remapItemIds(idMap)` does the actual rekey — same remap shape as the v4 migration that originally introduced `itemKey()` (see `migrateData()`'s `v < 4` block): rewrites `state.items`, then walks `state.matchLog` (`wid`/`lid`), `state.itemDeletes` (`itemId`), and `state.history` (winner/loser/podium/updates ids) so nothing is left pointing at a stale id. This is the one place identity-field rekeying *does* get the full remap treatment (unlike the single-item rename case above) — a schema toggle can affect a whole category's worth of items/matches/history at once, a much larger blast radius than one manual rename.
+  - **Collision detection**: if two *different* existing items would resolve to the same new id (only possible when *removing* an identity flag that was previously disambiguating them — e.g. un-flagging Year when both a 1984 and 2021 "Dune" already exist), the save is **blocked** with a toast naming both titles, and the schema is left unchanged. This must compare original item ids, not titles — colliding items necessarily already share a title (that's what made them ambiguous without the identity field), so a title comparison alone can never detect the collision. Caught by testing during implementation: an earlier version of this check compared titles and silently merged the two items instead of blocking, exactly the destructive bug this feature exists to prevent.
+  - Rekeyed items get a fresh `updatedAt` so the next Upload re-pushes them under their new ids. The old ids' Firestore docs are left orphaned (not deleted/tombstoned) — this is a rename, not a removal, same accepted tradeoff as an ordinary title rename.
+- **Known limitation: schema field edits (including toggling identity) do not sync between devices.** Only a brand-new category's schema is copied over automatically, as a side effect of receiving its first item via merge — edits to an *existing* category's schema are local-only. Both users need to independently flag the same field as identity in their own Schema Editor for their ids to agree; this is a pre-existing gap for all schema edits (not something this feature introduces), left as a manual step by deliberate choice rather than building schema-edit sync as part of this change.
 
 ### Cloud sync (Firestore)
 
@@ -484,7 +504,9 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `itemDeletes` lists (by `.itemId`) or a `matchLog` against itself (by `.id`) |
 | `recordMatch(cat, wid, lid)` | Appends one permanent entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
 | `deleteItem(id)` / `deleteItemsInCat(cat)` | Confirms, removes item(s), appends a tombstone per removed item to `state.itemDeletes` — see "Item deletions" above |
-| `itemKey(cat, title)` | Deterministic hash of `(cat, title)` — the item id scheme since schema v4 |
+| `itemKey(cat, title, identitySuffix = '')` | Deterministic hash of `(cat, title, identitySuffix)` — the item id scheme since schema v4; `identitySuffix` defaults to `''` (byte-identical to the pre-2.1.0 hash) unless the category has identity fields — see "Item identity fields" |
+| `identitySuffixFor(cat, fields)` / `identitySuffixForFields(idFields, fields)` | Builds `itemKey()`'s third argument from whichever schema fields are flagged `identity: true`, sorted by field name, values normalized like title (`trim().toLowerCase()`). The `Fields` variant takes an explicit field list (used by `saveSchema()`'s pending-rekey check against not-yet-saved `editingFields`); the other reads the category's saved schema. Every id-computing call site goes through one of these — see "Item identity fields" |
+| `remapItemIds(idMap)` | Rekeys `state.items`/`matchLog`/`itemDeletes`/`history` per `{oldId: newId}` — same remap shape as the v4 migration that introduced `itemKey()`; used by `saveSchema()`'s bulk identity-field rekey (see "Item identity fields") |
 | `freshState()` | Returns a brand-new empty `state` object with all fields (including a fresh `deviceId`) — used by the initial `let state = freshState()` and by `clearAllData()`, so both start from the exact same shape |
 | `clearAllData()` | Confirms, resets state to `freshState()`, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID — legacy fallback, no longer used by the sync/merge system as of 2.0.0 |
@@ -674,7 +696,7 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 | Inline editing | Edit without leaving the library view | Separate edit screen |
 | History with undo | Recover from mistakes; reflect on choices; cap at 50 entries (~2KB per entry) to avoid localStorage pressure | No undo, or unbounded history with performance cost |
 | Hide items (vs. delete) | Reversible way to exclude items (e.g. duplicates, retired entries) from ranking without losing their ELO/history | Delete permanently, or a separate archive tab |
-| Deterministic item ids (`itemKey(cat, title)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge | Random ids + title-based matching/remapping at merge time |
+| Deterministic item ids (`itemKey(cat, title, identitySuffix)`) | Two devices agree on the same id for "the same" item with zero coordination — no identity-matching/remap step needed to merge. Optional identity fields (2.1.0) extend this to let same-titled items stay distinct (e.g. two "Dune" movies by Year) without breaking that zero-coordination property, since the disambiguating value is real data both devices already agree on | Random ids + title-based matching/remapping at merge time; a random/counter-based disambiguator suffix instead of identity fields (would break the zero-coordination guarantee — two devices independently adding "the same" duplicate-titled item would get different ids) |
 | Append-only matches/tombstones, unioned by id, applied as incremental deltas onto live ratings (2.0.0, corrected in 2.0.1) | No baseline/ancestry classification step to get wrong (the root cause of three real merge bugs in a row); push/pull become order-independent; unlike a from-scratch replay, doesn't assume `matchLog` is a device's complete history (2.0.0 briefly did, causing a real data-loss incident — see "Merging rankings between devices") | Snapshot baseline + incremental match log (the pre-2.0.0 design — bounded replay cost, but repeatedly buggy in practice); full replay-from-scratch (2.0.0's first cut — simpler-looking but broke on upgrade) |
 | Merges never prompt — union is always unambiguous | Nothing is ever overwritten or compacted, so there's no case where the "right" resolution is unclear; removes an entire class of confirm-dialog misclicks (the exact failure mode of the old `diverged` prompt) | Prompt when a `diverged`/ambiguous case is detected (the pre-2.0.0 design) |
 | Item deletions are tombstoned, field edits stay last-write-wins | Deletion had an actual documented failure mode (resurrection on merge); field edits don't — matching the fix to the real problem instead of over-engineering both | Track all edits as replayable events too |
@@ -718,6 +740,6 @@ Data is local to one browser profile. As of schema v4, exporting/importing JSON 
 
 **Known gaps in the merge model** (acceptable tradeoffs, worth knowing about):
 - **Deletions are now tracked (fixed in 2.0.0/schema v6).** Previously there was no tombstone log — a locally-deleted item still present in an incoming file would come back on merge. `state.itemDeletes` closes this; see "Item deletions" above. No known gap remains here.
-- **Renamed items lose their match history on the *other* device.** Since id = `itemKey(cat, title)`, renaming an item locally changes its id; matches recorded against the old id become orphaned (silently dropped on replay) unless the rename has also propagated. Same failure mode as an item being deleted — not tombstoned, since a rename isn't a delete-then-recreate from the app's perspective and treating it as one would lose the item's ELO history unnecessarily.
+- **Renamed items lose their match history on the *other* device — and since 2.1.0, editing an identity field's value (e.g. correcting a movie's Year) has the same effect.** Since id = `itemKey(cat, title, identitySuffix)`, changing either changes the id; matches recorded against the old id become orphaned (silently dropped on replay) unless the change has also propagated. Same failure mode as an item being deleted — not tombstoned, since this isn't a delete-then-recreate from the app's perspective and treating it as one would lose the item's ELO history unnecessarily. (The *bulk* version of this — toggling which fields are identity for a whole category via the Schema Editor — is handled more carefully via `remapItemIds()`, which does keep local `matchLog`/`history` consistent; only the single-item edit path in `saveItem()` has this gap. See "Item identity fields.")
 - **Replay order across two devices' interleaved matches isn't reconstructed globally (accepted tradeoff, not a bug).** `mergeImport()` always fully replays the union of both matchLogs sorted by `(ts, seq)` — deterministic and never drops a match, but client clocks can disagree and `seq` is only comparable within one device's own log, so the exact ELO trajectory two people would have seen ranking in true real-time isn't guaranteed to match. See "Merging rankings between devices" above.
 - **`settings.userName` is a deferred stub.** Added alongside `deviceId` (schema v4) but not wired into any UI — nothing reads or displays it yet. `deviceId` alone already guarantees match-id uniqueness, which was the actual technical requirement; `userName` was reserved for later human-readable attribution (e.g. on history entries) but deliberately deferred until that's actually needed. It is stripped from exports the same way `deviceId` is.
