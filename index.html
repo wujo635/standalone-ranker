@@ -413,7 +413,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2589,14 +2589,18 @@ async function uploadToFirestore() {
       cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
+    // title/cat fall back to null, not undefined — Firestore's SDK rejects undefined
+    // field values outright (a client-side throw before the write is even sent). Real
+    // bug: tombstones created before title/cat were added to deleteItem() (pre-2.2.0)
+    // have no title/cat at all, so t.title/t.cat here can genuinely be undefined.
     deletesToPush.forEach(t => writes.push([sharedRef.collection('itemDeletes').doc(t.itemId), {
-      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title, cat: t.cat,
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     // Keyed by itemId, same as itemDeletes — a later undelete of the same item just
     // overwrites this doc with a newer ts, which is all currentlyTombstonedIds() needs.
     undeletesToPush.forEach(t => writes.push([sharedRef.collection('itemUndeletes').doc(t.itemId), {
-      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title, cat: t.cat,
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
 
