@@ -413,7 +413,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1322,6 +1322,7 @@ function saveItem(id) {
     const el = document.getElementById('edit-field-' + id + '-' + f.name);
     if (el) item.fields[f.name] = el.value.trim();
   });
+  const oldTitle = item.title;
   item.updatedAt = Date.now();
   item.title = t;
   // id is derived from cat+title+identity field values (see itemKey()) — a title edit
@@ -1334,9 +1335,17 @@ function saveItem(id) {
     item.id = newId;
     delete state.items[id];
     state.items[newId] = item;
+    // Tombstone the old id so this rename actually propagates — without this, another
+    // device that already has a copy at the old id never learns it's stale, and just
+    // keeps it forever alongside the new one once it pulls the new id in as a separate
+    // item. mergeImport()'s existing tombstone handling (see "Item deletions") already
+    // removes a matching item on any device that pulls this, for free — no new sync
+    // mechanism needed. Real report: editing a Song's title left a duplicate (old +
+    // new titled entries) on the other device after the next sync.
+    state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: oldTitle, cat });
   }
   expandedItemId = null;
-  save(); renderLibrary(); toast('Saved');
+  save(); renderLibrary(); renderDeletedItems(); toast('Saved');
 }
 
 // Items currently shown in the Library for the active category — search text and
