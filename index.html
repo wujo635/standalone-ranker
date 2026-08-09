@@ -358,6 +358,11 @@
       <div id="sync-status"></div>
     </div>
     <div class="card">
+      <div class="card-title">Deleted items</div>
+      <div class="card-desc">Undeleting lets an item sync again — it does <strong>not</strong> restore its past rating or history. Only relevant for categories with identity fields, where re-adding an item with the same title and identity value(s) as something previously deleted would otherwise be permanently blocked from syncing.</div>
+      <div id="deleted-items-list"></div>
+    </div>
+    <div class="card">
       <div class="card-title">Preload from CSV</div>
       <div class="card-desc">Import a formatted CSV file to create a category with its schema and items. <a href="#" onclick="showCsvHelp();return false;">See format guide</a>.</div>
       <input type="file" id="csv-inp" accept=".csv" onchange="importCSV(event)">
@@ -408,7 +413,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -481,11 +486,16 @@ function freshState() {
     // device hasn't already pushed, instead of re-writing the whole history every time.
     settings: {
       smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0,
-      lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0
+      lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0, lastUploadedUndeletesAt: 0
     },
     history: [],
     matchLog: [],
     itemDeletes: [],
+    // Synced "undo a delete" facts — see undeleteItem()/currentlyTombstonedIds(). Same
+    // {itemId, ts, deviceId} shape as itemDeletes (plus informational title/cat for the
+    // Deleted Items UI); an item is tombstoned iff its latest delete is newer than its
+    // latest undelete.
+    itemUndeletes: [],
     // Cursor (ms since epoch) marking how far this device has pulled from Firestore —
     // local-only bookkeeping so pullFromFirestore() only fetches what's new. Not part
     // of the merge model itself (a fresh device with lastSyncedServerTs=null just
@@ -601,6 +611,7 @@ function migrateData(data) {
   if (!data.history) data.history = [];
   if (!data.matchLog) data.matchLog = [];
   if (!data.itemDeletes) data.itemDeletes = [];
+  if (!data.itemUndeletes) data.itemUndeletes = [];
   if (data.lastSyncedServerTs === undefined) data.lastSyncedServerTs = null;
   delete data.syncBase;
   if (!data.settings) data.settings = { smartPairMode: false };
@@ -610,6 +621,7 @@ function migrateData(data) {
   if (data.settings.lastUploadedSeq === undefined) data.settings.lastUploadedSeq = 0;
   if (data.settings.lastUploadedItemsAt === undefined) data.settings.lastUploadedItemsAt = 0;
   if (data.settings.lastUploadedDeletesAt === undefined) data.settings.lastUploadedDeletesAt = 0;
+  if (data.settings.lastUploadedUndeletesAt === undefined) data.settings.lastUploadedUndeletesAt = 0;
 
   // Always stamp _meta so future loads know the current schema version
   data._meta = {
@@ -710,9 +722,12 @@ function itemsForCat(cat) {
 // Permanently removes every item belonging to a category (no filters applied).
 function deleteItemsInCat(cat) {
   Object.keys(state.items).forEach(id => {
-    if (state.items[id].cat === cat) {
+    const item = state.items[id];
+    if (item.cat === cat) {
       delete state.items[id];
-      state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId });
+      // title/cat are informational only (never read by merge logic) — snapshotted so
+      // the Deleted Items UI can show something human-readable; see undeleteItem().
+      state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: item.title, cat: item.cat });
     }
   });
 }
@@ -1224,10 +1239,33 @@ function addItem() {
 // back the next time the two histories are combined. See "Item deletions" in
 // ARCHITECTURE.md — like undo, there's no un-delete path once this has synced.
 function deleteItem(id) {
-  if (!confirm('Remove "' + state.items[id].title + '"?')) return;
+  const item = state.items[id];
+  if (!confirm('Remove "' + item.title + '"?')) return;
   delete state.items[id];
-  state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId });
+  // title/cat are informational only (never read by merge logic) — snapshotted so the
+  // Deleted Items UI can show something human-readable; see undeleteItem().
+  state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: item.title, cat: item.cat });
   save(); renderLibrary(); renderLB(); renderStats();
+}
+
+// Reverses a delete going forward — does NOT restore the item's old data or rating
+// (state.items[itemId] is long gone if this device did the delete). It only clears the
+// sync block: either this device can now successfully recreate an item with the same
+// identity and have it sync, or if another device still has (or recreates) a copy,
+// this device can now pull it in. See currentlyTombstonedIds()/"Item deletions" in
+// ARCHITECTURE.md for why this is needed — deterministic ids + permanent tombstones
+// mean delete-then-recreate of "the same" item was otherwise blocked forever.
+function undeleteItem(itemId) {
+  const matchingDeletes = state.itemDeletes.filter(t => t.itemId === itemId);
+  const tombstone = matchingDeletes.reduce((a, b) => (!a || b.ts > a.ts) ? b : a, null);
+  // currentlyTombstonedIds() favors deleted on an exact ts tie (the safe cross-device
+  // default) — but that would mean an undelete landing in the same millisecond as its
+  // own delete (Date.now() resolution, plausible for two quick clicks) gets silently
+  // ignored. Guarantee this undelete always strictly wins over the delete it targets.
+  const ts = Math.max(Date.now(), (tombstone?.ts || 0) + 1);
+  state.itemUndeletes.push({ itemId, ts, deviceId: state.settings.deviceId, title: tombstone?.title, cat: tombstone?.cat });
+  save(); renderDeletedItems();
+  toast('Undeleted' + (tombstone?.title ? ': ' + tombstone.title : '') + ' — does not restore its old rating/history');
 }
 
 function toggleHidden(id) {
@@ -2131,6 +2169,7 @@ function renderStats() {
     `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${v}</span></div>`).join('');
 
   renderSyncStatus();
+  renderDeletedItems();
 }
 
 function renderSyncStatus() {
@@ -2143,6 +2182,28 @@ function renderSyncStatus() {
   ];
   el.innerHTML = rows.map(([l,v]) =>
     `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${esc(String(v))}</span></div>`).join('');
+}
+
+// Lists items currently blocked from re-syncing (see currentlyTombstonedIds()) with an
+// Undelete button per row. Only tombstones without a later undelete show up — once
+// undeleted, an item drops off this list even though its itemDeletes entry still
+// technically exists (latestPerItemId()/currentlyTombstonedIds() supersede it).
+function renderDeletedItems() {
+  const el = document.getElementById('deleted-items-list');
+  if (!el) return;
+  const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
+  const latestDeletes = latestPerItemId(state.itemDeletes);
+  const rows = latestDeletes.filter(t => tombstoned.has(t.itemId)).sort((a,b) => b.ts - a.ts);
+  if (!rows.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">No deleted items.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(t => `
+    <div class="field-row">
+      <span class="field-name">${esc(t.title || t.itemId)}${t.cat ? ' <span style="color:var(--text-muted);font-weight:400">(' + esc(t.cat) + ')</span>' : ''}</span>
+      <span style="font-size:12px;color:var(--text-muted)">${esc(new Date(t.ts).toLocaleString())}</span>
+      <button class="ghost btn-sm" onclick="undeleteItem('${t.itemId}')">Undelete</button>
+    </div>`).join('');
 }
 
 // `hidden` is a personal, per-browser preference — never part of a shared export.
@@ -2261,10 +2322,26 @@ function dedupeById(list) {
   return out;
 }
 
-function dedupeByItemId(list) {
-  const seen = new Set(), out = [];
-  list.forEach(x => { if (!seen.has(x.itemId)) { seen.add(x.itemId); out.push(x); } });
-  return out;
+// Reduces a delete/undelete list to one entry per itemId — whichever has the max ts.
+// Same shape works for both itemDeletes and itemUndeletes; safe across unlimited
+// delete/undelete cycles since each reduction always keeps the newest fact for a given
+// item, without needing per-event unique ids. See currentlyTombstonedIds().
+function latestPerItemId(list) {
+  const byId = {};
+  list.forEach(t => { if (!byId[t.itemId] || t.ts > byId[t.itemId].ts) byId[t.itemId] = t; });
+  return Object.values(byId);
+}
+
+// An item is currently tombstoned iff its latest delete is newer than its latest
+// undelete (or no undelete exists at all). Ties favor deleted — same "deletion wins"
+// default used elsewhere in this codebase (e.g. a tombstone always wins over an item
+// doc arriving at the same time, see mergeImport()).
+function currentlyTombstonedIds(deletes, undeletes) {
+  const undelBy = {};
+  undeletes.forEach(u => { undelBy[u.itemId] = u.ts; });
+  const ids = new Set();
+  deletes.forEach(d => { if ((undelBy[d.itemId] ?? -Infinity) <= d.ts) ids.add(d.itemId); });
+  return ids;
 }
 
 // New items are unioned in (adding is always safe). For items both sides already have,
@@ -2331,12 +2408,12 @@ function ensureSchemaWellFormed() {
 // doc for the same id (see "Item deletions" in ARCHITECTURE.md) — deletion has no undo,
 // consistent with today's local delete.
 function mergeImport(incoming) {
-  const mergedTombstones = dedupeByItemId([...state.itemDeletes, ...(incoming.itemDeletes || [])]);
-  const tombstoneIds = new Set(mergedTombstones.map(t => t.itemId));
+  state.itemDeletes = latestPerItemId([...state.itemDeletes, ...(incoming.itemDeletes || [])]);
+  state.itemUndeletes = latestPerItemId([...state.itemUndeletes, ...(incoming.itemUndeletes || [])]);
+  const tombstoneIds = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
   // Remove any item this merge newly learns was deleted, before unioning items in, so
   // an incoming copy that doesn't yet know about the delete can't resurrect it locally.
   tombstoneIds.forEach(id => { if (state.items[id]) delete state.items[id]; });
-  state.itemDeletes = mergedTombstones;
 
   const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds);
 
@@ -2496,6 +2573,7 @@ async function uploadToFirestore() {
     const matchesToPush = state.matchLog.filter(m => m.id.startsWith(devicePrefix) && m.seq > (state.settings.lastUploadedSeq || 0));
 
     const deletesToPush = state.itemDeletes.filter(t => t.ts > (state.settings.lastUploadedDeletesAt || 0));
+    const undeletesToPush = state.itemUndeletes.filter(t => t.ts > (state.settings.lastUploadedUndeletesAt || 0));
 
     // Firestore hard-caps a single batch at 500 writes — collect every doc write as a
     // [ref, data] pair first, then commit in chunks, instead of one unconditional
@@ -2512,7 +2590,13 @@ async function uploadToFirestore() {
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     deletesToPush.forEach(t => writes.push([sharedRef.collection('itemDeletes').doc(t.itemId), {
-      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId,
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title, cat: t.cat,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+    // Keyed by itemId, same as itemDeletes — a later undelete of the same item just
+    // overwrites this doc with a newer ts, which is all currentlyTombstonedIds() needs.
+    undeletesToPush.forEach(t => writes.push([sharedRef.collection('itemUndeletes').doc(t.itemId), {
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title, cat: t.cat,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
 
@@ -2535,6 +2619,7 @@ async function uploadToFirestore() {
     if (itemsToPush.length) state.settings.lastUploadedItemsAt = Math.max(...itemsToPush.map(i => i.updatedAt));
     if (matchesToPush.length) state.settings.lastUploadedSeq = Math.max(...matchesToPush.map(m => m.seq));
     if (deletesToPush.length) state.settings.lastUploadedDeletesAt = Math.max(...deletesToPush.map(t => t.ts));
+    if (undeletesToPush.length) state.settings.lastUploadedUndeletesAt = Math.max(...undeletesToPush.map(t => t.ts));
     save();
 
     cloudSyncTimes.lastUpload = Date.now();
@@ -2561,9 +2646,10 @@ async function pullFromFirestore() {
     const itemsQ = cursor ? sharedRef.collection('items').where('syncedAt', '>', cursor) : sharedRef.collection('items');
     const matchesQ = cursor ? sharedRef.collection('matches').where('syncedAt', '>', cursor) : sharedRef.collection('matches');
     const deletesQ = cursor ? sharedRef.collection('itemDeletes').where('syncedAt', '>', cursor) : sharedRef.collection('itemDeletes');
-    const [itemsSnap, matchesSnap, deletesSnap] = await Promise.all([itemsQ.get(), matchesQ.get(), deletesQ.get()]);
+    const undeletesQ = cursor ? sharedRef.collection('itemUndeletes').where('syncedAt', '>', cursor) : sharedRef.collection('itemUndeletes');
+    const [itemsSnap, matchesSnap, deletesSnap, undeletesSnap] = await Promise.all([itemsQ.get(), matchesQ.get(), deletesQ.get(), undeletesQ.get()]);
 
-    const incoming = { items: {}, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [], itemDeletes: [] };
+    const incoming = { items: {}, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [], itemDeletes: [], itemUndeletes: [] };
     let maxSynced = state.lastSyncedServerTs || 0;
     itemsSnap.forEach(doc => {
       const d = doc.data();
@@ -2577,7 +2663,12 @@ async function pullFromFirestore() {
     });
     deletesSnap.forEach(doc => {
       const d = doc.data();
-      incoming.itemDeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId });
+      incoming.itemDeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat });
+      if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
+    });
+    undeletesSnap.forEach(doc => {
+      const d = doc.data();
+      incoming.itemUndeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat });
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
 
