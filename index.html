@@ -413,7 +413,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.2.1';
+const APP_VERSION = '2.3.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1136,6 +1136,44 @@ function remapItemIds(idMap) {
   });
 }
 
+// Recomputes ids for every item in `cat` using `pendingIdFields` (the fields that
+// should be treated as identity) and applies the rekey via remapItemIds() if no two
+// distinct items would land on the same new id. Shared by saveSchema() (interactive,
+// user toggles identity in the Schema Editor) and unionItemsAndSchema() (a synced
+// device's schema newly flags an identity field) — same collision-detection logic
+// either way, so it can't drift into two different notions of "safe to rekey."
+//
+// Collision is only realistically possible when *removing* an identity flag that was
+// disambiguating two same-titled items — adding one can't cause two items to collide
+// (their titles were already necessarily distinct beforehand, since itemKey() without
+// a suffix already prevented same-titled duplicates from ever coexisting locally).
+function rekeyItemsForIdentityFields(cat, pendingIdFields) {
+  const catItems = Object.values(state.items).filter(i => i.cat === cat);
+  const idMap = {};
+  const newIdOwner = {}; // newId -> the original item that claimed it, to detect collisions
+  let collision = null;
+  catItems.forEach(item => {
+    const suffix = identitySuffixForFields(pendingIdFields, item.fields);
+    const newId = itemKey(cat, item.title, suffix);
+    idMap[item.id] = newId;
+    // Two DIFFERENT original items landing on the same new id is a real collision —
+    // comparing old item ids here, not titles, since colliding items necessarily
+    // share a title already (that's what makes them ambiguous without the identity
+    // field). Comparing titles would never actually catch this.
+    if (newIdOwner[newId] && newIdOwner[newId].id !== item.id) {
+      collision = { a: newIdOwner[newId].title, b: item.title };
+    }
+    newIdOwner[newId] = item;
+  });
+
+  if (collision) return { collision };
+
+  remapItemIds(idMap);
+  const now = Date.now();
+  catItems.forEach(item => { const moved = state.items[idMap[item.id]]; if (moved) moved.updatedAt = now; });
+  return { collision: null };
+}
+
 function saveSchema() {
   const primary = document.getElementById('schema-primary').value.trim() || 'Name';
 
@@ -1146,33 +1184,12 @@ function saveSchema() {
   const newIdentityNames = editingFields.filter(f => f.identity).map(f => f.name).sort().join('|');
 
   if (oldIdentityNames !== newIdentityNames) {
-    const catItems = Object.values(state.items).filter(i => i.cat === editingCat);
     const pendingIdFields = editingFields.filter(f => f.identity);
-    const idMap = {};
-    const newIdOwner = {}; // newId -> the original item that claimed it, to detect collisions
-    let collision = null;
-    catItems.forEach(item => {
-      const suffix = identitySuffixForFields(pendingIdFields, item.fields);
-      const newId = itemKey(editingCat, item.title, suffix);
-      idMap[item.id] = newId;
-      // Two DIFFERENT original items landing on the same new id is a real collision —
-      // comparing old item ids here, not titles, since colliding items necessarily
-      // share a title already (that's what makes them ambiguous without the identity
-      // field). Comparing titles would never actually catch this.
-      if (newIdOwner[newId] && newIdOwner[newId].id !== item.id) {
-        collision = { a: newIdOwner[newId].title, b: item.title };
-      }
-      newIdOwner[newId] = item;
-    });
-
+    const { collision } = rekeyItemsForIdentityFields(editingCat, pendingIdFields);
     if (collision) {
       toast('Can\'t save — "' + collision.a + '" and "' + collision.b + '" would become the same item. Rename or remove one first.');
       return;
     }
-
-    remapItemIds(idMap);
-    const now = Date.now();
-    catItems.forEach(item => { const moved = state.items[idMap[item.id]]; if (moved) moved.updatedAt = now; });
   }
 
   state.schema[editingCat] = { primary, fields: [...editingFields] };
@@ -2390,8 +2407,49 @@ function unionItemsAndSchema(incoming, tombstoneIds) {
     }
   });
   (incoming.cats || []).forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
-  Object.keys(incoming.schema || {}).forEach(c => { if (!state.schema[c]) state.schema[c] = incoming.schema[c]; });
+  Object.keys(incoming.schema || {}).forEach(c => {
+    if (!state.schema[c]) { state.schema[c] = incoming.schema[c]; return; }
+    adoptIncomingIdentityFields(c, incoming.schema[c].fields || []);
+  });
   return { added, freshlySeeded };
+}
+
+// For a category this device already knows about, adopts any identity field the
+// incoming side has flagged that this device hasn't (monotonic — only ever turns
+// identity ON, never off, since removing one is the collision-risk direction
+// saveSchema()'s interactive check exists to guard; a device merely being unaware of
+// an identity flag is not grounds to strip it from someone who already has it). This
+// closes a real gap: without it, importing/pulling into a device that already has
+// *some* schema for a built-in category (e.g. Movies ships with a default schema via
+// CAT_DEFAULTS) never picked up an identity flag set on another device, even from a
+// genuinely fresh import — only categories entirely new to this device benefited from
+// the union above. A field new to this device entirely is also added, carrying the
+// identity flag through (same "adding is always safe" treatment as new items).
+//
+// Schema and item ids must never go out of sync, so the field list is only committed
+// if rekeyItemsForIdentityFields() actually succeeds — if it would collide (only
+// realistically possible in corrupted/pre-existing-duplicate data, not the normal
+// adding case), the identity adoption for this category is skipped for now rather
+// than left half-applied; it can still be resolved later via the interactive Schema
+// Editor path, which surfaces the collision to a user instead of failing silently.
+function adoptIncomingIdentityFields(cat, incomingFields) {
+  const localFields = state.schema[cat].fields || [];
+  const newlyIdentity = incomingFields.filter(f => f.identity && !localFields.find(lf => lf.name === f.name && lf.identity));
+  if (!newlyIdentity.length) return;
+
+  const prospectiveFields = localFields.map(f => ({ ...f }));
+  newlyIdentity.forEach(f => {
+    const existing = prospectiveFields.find(pf => pf.name === f.name);
+    if (existing) { existing.identity = true; existing.required = true; }
+    else prospectiveFields.push({ name: f.name, required: true, filterable: f.filterable !== false, identity: true });
+  });
+
+  const { collision } = rekeyItemsForIdentityFields(cat, prospectiveFields.filter(f => f.identity));
+  if (collision) {
+    console.warn('Skipped adopting identity field change for "' + cat + '" from sync — would merge "' + collision.a + '" and "' + collision.b + '"');
+    return;
+  }
+  state.schema[cat].fields = prospectiveFields;
 }
 
 function ensureSchemaWellFormed() {
