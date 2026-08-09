@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.1.0` |
+| App version | `2.2.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -149,11 +149,24 @@ state = {
   ],
 
   // Append-only, permanent log of deletion tombstones — the same "never compact, union
-  // by id" treatment as matchLog, but for item removals. A tombstone always wins over an
-  // item doc for the same id on merge, regardless of arrival order. See "Item deletions"
-  // below.
+  // by id" treatment as matchLog, but for item removals. Resolved against itemUndeletes
+  // below (whichever has the later ts per itemId wins) rather than being an unconditional
+  // permanent block — see "Item deletions" below. title/cat are informational only
+  // (never read by merge logic), snapshotted at delete time so the Deleted Items UI can
+  // show something human-readable instead of an opaque id hash.
   itemDeletes: [
-    { itemId: string, ts: number, deviceId: string }
+    { itemId: string, ts: number, deviceId: string, title: string, cat: string }
+  ],
+
+  // Append-only log of "undo a delete" facts (2.2.0) — same shape and treatment as
+  // itemDeletes. An item is currently tombstoned iff its latest itemDeletes entry is
+  // newer than its latest itemUndeletes entry for the same itemId (ties favor deleted).
+  // See currentlyTombstonedIds() and "Item deletions" below for why this exists:
+  // deterministic ids + an unconditional tombstone meant delete-then-recreate of "the
+  // same" item (same title + identity field values) was permanently blocked from ever
+  // syncing again — a real incident, not a hypothetical.
+  itemUndeletes: [
+    { itemId: string, ts: number, deviceId: string, title: string, cat: string }
   ],
 
   // Local-only cursor (ms since epoch) marking how far this device has pulled from
@@ -246,12 +259,19 @@ This is safe and idempotent by construction: importing/pulling the same file twi
 
 Deletion is tracked the same way matches are — a permanent, replayable fact, not a silent local-only mutation. Previously (pre-2.0.0) deletions weren't tracked at all: deleting an item locally and later merging with a device that still had it just brought it back, with no way to detect or prevent that.
 
-- `deleteItem(id)` and `deleteItemsInCat(cat)` both append a tombstone `{ itemId, ts, deviceId }` to `state.itemDeletes` in addition to removing the item from `state.items` — the same pattern `recordMatch()` already uses for `state.matchLog`.
-- `mergeImport()` unions tombstones from both sides by `itemId` first, then removes any newly-tombstoned item locally *before* unioning items in — see "Merging rankings between devices" above.
-- A tombstone always wins over an item doc for the same id, regardless of arrival order — deletion is permanent, there is no un-delete path (consistent with the existing local-delete confirm, which also has no undo).
+- `deleteItem(id)` and `deleteItemsInCat(cat)` both append a tombstone `{ itemId, ts, deviceId, title, cat }` to `state.itemDeletes` in addition to removing the item from `state.items` — the same pattern `recordMatch()` already uses for `state.matchLog`. `title`/`cat` are informational only, snapshotted for the Deleted Items UI.
+- `mergeImport()` unions tombstones from both sides via `latestPerItemId()`, then removes any currently-tombstoned item locally *before* unioning items in — see "Merging rankings between devices" above.
 - Deliberately **not** extended to field edits (title/fields changes) — those stay last-write-wins via `updatedAt`. Low collision risk, low stakes if it does collide, and full edit-history replay isn't something this app needs. Deletion got the tombstone treatment because it was the one case with an actual, documented failure mode (item resurrection on merge).
+
+**Undelete (2.2.0).** A tombstone is no longer an unconditional, permanent block — it's resolved against a parallel `state.itemUndeletes` log, same shape and treatment as `itemDeletes`. This exists because of a real incident: deterministic item ids (`(cat, title, identity field values)` — see "Item identity fields" below) mean deleting an item and later recreating one with the exact same title + identity value(s) computes to the *same id*, which an unconditional tombstone would then permanently block from ever syncing again, on any device that ever saw the delete — happened live with two "Superman" entries, requiring manual Firestore + console intervention to fix, not repeatable on a device that becomes unreachable.
+
+- `latestPerItemId(list)` reduces either log to one entry per `itemId` — whichever has the max `ts`. This is safe across unlimited delete→undelete→delete cycles without needing per-event unique ids or a migration: each reduction always keeps the newest fact for a given item, and only the single latest fact of each type ever needs to be retained.
+- `currentlyTombstonedIds(deletes, undeletes)` — an item is tombstoned iff its latest delete is newer than its latest undelete (or no undelete exists). **Ties favor deleted**, the same safe default used elsewhere (e.g. simultaneous delete/item-doc arrival). `undeleteItem(itemId)` guarantees its own `ts` is always strictly after the delete it's reversing (`Math.max(Date.now(), tombstone.ts + 1)`) — otherwise a user undeleting immediately after their own delete could land in the same millisecond and get silently overridden by the tie-favors-deleted rule. Caught by testing during implementation, not by inspection.
+- `undeleteItem(itemId)` (Data tab → "Deleted items" → Undelete) pushes to `itemUndeletes`. **Does not restore the item's old data or rating** — `state.items[itemId]` is long gone if this device did the original delete. It only clears the sync block going forward: either this device can now successfully recreate an item with that identity and have it sync, or if another device still has (or recreates) a copy, this device can now pull it in. Stated explicitly in the UI copy so it isn't mistaken for a real restore.
+- Cloud sync mirrors `itemDeletes`' plumbing exactly: `uploadToFirestore()`/`pullFromFirestore()` gain symmetric `itemUndeletes` handling with their own `lastUploadedUndeletesAt` cursor; Firestore docs are keyed by `itemId` (not a unique event id) — same as `itemDeletes` already was, where a second delete of the same item already overwrote the same doc, updating its `ts`, consistent with the max-ts-per-itemId model.
+- Purely additive: no `DATA_SCHEMA_VERSION` bump. `itemUndeletes`/`lastUploadedUndeletesAt` are backfilled via the same unconditional "ensure new optional fields exist" tail in `migrateData()` that `itemDeletes` itself uses — no migration block needed.
 - **Known limitation: a surviving item's win/loss count can differ slightly by device when a match against a since-deleted item is still propagating.** Deleting an item never retroactively undoes the ELO it already applied to its opponent's *live* rating (same as before 2.0.0 — deletion has no undo). On the device where the vote happened, that effect is permanently baked into the opponent's rating regardless of the later delete. On a *different* device merging in both the tombstone and that match as new facts at once, `applyNewMatches()` skips the match (the tombstoned item is already gone locally by the time matches are applied — see `mergeImport()`), so the opponent never incurs it there. Not data loss (the discrepancy is a few ELO points/one win-loss count on the *surviving* item, not a missing item or a wiped history), and rare in practice (only visible when a delete and a match against that item reach a third device via different merge timing) — documented here rather than engineered around, given the complexity a full fix would need (retaining per-match opponent-elo-at-time-of-match, which the app doesn't otherwise track).
-- Firestore's `itemDeletes` subcollection needs the same two-UID security rule as `items`/`matches` — see "Cloud sync" below.
+- Firestore's `itemDeletes` and `itemUndeletes` subcollections need the same two-UID security rule as `items`/`matches` — see "Cloud sync" below.
 
 ### Item identity fields (2.1.0)
 
@@ -279,7 +299,8 @@ An optional second transport alongside the file export/import flow above — sam
 - `rankers/shared` (root doc) — small, low-churn blob: `{ cats, schema, updatedAt, updatedBy }`
 - `rankers/shared/items/{itemId}` — one doc per item: `{ cat, title, fields, updatedAt, syncedAt }`. No elo/wins/losses stored here — ratings live only in each device's local `state.items`, kept current by applying new matches directly (see `applyNewMatches()`), never synced as a value in their own right. Because of this, `unionItemsAndSchema()` explicitly defaults a brand-new item's `elo`/`wins`/`losses` to `1000`/`0`/`0` rather than trusting whatever the incoming payload carries — a real bug, fixed same-day as the 2.0.1 replay fix, briefly left these `undefined` (turning into `NaN` on first match) for any item pulled fresh from Firestore. This same "no ratings on a Firestore item doc" fact caused a second bug in 2.0.2's `freshlySeeded` double-counting fix, corrected in 2.0.3 — see "Merging rankings between devices" above.
 - `rankers/shared/matches/{matchId}` — one doc per pairwise comparison, ever: `{ cat, wid, lid, ts, seq, syncedAt }`
-- `rankers/shared/itemDeletes/{itemId}` — one tombstone doc per deleted item: `{ itemId, ts, deviceId, syncedAt }`
+- `rankers/shared/itemDeletes/{itemId}` — one tombstone doc per deleted item, keyed by `itemId` (a later delete of the same item overwrites this doc, updating `ts`): `{ itemId, ts, deviceId, title, cat, syncedAt }`
+- `rankers/shared/itemUndeletes/{itemId}` — one "undo a delete" doc per item (2.2.0), same keying/shape as `itemDeletes`: `{ itemId, ts, deviceId, title, cat, syncedAt }`. See "Item deletions" for how the two logs resolve against each other.
 
 Every subcollection doc's ID is the fact's own id (`itemId`/`matchId`), so writing the same fact twice is an idempotent no-op overwrite, not a conflict — this is what makes push and pull order-independent (see below). `syncedAt` is a Firestore `serverTimestamp()` used only as a pull cursor (see `pullFromFirestore()`); it's separate from `updatedAt`/`ts`, which are client timestamps used for actual data (last-write-wins on item fields, match ordering).
 
@@ -324,7 +345,7 @@ Every subcollection doc's ID is the fact's own id (`itemId`/`matchId`), so writi
 
 **Verification status:** see the testing notes and CHANGELOG entry for 2.0.0 — this was a substantial rewrite of the sync transport and was verified via multi-device simulation (push/pull in varying orders, overlapping items ranked on both "devices," deletions on one side merging with edits on the other) before being merged. Real two-account live verification against a hosted deployment remains the final check once a second user is available to run it, same as before.
 
-**Security rules (must be updated in the Firebase console for 2.0.0 — a code change alone doesn't do this).** The pre-2.0.0 rule only needed to cover the single `rankers/shared` document; the append-only model needs the same two-UID allowlist extended to all three subcollections:
+**Security rules (must be updated in the Firebase console for 2.0.0 — a code change alone doesn't do this).** The pre-2.0.0 rule only needed to cover the single `rankers/shared` document; the append-only model needs the same two-UID allowlist extended to all subcollections, including `itemUndeletes` (2.2.0):
 
 ```
 rules_version = '2';
@@ -339,6 +360,9 @@ service cloud.firestore {
         allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
       }
       match /itemDeletes/{itemId} {
+        allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
+      }
+      match /itemUndeletes/{itemId} {
         allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>'];
       }
     }
@@ -421,7 +445,7 @@ The skip button is hidden in Tier mode — session control is handled by the ini
 | Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()`, `loadTier()`, `submitTier()` |
 | Leaderboard | `view-leaderboard` | `renderLB()` |
 | History | `view-history` | `renderHistory()`, `recordRanking()`, `undoRanking()` |
-| Data | `view-data` | `exportData()`, `importData()`, `uploadToFirestore()`, `pullFromFirestore()`, `renderStats()`, `clearAllData()` |
+| Data | `view-data` | `exportData()`, `importData()`, `uploadToFirestore()`, `pullFromFirestore()`, `renderStats()`, `renderDeletedItems()`, `undeleteItem()`, `clearAllData()` |
 
 Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav buttons and view divs. New Category and Schema Editor are modal-style views with no nav tab — they're entered programmatically and return to Library on save or cancel.
 
@@ -503,9 +527,12 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `mergeImport(incoming)` | Unconditional set-union merge — see "Merging rankings between devices" above |
 | `unionItemsAndSchema(incoming, tombstoneIds)` | Adds items/cats/schema fields only present in `incoming` (skipping any id in `tombstoneIds`), defaulting `elo`/`wins`/`losses` to `1000`/`0`/`0` if `incoming` doesn't carry them (Firestore item docs never do — see "Cloud sync"); last-write-wins on shared items' `fields` via `updatedAt`; returns the ids of items just created *whose incoming payload carried a real `elo`* as `freshlySeeded` (2.0.3 — a Firestore-sourced new item never carries one, so it's never marked fresh and its matches are always applied), used by `mergeImport()` to avoid double-counting matches already baked into a file-imported item's rating |
 | `applyNewMatches(newMatches)` | Sorts `newMatches` by `(ts,seq)` and applies each directly onto whatever live item ratings are already in `state.items` via `eloUpdate()` — never resets/replays from scratch, since `state.matchLog` isn't guaranteed to be a device's complete history (see "Merging rankings between devices") |
-| `dedupeById(list)` / `dedupeByItemId(list)` | Dedupe helpers for unioning two `itemDeletes` lists (by `.itemId`) or a `matchLog` against itself (by `.id`) |
+| `dedupeById(list)` | Dedupe helper for a `matchLog` against itself, by `.id` |
+| `latestPerItemId(list)` | Reduces an `itemDeletes`/`itemUndeletes` list to one entry per `itemId` (max `ts`) — see "Item deletions" |
+| `currentlyTombstonedIds(deletes, undeletes)` | An item is tombstoned iff its latest delete is newer than its latest undelete (ties favor deleted) — see "Item deletions" |
 | `recordMatch(cat, wid, lid)` | Appends one permanent entry to `state.matchLog`, namespaced by `settings.deviceId` so two devices' match ids never collide |
 | `deleteItem(id)` / `deleteItemsInCat(cat)` | Confirms, removes item(s), appends a tombstone per removed item to `state.itemDeletes` — see "Item deletions" above |
+| `undeleteItem(itemId)` | Pushes an "undo a delete" fact to `state.itemUndeletes`, timestamped strictly after the delete it targets — does not restore the item's data/rating, only clears the sync block going forward — see "Item deletions" |
 | `itemKey(cat, title, identitySuffix = '')` | Deterministic hash of `(cat, title, identitySuffix)` — the item id scheme since schema v4; `identitySuffix` defaults to `''` (byte-identical to the pre-2.1.0 hash) unless the category has identity fields — see "Item identity fields" |
 | `identitySuffixFor(cat, fields)` / `identitySuffixForFields(idFields, fields)` | Builds `itemKey()`'s third argument from whichever schema fields are flagged `identity: true`, sorted by field name, values normalized like title (`trim().toLowerCase()`). The `Fields` variant takes an explicit field list (used by `saveSchema()`'s pending-rekey check against not-yet-saved `editingFields`); the other reads the category's saved schema. Every id-computing call site goes through one of these — see "Item identity fields" |
 | `remapItemIds(idMap)` | Rekeys `state.items`/`matchLog`/`itemDeletes`/`history` per `{oldId: newId}` — same remap shape as the v4 migration that introduced `itemKey()`; used by `saveSchema()`'s bulk identity-field rekey (see "Item identity fields") |
@@ -702,6 +729,7 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 | Append-only matches/tombstones, unioned by id, applied as incremental deltas onto live ratings (2.0.0, corrected in 2.0.1) | No baseline/ancestry classification step to get wrong (the root cause of three real merge bugs in a row); push/pull become order-independent; unlike a from-scratch replay, doesn't assume `matchLog` is a device's complete history (2.0.0 briefly did, causing a real data-loss incident — see "Merging rankings between devices") | Snapshot baseline + incremental match log (the pre-2.0.0 design — bounded replay cost, but repeatedly buggy in practice); full replay-from-scratch (2.0.0's first cut — simpler-looking but broke on upgrade) |
 | Merges never prompt — union is always unambiguous | Nothing is ever overwritten or compacted, so there's no case where the "right" resolution is unclear; removes an entire class of confirm-dialog misclicks (the exact failure mode of the old `diverged` prompt) | Prompt when a `diverged`/ambiguous case is detected (the pre-2.0.0 design) |
 | Item deletions are tombstoned, field edits stay last-write-wins | Deletion had an actual documented failure mode (resurrection on merge); field edits don't — matching the fix to the real problem instead of over-engineering both | Track all edits as replayable events too |
+| Undelete as a parallel synced log (`itemUndeletes`), resolved by latest-`ts`-per-itemId against `itemDeletes` (2.2.0) | Deterministic ids + an unconditional tombstone meant delete-then-recreate of "the same" item was permanently blocked from syncing — a real incident, not hypothetical. Reduces to one entry per itemId (max `ts`) on each side, so it needs no per-event unique ids, no migration, no `DATA_SCHEMA_VERSION` bump | A local-only "strip this tombstone" tool (doesn't auto-propagate — still requires the same manual per-device/per-Firestore cleanup the actual incident needed); giving every delete/undelete event a unique id to support full history (unnecessary complexity — only the latest fact of each type per item is ever needed) |
 | Firestore for cloud sync, loaded via CDN (not npm) | Free tier, real per-user security rules, zero server code to write/host, fits the zero-build-step single-file design | Custom backend, GitHub Gist + embedded token |
 | Firestore stores one document per fact (item/match/tombstone), not a JSON blob (2.0.0) | Doc-ID-keyed writes are naturally idempotent, so push/pull don't need to happen in any particular order; also sidesteps Firestore's array-in-array restriction (Tier-mode history) without a JSON-string workaround | Single JSON-string blob document (the pre-2.0.0 design) |
 
