@@ -63,9 +63,9 @@ Everything lives in one file: `index.html`
 
 ```
 index.html
-├── <style>       CSS custom properties + all component styles (~130 lines)
+├── <style>       CSS custom properties + all component styles (~180 lines)
 ├── <body>        Seven views: Library, New Category, Schema Editor, Rank, Leaderboard, History, Data
-└── <script>      All app logic (~980 lines of vanilla JS)
+└── <script>      All app logic (~2360 lines of vanilla JS)
 ```
 
 ---
@@ -235,6 +235,8 @@ The "Export category as CSV" button in the Data tab produces a file in this exac
 ### Merging rankings between devices
 
 JSON import (and Firestore pull) always goes through `mergeImport()`, which is now an **unconditional set union by id** — there is no "which side is ahead" question, no baseline, no ancestry chain, and no confirm dialog. Three real bugs in a row (1.17.1, 1.18.0, 1.18.1) all traced back to the same root cause: classifying how two client-side snapshots relate before picking a replay strategy is inherently fragile. As of 2.0.0 (schema v6) that classification step is gone entirely, not patched again.
+
+*(The original design-scratch notes from before this rewrite — including the discarded baseline/ancestry approach — are kept locally, untracked, in `log/archive/` for historical context; not needed to understand the current design below.)*
 
 `mergeImport(incoming)` does, in order:
 1. **Union tombstones** — `state.itemDeletes` and `incoming.itemDeletes` combined, deduped by `itemId`. Any item whose id is now tombstoned is deleted locally if still present, *before* items are unioned in, so an incoming copy that doesn't yet know about a delete can't resurrect it. See "Item deletions" below.
