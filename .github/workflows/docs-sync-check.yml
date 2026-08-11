@@ -1,0 +1,51 @@
+name: Docs sync check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  versions-match:
+    name: APP_VERSION / DATA_SCHEMA_VERSION match ARCHITECTURE.md
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare index.html constants against ARCHITECTURE.md's version table
+        run: |
+          set -euo pipefail
+
+          app_version_code=$(grep -m1 "const APP_VERSION" index.html | sed -E "s/.*const APP_VERSION = '([^']+)'.*/\1/")
+          schema_version_code=$(grep -m1 "const DATA_SCHEMA_VERSION" index.html | sed -E 's/.*const DATA_SCHEMA_VERSION = ([0-9]+).*/\1/')
+
+          app_version_doc=$(grep -m1 "| App version |" ARCHITECTURE.md | sed -E 's/.*`([^`]+)`.*/\1/')
+          schema_version_doc=$(grep -m1 "| Data schema version |" ARCHITECTURE.md | sed -E 's/.*`([0-9]+)`.*/\1/')
+
+          echo "index.html:      APP_VERSION=$app_version_code  DATA_SCHEMA_VERSION=$schema_version_code"
+          echo "ARCHITECTURE.md: App version=$app_version_doc  Data schema version=$schema_version_doc"
+
+          fail=0
+
+          if [ "$app_version_code" != "$app_version_doc" ]; then
+            echo "::error::APP_VERSION mismatch: index.html has '$app_version_code', ARCHITECTURE.md's Current versions table has '$app_version_doc'. Update the table (see CLAUDE.md)."
+            fail=1
+          fi
+
+          if [ "$schema_version_code" != "$schema_version_doc" ]; then
+            echo "::error::DATA_SCHEMA_VERSION mismatch: index.html has '$schema_version_code', ARCHITECTURE.md's Current versions table has '$schema_version_doc'. Update the table (see CLAUDE.md)."
+            fail=1
+          fi
+
+          exit $fail
+
+      - name: CHANGELOG.md has a row for the current app version
+        run: |
+          set -euo pipefail
+          app_version_code=$(grep -m1 "const APP_VERSION" index.html | sed -E "s/.*const APP_VERSION = '([^']+)'.*/\1/")
+          esc_version=$(echo "$app_version_code" | sed 's/\./\\./g')
+          if ! grep -qE "^\| ${esc_version} \|" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no row for APP_VERSION $app_version_code. Add one to the App version table (see CLAUDE.md)."
+            exit 1
+          fi
