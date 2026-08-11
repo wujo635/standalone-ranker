@@ -435,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.4.2';
+const APP_VERSION = '2.5.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -508,7 +508,8 @@ function freshState() {
     // device hasn't already pushed, instead of re-writing the whole history every time.
     settings: {
       smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0,
-      lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0, lastUploadedUndeletesAt: 0
+      lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0, lastUploadedUndeletesAt: 0,
+      lastUploadedCatDeletesAt: 0, lastUploadedCatUndeletesAt: 0
     },
     history: [],
     matchLog: [],
@@ -518,6 +519,21 @@ function freshState() {
     // Deleted Items UI); an item is tombstoned iff its latest delete is newer than its
     // latest undelete.
     itemUndeletes: [],
+    // Category-level tombstones (2.5.0) — confirmDeleteCat() previously only removed
+    // the category from local state.cats/state.schema, with no fact recorded anywhere
+    // that a sync could carry to other devices. Its items *were* already individually
+    // tombstoned via deleteItemsInCat(), so they vanished everywhere correctly — but
+    // the category name/schema itself just silently stuck around forever on any device
+    // that already had it, since unionItemsAndSchema()'s cats/schema merge is purely
+    // additive (union only ever adds, never removes). Same {cat, ts, deviceId} shape
+    // and "latest delete beats latest undelete" resolution as itemDeletes/itemUndeletes
+    // — see currentlyTombstonedCats(). Unlike items, undelete here isn't a deliberate
+    // user action: saveNewCat() unconditionally pushes an undelete fact for whatever
+    // name it creates, so a category name simply always works, synced or not, with no
+    // "Undelete" UI needed — there's no data to restore either way, since deleting a
+    // category already permanently removes its items and schema.
+    catDeletes: [],
+    catUndeletes: [],
     // Cursor (ms since epoch) marking how far this device has pulled from Firestore —
     // local-only bookkeeping so pullFromFirestore() only fetches what's new. Not part
     // of the merge model itself (a fresh device with lastSyncedServerTs=null just
@@ -634,6 +650,8 @@ function migrateData(data) {
   if (!data.matchLog) data.matchLog = [];
   if (!data.itemDeletes) data.itemDeletes = [];
   if (!data.itemUndeletes) data.itemUndeletes = [];
+  if (!data.catDeletes) data.catDeletes = [];
+  if (!data.catUndeletes) data.catUndeletes = [];
   if (data.lastSyncedServerTs === undefined) data.lastSyncedServerTs = null;
   delete data.syncBase;
   if (!data.settings) data.settings = { smartPairMode: false };
@@ -644,6 +662,8 @@ function migrateData(data) {
   if (data.settings.lastUploadedItemsAt === undefined) data.settings.lastUploadedItemsAt = 0;
   if (data.settings.lastUploadedDeletesAt === undefined) data.settings.lastUploadedDeletesAt = 0;
   if (data.settings.lastUploadedUndeletesAt === undefined) data.settings.lastUploadedUndeletesAt = 0;
+  if (data.settings.lastUploadedCatDeletesAt === undefined) data.settings.lastUploadedCatDeletesAt = 0;
+  if (data.settings.lastUploadedCatUndeletesAt === undefined) data.settings.lastUploadedCatUndeletesAt = 0;
 
   // Always stamp _meta so future loads know the current schema version
   data._meta = {
@@ -694,6 +714,18 @@ function itemKey(cat, title, identitySuffix = '') {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return 'i' + h.toString(36);
+}
+
+// Deterministic Firestore-safe doc id for a category name (2.5.0) — item tombstones
+// use the item's own id (already a safe hash via itemKey()) as their doc id, but a
+// category has no such id, only its raw user-typed name, which can contain characters
+// Firestore doc ids reject (e.g. "/") or just be inconveniently long. Same hash as
+// itemKey(), 'c' prefix instead of 'i' so the two never collide even for weird input.
+function catKey(cat) {
+  const s = String(cat);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return 'c' + h.toString(36);
 }
 
 // Shared by identitySuffixFor() (reads the saved schema) and saveSchema()'s
@@ -1074,6 +1106,15 @@ function saveNewCat() {
   const primary = document.getElementById('newcat-primary').value.trim() || 'Name';
   state.cats.push(name);
   state.schema[name] = { primary, fields: [...pendingFields] };
+  // Unconditional, not just for names that happen to be currently tombstoned: creating
+  // a category always means "this name should exist and sync from now on," so this
+  // undelete fact simply always wins over any past delete of the same name (including
+  // one this device hasn't even pulled yet — Math.max guards the tie/race). Unlike item
+  // undelete, this needs no dedicated UI/button — there's no data to consciously choose
+  // to restore, since deleting a category already permanently wipes its items/schema;
+  // recreating a same-named category is a brand-new thing that should just work.
+  const priorDeleteTs = state.catDeletes.filter(t => t.cat === name).reduce((max, t) => Math.max(max, t.ts), 0);
+  state.catUndeletes.push({ cat: name, ts: Math.max(Date.now(), priorDeleteTs + 1), deviceId: state.settings.deviceId });
   rebuildCatSelects();
   document.getElementById('sel-cat').value = name;
   save(); renderLibrary(); switchTab('library'); toast('Category created: ' + name);
@@ -1236,6 +1277,12 @@ function confirmDeleteCat() {
   state.cats = state.cats.filter(c => c !== editingCat);
   delete state.schema[editingCat];
   deleteItemsInCat(editingCat);
+  // Without this, the category name/schema themselves never told any other device
+  // they were gone — deleteItemsInCat() already tombstones each item individually
+  // (so those correctly vanish everywhere), but unionItemsAndSchema()'s cats/schema
+  // merge is purely additive, so any device that already had this category would
+  // keep it (now empty) forever. See catDeletes in freshState() and mergeImport().
+  state.catDeletes.push({ cat: editingCat, ts: Date.now(), deviceId: state.settings.deviceId });
   rebuildCatSelects();
   save(); renderLibrary(); renderLB(); renderStats();
   switchTab('library'); toast('Category deleted');
@@ -2383,27 +2430,32 @@ function dedupeById(list) {
   return out;
 }
 
-// Reduces a delete/undelete list to one entry per itemId — whichever has the max ts.
-// Same shape works for both itemDeletes and itemUndeletes; safe across unlimited
-// delete/undelete cycles since each reduction always keeps the newest fact for a given
-// item, without needing per-event unique ids. See currentlyTombstonedIds().
-function latestPerItemId(list) {
-  const byId = {};
-  list.forEach(t => { if (!byId[t.itemId] || t.ts > byId[t.itemId].ts) byId[t.itemId] = t; });
-  return Object.values(byId);
+// Reduces a delete/undelete list to one entry per key (itemId for items, cat for
+// categories — see keyOf) — whichever has the max ts. Same shape works for a
+// delete log and its matching undelete log; safe across unlimited delete/undelete
+// cycles since each reduction always keeps the newest fact for a given key, without
+// needing per-event unique ids. See currentlyTombstonedKeys().
+function latestByKey(list, keyOf) {
+  const byKey = {};
+  list.forEach(t => { const k = keyOf(t); if (!byKey[k] || t.ts > byKey[k].ts) byKey[k] = t; });
+  return Object.values(byKey);
 }
+function latestPerItemId(list) { return latestByKey(list, t => t.itemId); }
+function latestPerCat(list) { return latestByKey(list, t => t.cat); }
 
-// An item is currently tombstoned iff its latest delete is newer than its latest
-// undelete (or no undelete exists at all). Ties favor deleted — same "deletion wins"
-// default used elsewhere in this codebase (e.g. a tombstone always wins over an item
-// doc arriving at the same time, see mergeImport()).
-function currentlyTombstonedIds(deletes, undeletes) {
+// A key (item id or category name) is currently tombstoned iff its latest delete is
+// newer than its latest undelete (or no undelete exists at all). Ties favor deleted —
+// same "deletion wins" default used elsewhere in this codebase (e.g. a tombstone
+// always wins over an item doc arriving at the same time, see mergeImport()).
+function currentlyTombstonedKeys(deletes, undeletes, keyOf) {
   const undelBy = {};
-  undeletes.forEach(u => { undelBy[u.itemId] = u.ts; });
-  const ids = new Set();
-  deletes.forEach(d => { if ((undelBy[d.itemId] ?? -Infinity) <= d.ts) ids.add(d.itemId); });
-  return ids;
+  undeletes.forEach(u => { undelBy[keyOf(u)] = u.ts; });
+  const keys = new Set();
+  deletes.forEach(d => { const k = keyOf(d); if ((undelBy[k] ?? -Infinity) <= d.ts) keys.add(k); });
+  return keys;
 }
+function currentlyTombstonedIds(deletes, undeletes) { return currentlyTombstonedKeys(deletes, undeletes, t => t.itemId); }
+function currentlyTombstonedCats(deletes, undeletes) { return currentlyTombstonedKeys(deletes, undeletes, t => t.cat); }
 
 // New items are unioned in (adding is always safe). For items both sides already have,
 // custom field edits use last-write-wins via updatedAt — title never conflicts because
@@ -2424,11 +2476,19 @@ function currentlyTombstonedIds(deletes, undeletes) {
 // match touching it in that same export's matchLog (they're two views of the same live
 // history on the source device), so re-applying those matches on top would double-count
 // them. See the comment on mergeImport()'s match-filtering step below.
-function unionItemsAndSchema(incoming, tombstoneIds) {
+//
+// tombstonedCats skips a deleted category entirely, same as tombstoneIds does per item
+// — and it's not just redundant with per-item tombstones. deleteItemsInCat() tombstones
+// every item *this device knew about* at delete time, but a concurrent edit on another
+// device (e.g. adding a new item to that category before learning it was deleted) has
+// no such tombstone of its own. Without this check, that one untombstoned item would
+// resurrect the whole "deleted" category on both sides — the same class of bug
+// itemDeletes was built to fix in 2.0.0, one level up.
+function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
   let added = 0;
   const freshlySeeded = new Set();
   Object.values(incoming.items || {}).forEach(inc => {
-    if (tombstoneIds.has(inc.id)) return;
+    if (tombstoneIds.has(inc.id) || tombstonedCats.has(inc.cat)) return;
     const cur = state.items[inc.id];
     if (!cur) {
       state.items[inc.id] = {
@@ -2450,8 +2510,9 @@ function unionItemsAndSchema(incoming, tombstoneIds) {
       cur.updatedAt = inc.updatedAt;
     }
   });
-  (incoming.cats || []).forEach(c => { if (!state.cats.includes(c)) state.cats.push(c); });
+  (incoming.cats || []).forEach(c => { if (!tombstonedCats.has(c) && !state.cats.includes(c)) state.cats.push(c); });
   Object.keys(incoming.schema || {}).forEach(c => {
+    if (tombstonedCats.has(c)) return;
     if (!state.schema[c]) { state.schema[c] = incoming.schema[c]; return; }
     adoptIncomingIdentityFields(c, incoming.schema[c].fields || []);
   });
@@ -2517,7 +2578,20 @@ function mergeImport(incoming) {
   // an incoming copy that doesn't yet know about the delete can't resurrect it locally.
   tombstoneIds.forEach(id => { if (state.items[id]) delete state.items[id]; });
 
-  const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds);
+  state.catDeletes = latestPerCat([...state.catDeletes, ...(incoming.catDeletes || [])]);
+  state.catUndeletes = latestPerCat([...state.catUndeletes, ...(incoming.catUndeletes || [])]);
+  const tombstonedCats = currentlyTombstonedCats(state.catDeletes, state.catUndeletes);
+  // Same "remove before unioning in" rule as items above, one level up: purge a
+  // newly-learned-deleted category's name, schema, and any items still under it
+  // (belt-and-suspenders alongside their own per-item tombstones — see
+  // unionItemsAndSchema()'s comment on why both are needed).
+  tombstonedCats.forEach(c => {
+    state.cats = state.cats.filter(x => x !== c);
+    delete state.schema[c];
+    Object.keys(state.items).forEach(id => { if (state.items[id].cat === c) delete state.items[id]; });
+  });
+
+  const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats);
 
   // Only matches this device hasn't already counted get applied — see the comment on
   // applyNewMatches() for why this must not be a from-scratch replay.
@@ -2681,6 +2755,8 @@ async function uploadToFirestore() {
 
     const deletesToPush = state.itemDeletes.filter(t => t.ts > (state.settings.lastUploadedDeletesAt || 0));
     const undeletesToPush = state.itemUndeletes.filter(t => t.ts > (state.settings.lastUploadedUndeletesAt || 0));
+    const catDeletesToPush = state.catDeletes.filter(t => t.ts > (state.settings.lastUploadedCatDeletesAt || 0));
+    const catUndeletesToPush = state.catUndeletes.filter(t => t.ts > (state.settings.lastUploadedCatUndeletesAt || 0));
 
     // Firestore hard-caps a single batch at 500 writes — collect every doc write as a
     // [ref, data] pair first, then commit in chunks, instead of one unconditional
@@ -2710,6 +2786,16 @@ async function uploadToFirestore() {
       itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
+    // Doc id is catKey(t.cat), not the raw name — see catKey() for why. Same
+    // overwrite-by-latest-ts pattern as itemDeletes/itemUndeletes above.
+    catDeletesToPush.forEach(t => writes.push([sharedRef.collection('catDeletes').doc(catKey(t.cat)), {
+      cat: t.cat, ts: t.ts, deviceId: t.deviceId,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+    catUndeletesToPush.forEach(t => writes.push([sharedRef.collection('catUndeletes').doc(catKey(t.cat)), {
+      cat: t.cat, ts: t.ts, deviceId: t.deviceId,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
 
     const BATCH_LIMIT = 500;
     for (let i = 0; i < writes.length; i += BATCH_LIMIT) {
@@ -2731,6 +2817,8 @@ async function uploadToFirestore() {
     if (matchesToPush.length) state.settings.lastUploadedSeq = Math.max(...matchesToPush.map(m => m.seq));
     if (deletesToPush.length) state.settings.lastUploadedDeletesAt = Math.max(...deletesToPush.map(t => t.ts));
     if (undeletesToPush.length) state.settings.lastUploadedUndeletesAt = Math.max(...undeletesToPush.map(t => t.ts));
+    if (catDeletesToPush.length) state.settings.lastUploadedCatDeletesAt = Math.max(...catDeletesToPush.map(t => t.ts));
+    if (catUndeletesToPush.length) state.settings.lastUploadedCatUndeletesAt = Math.max(...catUndeletesToPush.map(t => t.ts));
     save();
 
     cloudSyncTimes.lastUpload = Date.now();
@@ -2758,9 +2846,15 @@ async function pullFromFirestore() {
     const matchesQ = cursor ? sharedRef.collection('matches').where('syncedAt', '>', cursor) : sharedRef.collection('matches');
     const deletesQ = cursor ? sharedRef.collection('itemDeletes').where('syncedAt', '>', cursor) : sharedRef.collection('itemDeletes');
     const undeletesQ = cursor ? sharedRef.collection('itemUndeletes').where('syncedAt', '>', cursor) : sharedRef.collection('itemUndeletes');
-    const [itemsSnap, matchesSnap, deletesSnap, undeletesSnap] = await Promise.all([itemsQ.get(), matchesQ.get(), deletesQ.get(), undeletesQ.get()]);
+    const catDeletesQ = cursor ? sharedRef.collection('catDeletes').where('syncedAt', '>', cursor) : sharedRef.collection('catDeletes');
+    const catUndeletesQ = cursor ? sharedRef.collection('catUndeletes').where('syncedAt', '>', cursor) : sharedRef.collection('catUndeletes');
+    const [itemsSnap, matchesSnap, deletesSnap, undeletesSnap, catDeletesSnap, catUndeletesSnap] =
+      await Promise.all([itemsQ.get(), matchesQ.get(), deletesQ.get(), undeletesQ.get(), catDeletesQ.get(), catUndeletesQ.get()]);
 
-    const incoming = { items: {}, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [], itemDeletes: [], itemUndeletes: [] };
+    const incoming = {
+      items: {}, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [],
+      itemDeletes: [], itemUndeletes: [], catDeletes: [], catUndeletes: []
+    };
     let maxSynced = state.lastSyncedServerTs || 0;
     itemsSnap.forEach(doc => {
       const d = doc.data();
@@ -2780,6 +2874,16 @@ async function pullFromFirestore() {
     undeletesSnap.forEach(doc => {
       const d = doc.data();
       incoming.itemUndeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat });
+      if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
+    });
+    catDeletesSnap.forEach(doc => {
+      const d = doc.data();
+      incoming.catDeletes.push({ cat: d.cat, ts: d.ts, deviceId: d.deviceId });
+      if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
+    });
+    catUndeletesSnap.forEach(doc => {
+      const d = doc.data();
+      incoming.catUndeletes.push({ cat: d.cat, ts: d.ts, deviceId: d.deviceId });
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
 
