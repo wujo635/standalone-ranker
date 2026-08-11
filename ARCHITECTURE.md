@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.4.0` |
+| App version | `2.4.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
