@@ -185,6 +185,28 @@
   .edit-row { background: var(--accent-bg); border-radius: var(--radius); padding: .75rem; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .edit-row input[type=text] { flex: 1; min-width: 100px; font-size: 13px; padding: 5px 8px; }
   .item-row.is-editing { background: var(--accent-bg); border-radius: var(--radius); margin: 0 -.25rem; padding-left: .25rem; padding-right: .25rem; }
+
+  /* Filter UI */
+  .filter-empty { font-size: 13px; color: var(--text-muted); padding: 6px 0; }
+  .filter-panel { display: flex; flex-direction: column; gap: 1rem; }
+  .filter-panel-header { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
+  .filter-panel-header .section-label { margin-bottom: 0; }
+  .filter-count { color: var(--accent); font-weight: 600; }
+  .filter-caret { font-size: 16px; color: var(--text-muted); }
+  .filter-fields { display: flex; flex-direction: column; gap: 1rem; }
+  .filter-clear { font-size: 12px; color: var(--text-muted); }
+  .filter-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: .75rem; transition: all .2s; }
+  .filter-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .6rem; }
+  .filter-card-label { font-size: 12px; font-weight: 500; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+  .filter-has-value { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); cursor: pointer; white-space: nowrap; }
+  .filter-has-value input[type=checkbox] { width: 13px; height: 13px; cursor: pointer; }
+  .filter-num-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .filter-num-field { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .filter-num-field span { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+  .filter-num-field input[type=number] { width: 100%; min-width: 0; padding: 6px 4px; font-size: 13px; border-radius: 4px; }
+  .filter-values { display: flex; flex-wrap: wrap; gap: 6px; }
+  .filter-value-pill { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; padding: 6px 12px; background: var(--surface); border: 1.5px solid var(--border); border-radius: 20px; transition: all .2s; color: var(--text-secondary); }
+  .filter-value-pill.active { background: var(--accent-bg); border-color: var(--accent-border); font-weight: 500; color: var(--accent-text); }
 </style>
 </head>
 <body>
@@ -413,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.4.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -807,7 +829,7 @@ function renderFilterUI(cat) {
   if (!libEl && !rankEl) return;
 
   if (!fields.length) {
-    const emptyHtml = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0">No extra fields to filter.</div>';
+    const emptyHtml = '<div class="filter-empty">No extra fields to filter.</div>';
     if (libEl) libEl.innerHTML = emptyHtml;
     if (rankEl) rankEl.innerHTML = emptyHtml;
     return;
@@ -835,20 +857,34 @@ function renderFilterUI(cat) {
 }
 
 function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
-  let html = '<div style="display:flex;flex-direction:column;gap:1rem">';
-  html += '<div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="filterCollapsed[\'' + esc(cat) + '\'] = !filterCollapsed[\'' + esc(cat) + '\'];document.getElementById(\'' + filterId + '\').style.display = filterCollapsed[\'' + esc(cat) + '\'] ? \'none\' : \'flex\';">';
-  html += '<div class="section-label" style="margin-bottom:0">Filter' + (activeCount ? ` <span style="color:var(--accent);font-weight:600">${activeCount}</span>` : '') + '</div>';
-  html += '<span style="font-size:16px;color:var(--text-muted)">' + (isCollapsed ? '▶' : '▼') + '</span>';
+  let html = '<div class="filter-panel">';
+  html += '<div class="filter-panel-header" onclick="filterCollapsed[\'' + esc(cat) + '\'] = !filterCollapsed[\'' + esc(cat) + '\'];document.getElementById(\'' + filterId + '\').style.display = filterCollapsed[\'' + esc(cat) + '\'] ? \'none\' : \'flex\';">';
+  html += '<div class="section-label">Filter' + (activeCount ? ` <span class="filter-count">${activeCount}</span>` : '') + '</div>';
+  html += '<span class="filter-caret">' + (isCollapsed ? '▶' : '▼') + '</span>';
   html += '</div>';
 
-  html += '<div id="' + filterId + '" style="display:' + (isCollapsed ? 'none' : 'flex') + ';flex-direction:column;gap:1rem">';
+  html += '<div id="' + filterId + '" class="filter-fields" style="display:' + (isCollapsed ? 'none' : 'flex') + '">';
   if (activeCount > 0) {
-    html += '<button class="ghost btn-sm" style="font-size:12px;color:var(--text-muted)" onclick="event.stopPropagation();clearAllFilters(\'' + esc(cat) + '\')">✕ Clear</button>';
+    html += '<button class="ghost btn-sm filter-clear" onclick="event.stopPropagation();clearAllFilters(\'' + esc(cat) + '\')">✕ Clear</button>';
   }
   html += fieldsHtml;
   html += '</div>'; // Close filter-fields div
   html += '</div>'; // Close outer wrapper div
   return html;
+}
+
+// Header (field name + "Has value" checkbox) is identical for both a number
+// and a categorical field card — only the body underneath differs.
+function filterCardHeader(cat, field, filter) {
+  return `<div class="filter-card-header">
+          <div class="filter-card-label">${esc(field.name)}</div>
+          <label class="filter-has-value">
+            <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
+              data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
+              onchange="updateFilter(this)">
+            Has value
+          </label>
+        </div>`;
 }
 
 function buildFilterFieldCards(cat, fields, catFilters) {
@@ -868,34 +904,26 @@ function buildFilterFieldCards(cat, fields, catFilters) {
       const maxVal = filter.max !== undefined ? filter.max : '';
       const eqVal = filter.equals !== undefined ? filter.equals : '';
 
-      html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem;transition:all 0.2s">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
-          <div style="font-size:12px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap">
-            <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
-              data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
-              onchange="updateFilter(this)" style="width:13px;height:13px;cursor:pointer">
-            Has value
-          </label>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">
-          <div style="display:flex;align-items:center;gap:4px;min-width:0">
-            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">≥</span>
+      html += `<div class="filter-card">
+        ${filterCardHeader(cat, field, filter)}
+        <div class="filter-num-grid">
+          <div class="filter-num-field">
+            <span>≥</span>
             <input type="number" placeholder="min" value="${minVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="min"
-              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px">
+              onchange="updateFilter(this)">
           </div>
-          <div style="display:flex;align-items:center;gap:4px;min-width:0">
-            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">≤</span>
+          <div class="filter-num-field">
+            <span>≤</span>
             <input type="number" placeholder="max" value="${maxVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="max"
-              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px">
+              onchange="updateFilter(this)">
           </div>
-          <div style="display:flex;align-items:center;gap:4px;min-width:0">
-            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">=</span>
+          <div class="filter-num-field">
+            <span>=</span>
             <input type="number" placeholder="exact" value="${eqVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="equals"
-              onchange="updateFilter(this)" style="width:100%;min-width:0;padding:6px 4px;font-size:13px;border-radius:4px" title="Exact match">
+              onchange="updateFilter(this)" title="Exact match">
           </div>
         </div>
       </div>`;
@@ -906,23 +934,15 @@ function buildFilterFieldCards(cat, fields, catFilters) {
       uniqueVals.sort();
       const selectedVals = filter.values || [];
 
-      html += `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:0.75rem">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
-          <div style="font-size:12px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em">${esc(field.name)}</div>
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap">
-            <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
-              data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
-              onchange="updateFilter(this)" style="width:13px;height:13px;cursor:pointer">
-            Has value
-          </label>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">`;
+      html += `<div class="filter-card">
+        ${filterCardHeader(cat, field, filter)}
+        <div class="filter-values">`;
       for (const val of uniqueVals) {
         const isChecked = selectedVals.includes(String(val));
-        html += `<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:6px 12px;background:var(--surface);border:1.5px solid var(--border);border-radius:20px;transition:all 0.2s;${isChecked ? 'background:var(--accent-bg);border-color:var(--accent-border);font-weight:500;color:var(--accent-text)' : 'color:var(--text-secondary)'}">
+        html += `<label class="filter-value-pill${isChecked ? ' active' : ''}">
           <input type="checkbox" ${isChecked ? 'checked' : ''}
             data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-value="${esc(String(val))}"
-            onchange="updateFilter(this)" style="accent-color:var(--accent);cursor:pointer">
+            onchange="updateFilter(this)">
           <span>${esc(String(val))}</span>
         </label>`;
       }
