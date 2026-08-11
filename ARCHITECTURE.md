@@ -63,9 +63,9 @@ Everything lives in one file: `index.html`
 
 ```
 index.html
-├── <style>       CSS custom properties + all component styles (~130 lines)
+├── <style>       CSS custom properties + all component styles (~180 lines)
 ├── <body>        Seven views: Library, New Category, Schema Editor, Rank, Leaderboard, History, Data
-└── <script>      All app logic (~980 lines of vanilla JS)
+└── <script>      All app logic (~2360 lines of vanilla JS)
 ```
 
 ---
