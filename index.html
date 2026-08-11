@@ -435,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -779,6 +779,17 @@ function inferFieldType(cat, fieldName) {
   const type = totalCount > 0 && numericCount / totalCount >= 0.8 ? 'number' : 'string';
   fieldTypeCache[cacheKey] = type;
   return type;
+}
+
+// Bug found in review: with no invalidation, a field's very first inferFieldType()
+// call (e.g. before any item existed, or with too little data yet to lean 80%
+// numeric) permanently cached the wrong type — an all-numeric field like Year could
+// get stuck rendering the categorical pill-filter forever, even once real data
+// existed, because nothing ever cleared the stale entry. Call this after any change
+// to a category's item fields (add/edit/CSV import/merge) so the next filter render
+// re-samples instead of trusting a possibly-stale verdict.
+function invalidateFieldTypeCache(cat) {
+  Object.keys(fieldTypeCache).forEach(k => { if (k.startsWith(cat + ':')) delete fieldTypeCache[k]; });
 }
 
 function getFilteredItems(cat, items, filters) {
@@ -1267,6 +1278,7 @@ function addItem() {
   state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
   document.getElementById('inp-primary').value = '';
   fields.forEach(f => { const el = document.getElementById('field-' + f.name); if (el) el.value = ''; });
+  invalidateFieldTypeCache(cat);
   save(); renderLibrary(); toast('Added: ' + t);
   setTimeout(() => document.getElementById('inp-primary').focus(), 20);
 }
@@ -1282,6 +1294,7 @@ function deleteItem(id) {
   // title/cat are informational only (never read by merge logic) — snapshotted so the
   // Deleted Items UI can show something human-readable; see undeleteItem().
   state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: item.title, cat: item.cat });
+  invalidateFieldTypeCache(item.cat);
   save(); renderLibrary(); renderLB(); renderStats();
 }
 
@@ -1365,6 +1378,7 @@ function saveItem(id) {
     state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: oldTitle, cat });
   }
   expandedItemId = null;
+  invalidateFieldTypeCache(cat);
   save(); renderLibrary(); renderDeletedItems(); toast('Saved');
 }
 
@@ -2157,6 +2171,7 @@ function resolveCSVImport(result) {
     toast('Created ' + category + ' with ' + items.length + ' items');
   }
 
+  invalidateFieldTypeCache(category);
   save(); rebuildCatSelects();
   document.getElementById('sel-cat').value = category;
   renderLibrary(); renderLB(); renderStats();
@@ -2524,6 +2539,10 @@ function mergeImport(incoming) {
   applyNewMatches(matchesToApply);
   state.matchLog = dedupeById([...state.matchLog, ...matchesToApply]);
 
+  // A merge can touch any number of categories' fields at once (unlike the single-cat
+  // add/edit/CSV paths) — infrequent enough (user-initiated import/pull) that clearing
+  // the whole cache here is simpler and cheap enough, vs. tracking exactly which cats.
+  fieldTypeCache = {};
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory(); renderSyncStatus();
   toast('Synced — ' + matchesToApply.length + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
   return true;
@@ -2548,6 +2567,7 @@ function clearAllData() {
   state = freshState();
   lbCat = BUILTIN_CATS[0];
   localStorage.removeItem('ranker-v1');
+  fieldTypeCache = {};
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSyncStatus();
   toast('All data cleared');
 }
