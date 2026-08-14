@@ -435,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.5.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2514,35 +2514,54 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
   Object.keys(incoming.schema || {}).forEach(c => {
     if (tombstonedCats.has(c)) return;
     if (!state.schema[c]) { state.schema[c] = incoming.schema[c]; return; }
-    adoptIncomingIdentityFields(c, incoming.schema[c].fields || []);
+    adoptIncomingFields(c, incoming.schema[c].fields || []);
   });
   return { added, freshlySeeded };
 }
 
-// For a category this device already knows about, adopts any identity field the
-// incoming side has flagged that this device hasn't (monotonic — only ever turns
-// identity ON, never off, since removing one is the collision-risk direction
-// saveSchema()'s interactive check exists to guard; a device merely being unaware of
-// an identity flag is not grounds to strip it from someone who already has it). This
-// closes a real gap: without it, importing/pulling into a device that already has
-// *some* schema for a built-in category (e.g. Movies ships with a default schema via
-// CAT_DEFAULTS) never picked up an identity flag set on another device, even from a
-// genuinely fresh import — only categories entirely new to this device benefited from
-// the union above. A field new to this device entirely is also added, carrying the
-// identity flag through (same "adding is always safe" treatment as new items).
+// For a category this device already knows about, adopts field DEFINITIONS the
+// incoming side has that this device doesn't (2.5.1 — previously this only ever
+// adopted `identity: true` flags; an entirely new, non-identity field never
+// propagated at all). Two independent things happen here:
 //
-// Schema and item ids must never go out of sync, so the field list is only committed
-// if rekeyItemsForIdentityFields() actually succeeds — if it would collide (only
-// realistically possible in corrupted/pre-existing-duplicate data, not the normal
-// adding case), the identity adoption for this category is skipped for now rather
-// than left half-applied; it can still be resolved later via the interactive Schema
-// Editor path, which surfaces the collision to a user instead of failing silently.
-function adoptIncomingIdentityFields(cat, incomingFields) {
+// 1. A field this device has never heard of (by name) is added wholesale, carrying
+//    whatever required/filterable/identity it has incoming — same "adding is
+//    always safe" treatment new items already get. This closes a real gap: an
+//    item's *value* for a brand-new field already synced fine (last-write-wins on
+//    the whole `fields` object), but with no matching schema entry anywhere, that
+//    value was invisible in every view — Library rows, the edit form, filters all
+//    iterate extraFields(cat), i.e. schema-defined fields only.
+// 2. For a field both sides already have, only a newly-incoming `identity: true` is
+//    adopted — monotonic, only ever turns identity ON, never off (removing one is
+//    the collision-risk direction saveSchema()'s interactive check exists to
+//    guard). `required`/`filterable` on an *already-shared* field stay local-only,
+//    deliberately — low collision risk, low stakes if they diverge, unlike
+//    identity which is correctness-critical for item id computation.
+//
+// A brand-new *non-identity* field can never affect any existing item's id
+// (identitySuffixFor() only reads fields already flagged identity), so it's
+// committed directly, no rekey needed. But a field ending up flagged identity —
+// whether brand new or newly-flagged-existing — does, and needs the same
+// rekey-with-collision-check saveSchema() does interactively: schema and item ids
+// must never be committed out of sync with each other. If it would collide (only
+// realistically possible in corrupted/pre-existing-duplicate data), the identity
+// adoption for this category is skipped for now rather than left half-applied —
+// resolvable later via the interactive Schema Editor, which surfaces the collision
+// to a user instead of failing silently.
+function adoptIncomingFields(cat, incomingFields) {
   const localFields = state.schema[cat].fields || [];
+  const brandNew = incomingFields.filter(f => !f.identity && !localFields.find(lf => lf.name === f.name));
   const newlyIdentity = incomingFields.filter(f => f.identity && !localFields.find(lf => lf.name === f.name && lf.identity));
-  if (!newlyIdentity.length) return;
+  if (!brandNew.length && !newlyIdentity.length) return;
 
   const prospectiveFields = localFields.map(f => ({ ...f }));
+  brandNew.forEach(f => prospectiveFields.push({ ...f }));
+
+  if (!newlyIdentity.length) {
+    state.schema[cat].fields = prospectiveFields;
+    return;
+  }
+
   newlyIdentity.forEach(f => {
     const existing = prospectiveFields.find(pf => pf.name === f.name);
     if (existing) { existing.identity = true; existing.required = true; }
@@ -2551,7 +2570,7 @@ function adoptIncomingIdentityFields(cat, incomingFields) {
 
   const { collision } = rekeyItemsForIdentityFields(cat, prospectiveFields.filter(f => f.identity));
   if (collision) {
-    console.warn('Skipped adopting identity field change for "' + cat + '" from sync — would merge "' + collision.a + '" and "' + collision.b + '"');
+    console.warn('Skipped adopting field changes for "' + cat + '" from sync — would merge "' + collision.a + '" and "' + collision.b + '"');
     return;
   }
   state.schema[cat].fields = prospectiveFields;
