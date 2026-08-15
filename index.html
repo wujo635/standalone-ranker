@@ -435,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.5.1';
+const APP_VERSION = '2.5.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2484,9 +2484,27 @@ function currentlyTombstonedCats(deletes, undeletes) { return currentlyTombstone
 // no such tombstone of its own. Without this check, that one untombstoned item would
 // resurrect the whole "deleted" category on both sides — the same class of bug
 // itemDeletes was built to fix in 2.0.0, one level up.
+//
+// Schema/cats are adopted BEFORE items are unioned in — real bug, found live: adopting
+// a newly-synced identity flag rekeys every existing local item in that category onto a
+// new id scheme (see adoptIncomingFields() -> rekeyItemsForIdentityFields()). Unioning
+// items first, against ids computed under this device's *old* identity scheme, meant an
+// incoming item computed under a *newer* scheme (because the sender's identity flag was
+// already ahead) never matched any local item's id — so every item in that category got
+// added as a "new" duplicate, right alongside the original, instead of recognized as the
+// same item. Doing schema adoption first means local items are already rekeyed onto the
+// same scheme incoming ids use by the time they're compared, so they correctly line up.
 function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
   let added = 0;
   const freshlySeeded = new Set();
+
+  (incoming.cats || []).forEach(c => { if (!tombstonedCats.has(c) && !state.cats.includes(c)) state.cats.push(c); });
+  Object.keys(incoming.schema || {}).forEach(c => {
+    if (tombstonedCats.has(c)) return;
+    if (!state.schema[c]) { state.schema[c] = incoming.schema[c]; return; }
+    adoptIncomingFields(c, incoming.schema[c].fields || []);
+  });
+
   Object.values(incoming.items || {}).forEach(inc => {
     if (tombstoneIds.has(inc.id) || tombstonedCats.has(inc.cat)) return;
     const cur = state.items[inc.id];
@@ -2509,12 +2527,6 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
       cur.fields = inc.fields;
       cur.updatedAt = inc.updatedAt;
     }
-  });
-  (incoming.cats || []).forEach(c => { if (!tombstonedCats.has(c) && !state.cats.includes(c)) state.cats.push(c); });
-  Object.keys(incoming.schema || {}).forEach(c => {
-    if (tombstonedCats.has(c)) return;
-    if (!state.schema[c]) { state.schema[c] = incoming.schema[c]; return; }
-    adoptIncomingFields(c, incoming.schema[c].fields || []);
   });
   return { added, freshlySeeded };
 }
