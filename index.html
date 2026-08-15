@@ -435,7 +435,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.5.2';
+const APP_VERSION = '2.5.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2296,6 +2296,18 @@ function renderSyncStatus() {
 // Undelete button per row. Only tombstones without a later undelete show up — once
 // undeleted, an item drops off this list even though its itemDeletes entry still
 // technically exists (latestPerItemId()/currentlyTombstonedIds() supersede it).
+//
+// Capped to the most recent DELETED_ITEMS_PAGE_SIZE by default (2.5.3) — itemDeletes
+// itself is deliberately never capped/compacted (a tombstone must persist forever for
+// "deletion always wins" to hold, see "Item deletions" in ARCHITECTURE.md), but
+// rendering every single one as its own row with an Undelete button doesn't scale:
+// real report, a one-time bulk cleanup produced ~1500 tombstones in a single sitting,
+// flooding this section unusably. Unlike History's cap (which limits what's *stored*,
+// since old rankings genuinely don't matter once they age out), the underlying data
+// here must stay complete — only the render is capped, and a manual "Show all" escape
+// hatch is one click away for the rare case of hunting down an older one.
+const DELETED_ITEMS_PAGE_SIZE = 50;
+let deletedItemsShowAll = false;
 function renderDeletedItems() {
   const el = document.getElementById('deleted-items-list');
   if (!el) return;
@@ -2303,10 +2315,19 @@ function renderDeletedItems() {
   const latestDeletes = latestPerItemId(state.itemDeletes);
   const rows = latestDeletes.filter(t => tombstoned.has(t.itemId)).sort((a,b) => b.ts - a.ts);
   if (!rows.length) {
+    deletedItemsShowAll = false;
     el.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">No deleted items.</div>';
     return;
   }
-  el.innerHTML = rows.map(t => `
+  const truncated = !deletedItemsShowAll && rows.length > DELETED_ITEMS_PAGE_SIZE;
+  const shown = truncated ? rows.slice(0, DELETED_ITEMS_PAGE_SIZE) : rows;
+  const header = rows.length > DELETED_ITEMS_PAGE_SIZE
+    ? `<div class="row" style="justify-content:space-between;margin-bottom:.5rem">
+        <span style="font-size:12px;color:var(--text-muted)">Showing ${shown.length} of ${rows.length}</span>
+        <button class="ghost btn-sm" onclick="deletedItemsShowAll = !deletedItemsShowAll; renderDeletedItems();">${deletedItemsShowAll ? 'Show fewer' : 'Show all'}</button>
+      </div>`
+    : '';
+  el.innerHTML = header + shown.map(t => `
     <div class="field-row">
       <span class="field-name">${esc(t.title || t.itemId)}${t.cat ? ' <span style="color:var(--text-muted);font-weight:400">(' + esc(t.cat) + ')</span>' : ''}</span>
       <span style="font-size:12px;color:var(--text-muted)">${esc(new Date(t.ts).toLocaleString())}</span>
