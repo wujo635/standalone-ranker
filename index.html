@@ -23,6 +23,7 @@
     }
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { overflow-y: scroll; }
   body { font-family: var(--font); background: var(--bg); color: var(--text-primary); min-height: 100vh; }
   .shell { max-width: 680px; margin: 0 auto; padding: 2rem 1rem 4rem; }
   header { margin-bottom: 2rem; }
@@ -447,7 +448,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.7.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
