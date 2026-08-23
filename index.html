@@ -2690,29 +2690,44 @@ function mergeImport(incoming) {
   // Only matches this device hasn't already counted get applied — see the comment on
   // applyNewMatches() for why this must not be a from-scratch replay.
   //
-  // Matches touching a freshly-seeded item (just created above, this exact merge) are
-  // excluded from application AND left out of local matchLog entirely — not just
-  // skipped. A freshly-seeded item's elo/wins/losses already reflect every match that
-  // touches it in this same incoming payload (see unionItemsAndSchema()), so applying
-  // them here would double-count. Leaving them out of matchLog (rather than recording
-  // them as "seen but not applied") means a future merge — once the item is no longer
-  // fresh, i.e. any merge after this one — can still pick up and correctly apply a
-  // match here that also touched an item that already existed locally (that item's own
-  // rating does need the delta; this device just can't cleanly apply "half" of a paired
-  // ELO update). A real bug found via manual review: importing a full export into an
-  // empty device double-counted every match, because every item was "freshly seeded."
+  // A match touching a freshly-seeded item (just created above, this exact merge) is
+  // never re-applied via eloUpdate() — a freshly-seeded item's elo/wins/losses already
+  // reflect every match that touches it in this same incoming payload (see
+  // unionItemsAndSchema()), so applying it again would double-count. A real bug found
+  // via manual review: importing a full export into an empty device double-counted
+  // every match, because every item was "freshly seeded."
+  //
+  // Whether such a match still gets RECORDED into local matchLog depends on which side
+  // is freshly seeded:
+  //  - Both sides freshly seeded (e.g. bootstrapping an empty device from one complete
+  //    file export) — both ratings already fully reflect this match, nothing to apply,
+  //    nothing left unresolved. Safe, and necessary, to record it directly: a real bug,
+  //    found live, otherwise silently and permanently dropped every match from a
+  //    from-scratch import's local matchLog (ratings stayed correct — imported directly
+  //    — but the match history itself vanished, so this device could never contribute
+  //    it to a later Upload; a from-scratch device recovery could never re-seed a wiped
+  //    Firestore with its own inherited history).
+  //  - Only one side freshly seeded (a match pairing a brand-new item against one this
+  //    device already had) — genuinely can't be resolved yet: the existing item's
+  //    rating does still need this match's delta, but ELO updates move both sides
+  //    together, so there's no clean way to apply "half" of one. Left out of matchLog
+  //    entirely (not just unapplied) so a *later* merge — once the fresh item is no
+  //    longer fresh, i.e. it already exists locally by then — can pick this same match
+  //    up again and apply it correctly, rather than being permanently blocked as
+  //    "already seen" by dedupeById() below.
   const localIds = new Set(state.matchLog.map(m => m.id));
   const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id));
   const matchesToApply = newMatches.filter(m => !freshlySeeded.has(m.wid) && !freshlySeeded.has(m.lid));
+  const matchesFullySeeded = newMatches.filter(m => freshlySeeded.has(m.wid) && freshlySeeded.has(m.lid));
   applyNewMatches(matchesToApply);
-  state.matchLog = dedupeById([...state.matchLog, ...matchesToApply]);
+  state.matchLog = dedupeById([...state.matchLog, ...matchesToApply, ...matchesFullySeeded]);
 
   // A merge can touch any number of categories' fields at once (unlike the single-cat
   // add/edit/CSV paths) — infrequent enough (user-initiated import/pull) that clearing
   // the whole cache here is simpler and cheap enough, vs. tracking exactly which cats.
   fieldTypeCache = {};
   ensureSchemaWellFormed(); save(); rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderHistory(); renderSyncStatus();
-  toast('Synced — ' + matchesToApply.length + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
+  toast('Synced — ' + (matchesToApply.length + matchesFullySeeded.length) + ' new comparison(s), ' + added + ' new item' + (added !== 1 ? 's' : ''));
   return true;
 }
 
