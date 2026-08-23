@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.7.1` |
+| App version | `2.7.2` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -628,6 +628,7 @@ Real-time search across item titles and all field values. The Library view inclu
 - Search clears when switching categories (for UX clarity)
 - A "✕" clear button (`#lib-search-clear`, 2.7.0) sits inside the input via `.search-wrap` positioning; `renderLibrary()` shows/hides it based on whether `query` is non-empty, and `clearLibSearch()` empties the input and re-renders on click
 - `html { overflow-y: scroll; }` (2.7.1) forces the page's vertical scrollbar to always render, so the viewport width never changes as the item list grows/shrinks. Without this, `clientWidth` shifted by the scrollbar's width (~15px) any time the list crossed the "needs scrolling" threshold — every right-anchored element on the page moved that distance the instant it happened, including the search-clear button (`right: 6px` inside `.search-wrap`), which made it visibly jump right as you clicked it and miss follow-up clicks. Reproduced directly: `document.documentElement.clientWidth` measured 1280 with a short (no-scroll) list vs. 1265 with a tall (scrolling) list in the same window; with the fix both measure 1265 regardless of list length.
+- The clear button also has `onmousedown="event.preventDefault()"` (2.7.2). Clicking the button normally shifts browser focus from `#lib-search` to the button on `mousedown`, before `click` even fires — on mobile this blurs the search input and collapses the on-screen keyboard, which resizes the visual viewport *between* touchstart and touchend, moving the button out from under the finger mid-tap (reported as the button "moving vertically" and "not activating all the time"). `preventDefault()` on `mousedown` suppresses that default focus shift, so `#lib-search` stays focused (keyboard stays open, no viewport resize) while `click` still fires normally and calls `clearLibSearch()`. Verified via dispatched `mousedown`/`mouseup`/`click` sequences at both desktop and mobile (375×812) viewport sizes: focus stays on `#lib-search` throughout, and the click still clears the field every time.
 
 **How it works**:
 ```js
