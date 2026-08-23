@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.7.0` |
+| App version | `2.7.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -627,6 +627,7 @@ Real-time search across item titles and all field values. The Library view inclu
 - Shows "No items match X" when no results
 - Search clears when switching categories (for UX clarity)
 - A "✕" clear button (`#lib-search-clear`, 2.7.0) sits inside the input via `.search-wrap` positioning; `renderLibrary()` shows/hides it based on whether `query` is non-empty, and `clearLibSearch()` empties the input and re-renders on click
+- `html { overflow-y: scroll; }` (2.7.1) forces the page's vertical scrollbar to always render, so the viewport width never changes as the item list grows/shrinks. Without this, `clientWidth` shifted by the scrollbar's width (~15px) any time the list crossed the "needs scrolling" threshold — every right-anchored element on the page moved that distance the instant it happened, including the search-clear button (`right: 6px` inside `.search-wrap`), which made it visibly jump right as you clicked it and miss follow-up clicks. Reproduced directly: `document.documentElement.clientWidth` measured 1280 with a short (no-scroll) list vs. 1265 with a tall (scrolling) list in the same window; with the fix both measure 1265 regardless of list length.
 
 **How it works**:
 ```js
