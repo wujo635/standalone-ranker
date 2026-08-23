@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.5.4` |
+| App version | `2.7.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -514,9 +514,11 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `addItem()` | Validates inputs, creates item at ELO 1000, saves, re-renders library |
 | `deleteItem(id)` | Confirms, removes item, saves, re-renders library + leaderboard |
 | `toggleHidden(id)` | Flips an item's `hidden` flag, saves, re-renders library + leaderboard + stats |
-| `filteredLibraryList()` | Returns the Library's currently-shown items for the active category — search text and field filters both applied; `renderLibrary()` and `bulkSetHidden()` both call this so the bulk actions always act on exactly what's on screen |
-| `bulkSetHidden(hidden)` | Sets `hidden` on every item in `filteredLibraryList()` to the given value, saves, re-renders library + leaderboard + stats |
-| `renderLibrary()` | Rebuilds selects + form, renders alphabetical item list |
+| `filteredLibraryList()` | Returns the Library's full currently-matching items for the active category — search text and field filters both applied, across all pages; `renderLibrary()` and `bulkSetHidden()` both call this so the bulk actions always act on exactly what matches, not just the visible page |
+| `bulkSetHidden(hidden)` | Sets `hidden` on every item in `filteredLibraryList()` to the given value (all pages), saves, re-renders library + leaderboard + stats |
+| `renderLibrary()` | Rebuilds selects + form, renders alphabetical item list paginated at `LIB_PAGE_SIZE` (2.6.0); resets to page 1 whenever the category/search/filter fingerprint changes |
+| `libGoToPage(page)` | Sets the active Library page and re-renders (2.6.0) |
+| `clearLibSearch()` | Empties the Library search input and re-renders (2.7.0) |
 | `openNewCatModal()` | Resets pending state and switches to the new-category view |
 | `saveNewCat()` | Validates name + primary label, pushes to state; also unconditionally pushes a `catUndeletes` fact for the name (2.5.0), so a (re)created category always syncs even if that name was deleted before — see "Category deletions" |
 | `openSchemaEditor()` | Copies current schema into editing state, switches to schema view |
@@ -624,6 +626,7 @@ Real-time search across item titles and all field values. The Library view inclu
 - Searches both item `title` and all values in `item.fields`
 - Shows "No items match X" when no results
 - Search clears when switching categories (for UX clarity)
+- A "✕" clear button (`#lib-search-clear`, 2.7.0) sits inside the input via `.search-wrap` positioning; `renderLibrary()` shows/hides it based on whether `query` is non-empty, and `clearLibSearch()` empties the input and re-renders on click
 
 **How it works**:
 ```js
@@ -638,6 +641,18 @@ if (query) {
 ```
 
 **Use cases**: Find all movies by director, all books from a year, all restaurants of a cuisine type.
+
+### Library pagination (2.6.0)
+
+The Library list is paginated at `LIB_PAGE_SIZE` (50) items per page to avoid the render-flicker cost of rebuilding a huge `innerHTML` list every keystroke — see "Known limitations & performance thresholds" below.
+
+**Implementation**:
+- `renderLibrary()` slices the result of `filteredLibraryList()` (search + field filters already applied to the *entire* matching set) down to the current page — filtering/searching logic itself is untouched, only what's rendered changes
+- A fingerprint of `(cat, query, filterState[cat])` is computed each render and compared to the previous render's; when it differs, the page resets to 1 — this is what makes changing the search term or a field filter always land back on page 1 of the new results, from any page
+- The page number is clamped to the valid range every render, so deleting/hiding items that shrinks the list below the current page can't strand the view
+- Editing an item in place doesn't change the fingerprint, so the current page is preserved while editing
+- Prev/Next controls plus a "Page X of Y (Z items)" indicator render below the list only when there's more than one page
+- Bulk hide/unhide (`bulkSetHidden()`) is unaffected by pagination — it still calls `filteredLibraryList()` directly and acts on every matching item across all pages, not just the visible page (see below)
 
 ### Add structured field filtering
 
@@ -693,7 +708,7 @@ Items carry a `hidden: boolean` field (default `false`). Toggled per item in the
 
 Hidden items stay visible in the Library (dimmed via `.item-row.is-hidden`, tagged with a "hidden" badge) so they can be found and un-hidden, but `itemsForCat()` filters them out — since Leaderboard and all three rank modes (VS, Podium, Tier) source their item pool from `itemsForCat()`, hidden items never appear there. `libItems()` (Library's own item source) is untouched, so hiding never removes an item from view, only from ranking/leaderboard consideration.
 
-A bulk toolbar above the item list ("Hide all shown (n)" / "Unhide all shown (n)") applies `bulkSetHidden(hidden)` to every item in `filteredLibraryList()` — the same search + field-filter-applied set the list itself renders, so the counts and the action always match what's on screen. This lets a user filter down to a subset (e.g. `Director: Wachowski`, or a search term) and hide or unhide the whole matching set in one click, without touching anything outside it.
+A bulk toolbar above the item list ("Hide all matching (n)" / "Unhide all matching (n)", renamed from "…all shown…" in 2.6.0 once the list became paginated) applies `bulkSetHidden(hidden)` to every item in `filteredLibraryList()` — the same search + field-filter-applied set the list itself renders, spanning all pages, not just the currently visible one. This lets a user filter down to a subset (e.g. `Director: Wachowski`, or a search term) and hide or unhide the whole matching set in one click, without touching anything outside it — regardless of how many pages that set spans.
 
 No data migration was needed: old items simply lack the `hidden` field, and `!i.hidden` treats `undefined` the same as `false`.
 
@@ -788,12 +803,12 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 
 ### Rendering
 
-`renderLibrary()` and `renderLB()` rebuild the entire list via `innerHTML` on every update. This is fine up to ~500 items per category. Beyond that:
+`renderLibrary()` and `renderLB()` rebuild the entire list via `innerHTML` on every update. `renderLibrary()` is paginated (2.6.0, `LIB_PAGE_SIZE` = 50 — see "Library pagination" above), which caps its per-render DOM cost regardless of category size; `renderLB()` (Leaderboard) is not yet paginated. Overall this is fine up to ~500 items per category. Beyond that:
 
 | Items per category | Symptom | Fix |
 |---|---|---|
 | < 500 | No issues | — |
-| 500–2,000 | Render flicker on slower devices | Paginate, or add virtual scrolling ([clusterize.js](https://clusterize.js.org/) drops in with minimal changes) |
+| 500–2,000 | Render flicker on slower devices (Leaderboard only — Library is paginated) | Paginate `renderLB()` too, or add virtual scrolling ([clusterize.js](https://clusterize.js.org/) drops in with minimal changes) |
 | 2,000–10,000 | localStorage pressure + slow renders | Switch to IndexedDB + virtual scroll |
 | 10,000+ | Both | Backend + virtual scroll |
 
