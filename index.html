@@ -449,7 +449,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.7.2';
+const APP_VERSION = '2.7.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1256,7 +1256,21 @@ function rekeyItemsForIdentityFields(cat, pendingIdFields) {
 
   remapItemIds(idMap);
   const now = Date.now();
-  catItems.forEach(item => { const moved = state.items[idMap[item.id]]; if (moved) moved.updatedAt = now; });
+  // Tombstone every old id this rekey actually moved away from — without this, an old
+  // id's Firestore doc sits there orphaned forever (never deleted, never updated), so
+  // any device that still has a copy at that old id (or re-uploads it, e.g. via the
+  // itemsToPush updatedAt-cascade) hands it back to everyone else as a "new" item at
+  // elo 1000 on their next pull, duplicating the item right alongside its renamed
+  // copy. Same tombstone treatment saveItem()'s single-item rekey already does — see
+  // "Item identity fields" / "Known gaps in the merge model" in ARCHITECTURE.md.
+  catItems.forEach(item => {
+    const newId = idMap[item.id];
+    const moved = state.items[newId];
+    if (moved) moved.updatedAt = now;
+    if (newId !== item.id) {
+      state.itemDeletes.push({ itemId: item.id, ts: now, deviceId: state.settings.deviceId, title: item.title, cat });
+    }
+  });
   return { collision: null };
 }
 
