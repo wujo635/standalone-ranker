@@ -390,6 +390,11 @@
       <div id="cloud-sync-times" style="margin-top:.6rem"></div>
     </div>
     <div class="card">
+      <div class="card-title">Recovery export</div>
+      <div class="card-desc">If sync has gotten confused and needs a clean restart: this ignores the normal incremental Pull cursor, re-fetches <strong>everything</strong> ever written to Firestore, merges it onto this device's current rankings, then downloads the result as JSON. Re-import that file (after wiping/reseeding Firestore) on every device to get everyone back on one consistent baseline. Anything only ever ranked on <em>another</em> device that was never uploaded from there is not included — this can't recover data that never reached the cloud.</div>
+      <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" disabled>&#8595; Full resync + export baseline</button>
+    </div>
+    <div class="card">
       <div class="card-title">Sync status</div>
       <div id="sync-status"></div>
     </div>
@@ -449,7 +454,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.7.3';
+const APP_VERSION = '2.8.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2814,11 +2819,12 @@ function renderCloudAuthUI() {
   const authEl = document.getElementById('cloud-auth');
   const uploadBtn = document.getElementById('cloud-upload-btn');
   const pullBtn = document.getElementById('cloud-pull-btn');
+  const recoveryBtn = document.getElementById('cloud-recovery-btn');
   if (!authEl) return; // Data tab not yet rendered
 
   if (!cloudAvailable) {
     authEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Cloud sync unavailable (couldn\'t reach Firebase).</div>';
-    uploadBtn.disabled = true; pullBtn.disabled = true;
+    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true;
     return;
   }
   if (cloudUser) {
@@ -2826,10 +2832,10 @@ function renderCloudAuthUI() {
       '<span style="font-size:13px;color:var(--text-secondary)">Signed in as ' + esc(cloudUser.email || cloudUser.displayName || 'unknown') + '</span>' +
       '<button class="ghost btn-sm" onclick="cloudSignOut()">Sign out</button>' +
       '</div>';
-    uploadBtn.disabled = false; pullBtn.disabled = false;
+    uploadBtn.disabled = false; pullBtn.disabled = false; recoveryBtn.disabled = false;
   } else {
     authEl.innerHTML = '<button onclick="cloudSignIn()">Sign in with Google</button>';
-    uploadBtn.disabled = true; pullBtn.disabled = true;
+    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true;
   }
   renderCloudSyncTimes();
 }
@@ -2958,15 +2964,19 @@ async function uploadToFirestore() {
 // Fetches only what's new since state.lastSyncedServerTs (a local cursor, null on a
 // fresh device so the first pull fetches everything) and unions it in via the same
 // mergeImport() the file-import path uses — a fact is a fact regardless of transport.
-async function pullFromFirestore() {
-  if (!cloudAvailable || !cloudUser) return;
+// Pass { full: true } to ignore the cursor and re-fetch every doc ever written,
+// regardless of what this device has already pulled — see exportRecoveryBaseline().
+// Returns true/false so callers can tell whether the pull actually completed.
+async function pullFromFirestore(opts) {
+  const full = !!(opts && opts.full);
+  if (!cloudAvailable || !cloudUser) return false;
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
     const rootDoc = await sharedRef.get();
-    if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return; }
+    if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return false; }
     const rootData = rootDoc.data();
 
-    const cursor = state.lastSyncedServerTs ? firebase.firestore.Timestamp.fromMillis(state.lastSyncedServerTs) : null;
+    const cursor = (!full && state.lastSyncedServerTs) ? firebase.firestore.Timestamp.fromMillis(state.lastSyncedServerTs) : null;
     const itemsQ = cursor ? sharedRef.collection('items').where('syncedAt', '>', cursor) : sharedRef.collection('items');
     const matchesQ = cursor ? sharedRef.collection('matches').where('syncedAt', '>', cursor) : sharedRef.collection('matches');
     const deletesQ = cursor ? sharedRef.collection('itemDeletes').where('syncedAt', '>', cursor) : sharedRef.collection('itemDeletes');
@@ -3013,14 +3023,36 @@ async function pullFromFirestore() {
     });
 
     mergeImport(incoming);
-    state.lastSyncedServerTs = maxSynced;
+    // A full re-pull only ever advances the cursor, never rewinds it — a full pull
+    // triggered while this device is already partway ahead (e.g. it uploaded locally-made
+    // matches after its last pull) must not reset lastSyncedServerTs backward, which
+    // would make the next incremental pull re-fetch docs it's already merged.
+    state.lastSyncedServerTs = Math.max(state.lastSyncedServerTs || 0, maxSynced);
     save();
 
     cloudSyncTimes.lastPull = Date.now();
     renderCloudSyncTimes();
+    return true;
   } catch (e) {
     toast(cloudErrorMessage(e));
+    return false;
   }
+}
+
+// "Something's gone wrong with sync, start over clean" recovery path: forces a full
+// re-pull of Firestore's entire history (ignoring the normal incremental cursor) merged
+// onto this device's current rankings, then downloads the result as a JSON file — a
+// single self-contained baseline reflecting this device plus everything anyone has ever
+// uploaded. Intended to be re-imported into a freshly wiped Firestore and every device
+// (via clearAllData() + importData()) when a sync bug has produced a discrepancy that
+// isn't worth untangling by hand. Only exported on a *successful* pull — an interrupted
+// or denied pull must never produce a baseline file that looks complete but isn't.
+async function exportRecoveryBaseline() {
+  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first'); return; }
+  toast('Pulling full history from the cloud…');
+  const ok = await pullFromFirestore({ full: true });
+  if (!ok) return;
+  exportData();
 }
 
 function cloudErrorMessage(e) {

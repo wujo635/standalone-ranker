@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.7.3` |
+| App version | `2.8.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -372,9 +372,10 @@ Every subcollection doc's ID is the fact's own id (`itemId`/`matchId`), so writi
 
 **Key functions:**
 - `cloudSignIn()` / `cloudSignOut()` — Google auth via `signInWithPopup(GoogleAuthProvider)`
-- `renderCloudAuthUI()` — reflects auth state into the Data tab card; enables/disables Upload/Pull
+- `renderCloudAuthUI()` — reflects auth state into the Data tab card; enables/disables Upload/Pull/recovery export
 - `uploadToFirestore()` — collects new/changed items, this device's new matches, and new item/category tombstones as per-doc writes (keyed by their own id — `catKey(cat)` for category tombstones, see "Category deletions" — so re-sending is a safe no-op), commits them in chunks of at most 500 (Firestore's per-batch limit — see "Cloud sync" above), then a merge-write to the small root doc; advances the local upload cursors only once everything succeeds
-- `pullFromFirestore()` — queries `items`/`matches`/`itemDeletes`/`itemUndeletes`/`catDeletes`/`catUndeletes` for anything newer than `state.lastSyncedServerTs`, builds an `incoming` object matching `mergeImport()`'s expected shape, merges it in, advances the cursor
+- `pullFromFirestore(opts)` — queries `items`/`matches`/`itemDeletes`/`itemUndeletes`/`catDeletes`/`catUndeletes` for anything newer than `state.lastSyncedServerTs`, builds an `incoming` object matching `mergeImport()`'s expected shape, merges it in, advances the cursor; returns `true`/`false` so callers can tell whether it actually completed. `{ full: true }` ignores the cursor and re-fetches every doc ever written instead of just what's new — see `exportRecoveryBaseline()` below. A full pull only ever advances `lastSyncedServerTs`, never rewinds it, so it can't make a later incremental pull re-fetch docs already merged.
+- `exportRecoveryBaseline()` (2.8.0) — the "something's gone wrong with sync, start over clean" recovery path. Forces a full re-pull (`pullFromFirestore({ full: true })`) merged onto this device's current rankings, then downloads the result via `exportData()` — a single self-contained baseline reflecting this device plus everything anyone has ever uploaded to Firestore. Intended usage: wipe/reseed the Firestore collections, then re-import this file into every device (`clearAllData()` + Import) so everyone starts from one consistent baseline instead of hand-reconciling a discrepancy. Only exports on a successful pull — a denied or interrupted pull aborts without producing a file, since a partial baseline that looks complete would be worse than no baseline at all. Cannot recover data that was ranked on another device but never uploaded from there; the exported file is exactly as complete as Firestore itself is.
 - `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
 
 **Push and pull can happen in any order, any time, from either device — no pre-pull-before-push workaround needed (unlike the pre-2.0.0 blob design).** Because every doc is keyed by its own fact's id, two devices independently pushing "the same" match or item just results in two identical writes to the same doc — not a conflict, not data loss, nothing to reconcile.
