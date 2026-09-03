@@ -390,9 +390,23 @@
       <div id="cloud-sync-times" style="margin-top:.6rem"></div>
     </div>
     <div class="card">
-      <div class="card-title">Recovery export</div>
-      <div class="card-desc">If sync has gotten confused and needs a clean restart: this ignores the normal incremental Pull cursor, re-fetches <strong>everything</strong> ever written to Firestore, merges it onto this device's current rankings, then downloads the result as JSON — with the full match-by-match history compacted into each item's final rating, so the file doesn't grow forever with lifetime comparison count. <strong>Only import this file into a freshly cleared device</strong> (Data tab → Clear all data first, on every machine) — merging it onto a library that still has some of these items would silently skip their ranking updates. Anything only ever ranked on <em>another</em> device that was never uploaded from there is not included — this can't recover data that never reached the cloud.</div>
-      <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" disabled>&#8595; Full resync + export baseline</button>
+      <div class="card-title">Baseline recovery</div>
+      <div class="card-desc">For when sync has gotten confused and needs a clean restart. Anything only ever ranked on <em>another</em> device that was never uploaded from there can't be recovered by any of these — they're only as complete as Firestore itself is.</div>
+      <div style="margin-top:.8rem">
+        <div style="font-weight:600;font-size:13px">On the device you trust most right now</div>
+        <div class="card-desc" style="margin-top:.2rem">"Reset shared baseline" pulls in everything Firestore has, wipes the cloud, then reseeds it from this device's own (now complete) rankings — fully automatic, no Firebase console access or file-passing needed. The reseed bakes final ratings into each item and starts the match history over from zero, so this also resets Firestore's history size back down instead of carrying the full log forward. Every other device must then click "Adopt fresh baseline" below.</div>
+        <button onclick="resetSharedBaseline()" id="cloud-reset-btn" disabled style="margin-top:.4rem">&#9888; Reset shared baseline</button>
+      </div>
+      <div style="margin-top:1rem">
+        <div style="font-weight:600;font-size:13px">On every other device, after someone resets the baseline</div>
+        <div class="card-desc" style="margin-top:.2rem">Clears this device and pulls the freshly reseeded cloud straight in. Use this, not a plain Pull — an un-cleared device would silently keep its own old ratings for anything it already has instead of adopting the reset ones.</div>
+        <button onclick="adoptFreshBaseline()" id="cloud-adopt-btn" disabled style="margin-top:.4rem">&#8595; Adopt fresh baseline</button>
+      </div>
+      <div style="margin-top:1rem">
+        <div style="font-weight:600;font-size:13px">Manual / offline fallback</div>
+        <div class="card-desc" style="margin-top:.2rem">Same full pull as "Reset shared baseline," but only downloads a JSON file — doesn't touch the cloud. Its match-by-match history is compacted into each item's final rating, so <strong>only import it into a freshly cleared device</strong> (Data tab → Clear all data first) — merging it onto a library that still has some of these items would silently skip their ranking updates.</div>
+        <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" disabled style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Sync status</div>
@@ -454,7 +468,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -772,10 +786,20 @@ function identitySuffixFor(cat, fields) {
 // never collide when unioned during a merge.
 function makeDeviceId() { return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Every toast also logs to the console, so a message that faded before you finished
+// reading it (or a rapid sequence — e.g. resetSharedBaseline()'s several status
+// toasts in a row) is still recoverable via the browser console's scrollback.
+let toastTimer = null;
 function toast(msg) {
+  console.log('[toast]', msg);
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2200);
+  // Clearing any previous toast's pending hide-timer (not just starting a new one)
+  // matters for a rapid sequence: without this, an earlier toast's timer could fire
+  // and hide the *current* message early, cutting its on-screen time well below the
+  // intended duration.
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
 }
 function schemaFor(cat) {
   const s = state.schema[cat];
@@ -2604,10 +2628,16 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
         losses: inc.losses || 0,
         hidden: false
       };
-      // Only Firestore-less origins (file export/import) carry a real elo — a Firestore
-      // item doc never stores ratings, so a brand-new item pulled from the cloud has
-      // NOT already absorbed its own matches and must not be treated as freshly seeded,
-      // or its matches get silently dropped instead of applied.
+      // An ordinary Firestore item doc never carries a rating — ratings normally live
+      // only in local state, kept current by replaying matches — so a brand-new item
+      // pulled from a routine Pull has NOT already absorbed its own matches and must
+      // not be treated as freshly seeded, or its matches get silently dropped instead
+      // of applied. The one deliberate exception is a resetSharedBaseline() reseed,
+      // which bakes elo/wins/losses directly into item docs specifically so a device
+      // adopting the reset (no local copy at all) can treat them as freshly seeded here
+      // too, with no matches left to replay (the reseed pushes none — see
+      // uploadToFirestore(opts)'s top comment). File export/import has always worked
+      // this way; this is the same mechanism, just reached from a second origin now.
       if (inc.elo !== undefined) freshlySeeded.add(inc.id);
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
@@ -2689,7 +2719,8 @@ function ensureSchemaWellFormed() {
 // succeeds, no confirm dialog, no diverged case. A tombstone always wins over an item
 // doc for the same id (see "Item deletions" in ARCHITECTURE.md) — deletion has no undo,
 // consistent with today's local delete.
-function mergeImport(incoming) {
+function mergeImport(incoming, opts) {
+  const cloudOrigin = !!(opts && opts.cloudOrigin);
   state.itemDeletes = latestPerItemId([...state.itemDeletes, ...(incoming.itemDeletes || [])]);
   state.itemUndeletes = latestPerItemId([...state.itemUndeletes, ...(incoming.itemUndeletes || [])]);
   const tombstoneIds = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
@@ -2715,12 +2746,13 @@ function mergeImport(incoming) {
   // Only matches this device hasn't already counted get applied — see the comment on
   // applyNewMatches() for why this must not be a from-scratch replay.
   //
-  // A match touching a freshly-seeded item (just created above, this exact merge) is
-  // never re-applied via eloUpdate() — a freshly-seeded item's elo/wins/losses already
-  // reflect every match that touches it in this same incoming payload (see
-  // unionItemsAndSchema()), so applying it again would double-count. A real bug found
-  // via manual review: importing a full export into an empty device double-counted
-  // every match, because every item was "freshly seeded."
+  // For a FILE-origin merge (importData(), cloudOrigin false), a match touching a
+  // freshly-seeded item (just created above, this exact merge) is never re-applied via
+  // eloUpdate() — a freshly-seeded item's elo/wins/losses already reflect every match
+  // that touches it in this same incoming payload (see unionItemsAndSchema()), so
+  // applying it again would double-count. A real bug found via manual review: importing
+  // a full export into an empty device double-counted every match, because every item
+  // was "freshly seeded."
   //
   // Whether such a match still gets RECORDED into local matchLog depends on which side
   // is freshly seeded:
@@ -2740,10 +2772,25 @@ function mergeImport(incoming) {
   //    longer fresh, i.e. it already exists locally by then — can pick this same match
   //    up again and apply it correctly, rather than being permanently blocked as
   //    "already seen" by dedupeById() below.
+  //
+  // For a CLOUD-origin merge (pullFromFirestore(), cloudOrigin true), none of the above
+  // shortcut applies — every new match is always applied normally, regardless of
+  // freshlySeeded status. This isn't an oversight: a Firestore item doc only ever
+  // carries a baked-in elo/wins/losses from a resetSharedBaseline() reseed, and that
+  // SAME reset always wipes the entire matches collection at the same moment (see
+  // uploadToFirestore(opts)'s top comment) — so any match Firestore can possibly
+  // deliver for that item is guaranteed to be strictly newer than the bake, never
+  // already reflected in it. Taking the file-import shortcut here would silently drop
+  // or misapply any match created after a reset but before some device's first pull of
+  // that item — a real gap found in review: a device ranking new matches right after
+  // running Reset, then a third device adopting the baseline afterward, would otherwise
+  // treat those post-reset matches as "already seen" without ever having applied them.
   const localIds = new Set(state.matchLog.map(m => m.id));
   const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id));
-  const matchesToApply = newMatches.filter(m => !freshlySeeded.has(m.wid) && !freshlySeeded.has(m.lid));
-  const matchesFullySeeded = newMatches.filter(m => freshlySeeded.has(m.wid) && freshlySeeded.has(m.lid));
+  const matchesToApply = cloudOrigin ? newMatches :
+    newMatches.filter(m => !freshlySeeded.has(m.wid) && !freshlySeeded.has(m.lid));
+  const matchesFullySeeded = cloudOrigin ? [] :
+    newMatches.filter(m => freshlySeeded.has(m.wid) && freshlySeeded.has(m.lid));
   applyNewMatches(matchesToApply);
   state.matchLog = dedupeById([...state.matchLog, ...matchesToApply, ...matchesFullySeeded]);
 
@@ -2789,13 +2836,20 @@ function importData(e) {
   e.target.value = '';
 }
 
-function clearAllData() {
-  if (!confirm('Clear everything? This cannot be undone.')) return;
+// Extracted from clearAllData() so adoptFreshBaseline() can wipe local state without
+// clearAllData()'s own confirm() firing twice (adoptFreshBaseline shows its own,
+// scenario-specific confirmation instead).
+function clearAllDataCore() {
   state = freshState();
   lbCat = BUILTIN_CATS[0];
   localStorage.removeItem('ranker-v1');
   fieldTypeCache = {};
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSyncStatus();
+}
+
+function clearAllData() {
+  if (!confirm('Clear everything? This cannot be undone.')) return;
+  clearAllDataCore();
   toast('All data cleared');
 }
 
@@ -2843,11 +2897,13 @@ function renderCloudAuthUI() {
   const uploadBtn = document.getElementById('cloud-upload-btn');
   const pullBtn = document.getElementById('cloud-pull-btn');
   const recoveryBtn = document.getElementById('cloud-recovery-btn');
+  const resetBtn = document.getElementById('cloud-reset-btn');
+  const adoptBtn = document.getElementById('cloud-adopt-btn');
   if (!authEl) return; // Data tab not yet rendered
 
   if (!cloudAvailable) {
     authEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Cloud sync unavailable (couldn\'t reach Firebase).</div>';
-    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true;
+    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true; resetBtn.disabled = true; adoptBtn.disabled = true;
     return;
   }
   if (cloudUser) {
@@ -2855,10 +2911,10 @@ function renderCloudAuthUI() {
       '<span style="font-size:13px;color:var(--text-secondary)">Signed in as ' + esc(cloudUser.email || cloudUser.displayName || 'unknown') + '</span>' +
       '<button class="ghost btn-sm" onclick="cloudSignOut()">Sign out</button>' +
       '</div>';
-    uploadBtn.disabled = false; pullBtn.disabled = false; recoveryBtn.disabled = false;
+    uploadBtn.disabled = false; pullBtn.disabled = false; recoveryBtn.disabled = false; resetBtn.disabled = false; adoptBtn.disabled = false;
   } else {
     authEl.innerHTML = '<button onclick="cloudSignIn()">Sign in with Google</button>';
-    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true;
+    uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true; resetBtn.disabled = true; adoptBtn.disabled = true;
   }
   renderCloudSyncTimes();
 }
@@ -2895,22 +2951,40 @@ function cloudSignOut() {
 // cursors (state.settings.lastUploaded*) — otherwise every upload would re-write the
 // entire history's worth of documents instead of just what's new, which both costs
 // more (Firestore bills per write) and isn't necessary now that writes are idempotent.
-async function uploadToFirestore() {
-  if (!cloudAvailable || !cloudUser) return;
+// Pass { full: true } to RESEED Firestore from this device's complete local state,
+// rather than pushing whatever's merely new — used only by resetSharedBaseline() to
+// reseed a just-wiped Firestore. This is not simply "push everything with the cursor
+// filters disabled": Firestore item docs normally never carry ratings (elo/wins/losses
+// live only in local state, kept current by replaying matches — see "Cloud sync" in
+// ARCHITECTURE.md), but a full push deliberately bakes ratings directly into each item
+// doc and pushes an EMPTY matchLog instead of the real one. Every match's effect is
+// already reflected in those baked-in ratings by the time a reset reaches this point
+// (the full pull that precedes wipeFirestoreCollections() already ran applyNewMatches()
+// for all of them), so replaying the full historical log into a freshly wiped Firestore
+// would just make it grow right back to its pre-reset size for no benefit — the whole
+// point of a reset is to actually bound that growth. Returns true/false so callers can
+// tell whether it actually completed.
+async function uploadToFirestore(opts) {
+  const full = !!(opts && opts.full);
+  if (!cloudAvailable || !cloudUser) return false;
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
 
-    const itemsToPush = Object.values(state.items).filter(i => (i.updatedAt || 0) > (state.settings.lastUploadedItemsAt || 0));
+    const itemsToPush = full ? Object.values(state.items) :
+      Object.values(state.items).filter(i => (i.updatedAt || 0) > (state.settings.lastUploadedItemsAt || 0));
 
-    // Only this device's own matches — matches pulled in from elsewhere already came
-    // from Firestore, they don't need pushing back.
+    // A full push writes zero match docs — every match's effect is already baked into
+    // itemsToPush's ratings above, so there's nothing left to replay. See this
+    // function's top comment for why this is the actual compaction, not the
+    // uncompacted-history behavior an earlier version of this feature shipped with.
     const devicePrefix = state.settings.deviceId + '-';
-    const matchesToPush = state.matchLog.filter(m => m.id.startsWith(devicePrefix) && m.seq > (state.settings.lastUploadedSeq || 0));
+    const matchesToPush = full ? [] :
+      state.matchLog.filter(m => m.id.startsWith(devicePrefix) && m.seq > (state.settings.lastUploadedSeq || 0));
 
-    const deletesToPush = state.itemDeletes.filter(t => t.ts > (state.settings.lastUploadedDeletesAt || 0));
-    const undeletesToPush = state.itemUndeletes.filter(t => t.ts > (state.settings.lastUploadedUndeletesAt || 0));
-    const catDeletesToPush = state.catDeletes.filter(t => t.ts > (state.settings.lastUploadedCatDeletesAt || 0));
-    const catUndeletesToPush = state.catUndeletes.filter(t => t.ts > (state.settings.lastUploadedCatUndeletesAt || 0));
+    const deletesToPush = full ? state.itemDeletes : state.itemDeletes.filter(t => t.ts > (state.settings.lastUploadedDeletesAt || 0));
+    const undeletesToPush = full ? state.itemUndeletes : state.itemUndeletes.filter(t => t.ts > (state.settings.lastUploadedUndeletesAt || 0));
+    const catDeletesToPush = full ? state.catDeletes : state.catDeletes.filter(t => t.ts > (state.settings.lastUploadedCatDeletesAt || 0));
+    const catUndeletesToPush = full ? state.catUndeletes : state.catUndeletes.filter(t => t.ts > (state.settings.lastUploadedCatUndeletesAt || 0));
 
     // Firestore hard-caps a single batch at 500 writes — collect every doc write as a
     // [ref, data] pair first, then commit in chunks, instead of one unconditional
@@ -2920,6 +2994,13 @@ async function uploadToFirestore() {
     const writes = [];
     itemsToPush.forEach(i => writes.push([sharedRef.collection('items').doc(i.id), {
       cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt,
+      // Only a full/reseed push bakes ratings into the item doc — see this function's
+      // top comment. pullFromFirestore() reads these back as elo/wins/losses on the
+      // incoming item, and unionItemsAndSchema() already treats any incoming item
+      // carrying a real elo as "freshly seeded" (previously only true for file
+      // imports) — exactly the mechanism that lets a device with no local copy adopt
+      // the baked-in rating directly, with no matches left to replay.
+      ...(full ? { elo: i.elo, wins: i.wins, losses: i.losses } : {}),
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
@@ -2968,7 +3049,17 @@ async function uploadToFirestore() {
     }, { merge: true });
 
     if (itemsToPush.length) state.settings.lastUploadedItemsAt = Math.max(...itemsToPush.map(i => i.updatedAt));
-    if (matchesToPush.length) state.settings.lastUploadedSeq = Math.max(...matchesToPush.map(m => m.seq));
+    // A full push writes zero match docs (matchesToPush is always [] — see above), but
+    // this device's own matches are still fully "accounted for": their effect is baked
+    // into the item ratings just pushed, so the cursor must advance as if they'd been
+    // pushed individually. Skipping this would leave lastUploadedSeq wherever
+    // resetSharedBaseline() reset it to (0) — the next ordinary (non-full) Upload from
+    // this same device would then try to push this device's ENTIRE pre-reset match
+    // history back into the now-compacted Firestore, undoing the compaction and
+    // double-counting on any device that later pulls it (their copy of these items
+    // already reflects that history from the reseed's baked-in ratings).
+    const ownMatches = (full ? state.matchLog : matchesToPush).filter(m => m.id.startsWith(devicePrefix));
+    if (ownMatches.length) state.settings.lastUploadedSeq = Math.max(...ownMatches.map(m => m.seq));
     if (deletesToPush.length) state.settings.lastUploadedDeletesAt = Math.max(...deletesToPush.map(t => t.ts));
     if (undeletesToPush.length) state.settings.lastUploadedUndeletesAt = Math.max(...undeletesToPush.map(t => t.ts));
     if (catDeletesToPush.length) state.settings.lastUploadedCatDeletesAt = Math.max(...catDeletesToPush.map(t => t.ts));
@@ -2979,8 +3070,10 @@ async function uploadToFirestore() {
     renderCloudSyncTimes();
     renderSyncStatus();
     toast('Uploaded ' + itemsToPush.length + ' item(s), ' + matchesToPush.length + ' comparison(s), ' + deletesToPush.length + ' deletion(s)');
+    return true;
   } catch (e) {
     toast(cloudErrorMessage(e));
+    return false;
   }
 }
 
@@ -2996,7 +3089,11 @@ async function pullFromFirestore(opts) {
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
     const rootDoc = await sharedRef.get();
-    if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return false; }
+    // An empty cloud is a valid, successful pull outcome (zero facts to merge) — not a
+    // failure. This matters for resetSharedBaseline(): if it's retried after wiping
+    // Firestore but before finishing the reseed upload, the root doc genuinely won't
+    // exist yet, and that must not be mistaken for an error that aborts the retry.
+    if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return true; }
     const rootData = rootDoc.data();
 
     const cursor = (!full && state.lastSyncedServerTs) ? firebase.firestore.Timestamp.fromMillis(state.lastSyncedServerTs) : null;
@@ -3016,7 +3113,12 @@ async function pullFromFirestore(opts) {
     let maxSynced = state.lastSyncedServerTs || 0;
     itemsSnap.forEach(doc => {
       const d = doc.data();
-      incoming.items[doc.id] = { id: doc.id, cat: d.cat, title: d.title, fields: d.fields, updatedAt: d.updatedAt };
+      // elo/wins/losses are undefined on an ordinary item doc (Firestore normally never
+      // stores ratings) and only present after a resetSharedBaseline() reseed, which
+      // deliberately bakes them in — see uploadToFirestore(opts)'s top comment.
+      // unionItemsAndSchema() already treats any incoming item with a real elo as
+      // "freshly seeded," so this flows through with no other change needed.
+      incoming.items[doc.id] = { id: doc.id, cat: d.cat, title: d.title, fields: d.fields, updatedAt: d.updatedAt, elo: d.elo, wins: d.wins, losses: d.losses };
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
     matchesSnap.forEach(doc => {
@@ -3045,7 +3147,7 @@ async function pullFromFirestore(opts) {
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
 
-    mergeImport(incoming);
+    mergeImport(incoming, { cloudOrigin: true });
     // A full re-pull only ever advances the cursor, never rewinds it — a full pull
     // triggered while this device is already partway ahead (e.g. it uploaded locally-made
     // matches after its last pull) must not reset lastSyncedServerTs backward, which
@@ -3092,6 +3194,120 @@ async function exportRecoveryBaseline() {
   payload._meta.matchLogCompacted = true;
   downloadJson(payload, 'ranker.json');
   toast('Recovery baseline exported — import into a freshly cleared device on every machine');
+}
+
+// Deletes every document in one Firestore collection, chunked at the same 500-writes-
+// per-batch limit uploadToFirestore() already works around — a collection can hold
+// thousands of docs by the time a reset like this is actually needed.
+async function deleteAllDocs(collectionRef) {
+  const snap = await collectionRef.get();
+  const BATCH_LIMIT = 500;
+  for (let i = 0; i < snap.docs.length; i += BATCH_LIMIT) {
+    const batch = cloudDb.batch();
+    snap.docs.slice(i, i + BATCH_LIMIT).forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+// Permanently deletes every doc this app has ever written to Firestore — the root doc
+// and all six subcollections. Only ever called from resetSharedBaseline(), as the step
+// between "absorb everything Firestore currently has" and "reseed it from this device's
+// now-complete state" — never exposed as its own button, since wiping without an
+// immediate reseed would leave every other device's next Upload/Pull hitting an empty
+// cloud with no explanation.
+async function wipeFirestoreCollections() {
+  const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
+  const subcollections = ['items', 'matches', 'itemDeletes', 'itemUndeletes', 'catDeletes', 'catUndeletes'];
+  for (const name of subcollections) {
+    await deleteAllDocs(sharedRef.collection(name));
+  }
+  await sharedRef.delete();
+}
+
+// One-button version of the manual "Resetting the shared baseline" runbook in
+// ARCHITECTURE.md: run this on whichever device's data you trust most right now (User
+// A). Absorbs everything Firestore currently has, saves an offline backup as a safety
+// net, wipes every Firestore doc, then reseeds Firestore from this device's own
+// now-complete state — via uploadToFirestore({ full: true }), which bakes ratings
+// directly into item docs and pushes an EMPTY matchLog, actually bounding Firestore's
+// growth back down (see that function's top comment for why this isn't simply "push
+// everything"). The offline backup file uses the same compaction, for the same reason.
+// Every step after the confirm() is written to be safely re-runnable: if it's
+// interrupted partway (network drop mid-wipe or mid-reseed), calling this again from
+// the same device picks up wherever it left off rather than corrupting anything further.
+async function resetSharedBaseline() {
+  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first'); return; }
+  if (!confirm(
+    "This permanently deletes ALL shared ranking data in the cloud and replaces it with " +
+    "this device's current rankings (after pulling in anything else the cloud still has). " +
+    'Every OTHER device must then use "Adopt fresh baseline" (Data tab) to pick up the ' +
+    "reset — until they do, their next Upload/Pull will be working against cloud history " +
+    "that no longer matches what they last saw.\n\n" +
+    "Only run this on the device whose data you trust most right now.\n\nContinue?"
+  )) return;
+
+  toast('Pulling everything from the cloud first…');
+  if (!(await pullFromFirestore({ full: true }))) { toast('Reset aborted — pull failed, nothing was touched'); return; }
+
+  // Offline safety net in case a step below fails partway — same compacted shape as
+  // exportRecoveryBaseline(), just saved here rather than being the thing other devices
+  // actually adopt.
+  const backup = buildExportPayload();
+  backup.matchLog = [];
+  backup._meta.matchLogCompacted = true;
+  downloadJson(backup, 'ranker-pre-reset-backup.json');
+
+  toast('Wiping cloud data…');
+  try {
+    await wipeFirestoreCollections();
+  } catch (e) {
+    toast('Reset aborted while wiping (' + cloudErrorMessage(e) + ') — a backup was downloaded; run "Reset shared baseline" again to retry');
+    return;
+  }
+
+  // Firestore is now empty — this device's own upload cursors have to be reset too, or
+  // the reseed below would think some of this data was already pushed (against the
+  // Firestore that no longer exists) and skip it, silently reseeding an incomplete
+  // history.
+  state.settings.lastUploadedItemsAt = 0;
+  state.settings.lastUploadedSeq = 0;
+  state.settings.lastUploadedDeletesAt = 0;
+  state.settings.lastUploadedUndeletesAt = 0;
+  state.settings.lastUploadedCatDeletesAt = 0;
+  state.settings.lastUploadedCatUndeletesAt = 0;
+  state.lastSyncedServerTs = null;
+  save();
+
+  toast('Reseeding cloud from this device…');
+  if (!(await uploadToFirestore({ full: true }))) {
+    toast('Cloud was wiped but reseeding failed — run "Reset shared baseline" again to retry (safe to repeat)');
+    return;
+  }
+
+  toast('Baseline reset complete — have every other device run "Adopt fresh baseline" now');
+}
+
+// The "pick up a reset baseline" counterpart to resetSharedBaseline(), for every device
+// OTHER than the one that ran it. Clears this device's local state, then pulls the
+// freshly reseeded Firestore straight in — no file needs to be passed between devices
+// for this to work. Clearing first is not just cleanliness here: resetSharedBaseline()'s
+// reseed bakes ratings into item docs specifically so a device with NO local copy of an
+// item adopts them directly (unionItemsAndSchema()'s "!cur" branch) — an item this
+// device already has locally never adopts an incoming rating, and with the reseed
+// pushing zero matches there's no delta left to apply either. A plain "Pull rankings"
+// on a non-cleared device after a reset would silently keep this device's old (possibly
+// stale) ratings for every overlapping item instead of adopting the reset ones. Uses
+// clearAllDataCore() rather than clearAllData() so this function's own confirm()
+// (specific to this scenario) is the only one shown.
+async function adoptFreshBaseline() {
+  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first'); return; }
+  if (!confirm(
+    "This clears everything on this device and replaces it with whatever's currently in " +
+    'the cloud. Only do this after another device has run "Reset shared baseline" — ' +
+    "otherwise you're just deleting this device's local data for nothing.\n\nContinue?"
+  )) return;
+  clearAllDataCore();
+  await pullFromFirestore();
 }
 
 function cloudErrorMessage(e) {
