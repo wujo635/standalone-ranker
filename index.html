@@ -786,10 +786,20 @@ function identitySuffixFor(cat, fields) {
 // never collide when unioned during a merge.
 function makeDeviceId() { return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Every toast also logs to the console, so a message that faded before you finished
+// reading it (or a rapid sequence — e.g. resetSharedBaseline()'s several status
+// toasts in a row) is still recoverable via the browser console's scrollback.
+let toastTimer = null;
 function toast(msg) {
+  console.log('[toast]', msg);
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2200);
+  // Clearing any previous toast's pending hide-timer (not just starting a new one)
+  // matters for a rapid sequence: without this, an earlier toast's timer could fire
+  // and hide the *current* message early, cutting its on-screen time well below the
+  // intended duration.
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
 }
 function schemaFor(cat) {
   const s = state.schema[cat];
