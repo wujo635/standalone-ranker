@@ -396,7 +396,7 @@
       <div class="card-desc">For when sync has gotten confused and needs a clean restart. Anything only ever ranked on <em>another</em> device that was never uploaded from there can't be recovered by any of these — they're only as complete as Firestore itself is.</div>
       <div style="margin-top:.8rem">
         <div style="font-weight:600;font-size:13px">On the device you trust most right now</div>
-        <div class="card-desc" style="margin-top:.2rem">"Reset shared baseline" pulls in everything Firestore has, wipes the cloud, then reseeds it from this device's own (now complete) rankings — fully automatic, no Firebase console access or file-passing needed. The reseed bakes final ratings into each item and starts the match history over from zero, so this also resets Firestore's history size back down instead of carrying the full log forward. Every other device must then click "Adopt fresh baseline" below.</div>
+        <div class="card-desc" style="margin-top:.2rem">"Reset shared baseline" pulls in everything Firestore has, wipes the cloud, then reseeds it from this device's own (now complete) rankings — fully automatic, no Firebase console access or file-passing needed. The reseed bakes final ratings into each item and starts the match history over from zero, so this also resets Firestore's history size back down instead of carrying the full log forward. <strong>Past deletions are forgotten too</strong> — a reset means starting over completely; if a stale device that missed a deletion uploads that item again afterward, it comes back as a normal item instead of being blocked. Every other device must then click "Adopt fresh baseline" below.</div>
         <button onclick="resetSharedBaseline()" id="cloud-reset-btn" style="margin-top:.4rem">&#9888; Reset shared baseline</button>
       </div>
       <div style="margin-top:1rem">
@@ -406,7 +406,7 @@
       </div>
       <div style="margin-top:1rem">
         <div style="font-weight:600;font-size:13px">Manual / offline fallback</div>
-        <div class="card-desc" style="margin-top:.2rem">Same full pull as "Reset shared baseline," but only downloads a JSON file — doesn't touch the cloud. Its match-by-match history is compacted into each item's final rating, so <strong>only import it into a freshly cleared device</strong> (Data tab → Clear all data first) — merging it onto a library that still has some of these items would silently skip their ranking updates.</div>
+        <div class="card-desc" style="margin-top:.2rem">Same full pull as "Reset shared baseline," but only downloads a JSON file — doesn't touch the cloud. Its match-by-match history is compacted into each item's final rating and past deletions are dropped, so <strong>only import it into a freshly cleared device</strong> (Data tab → Clear all data first) — merging it onto a library that still has some of these items would silently skip their ranking updates and not re-apply any deletions.</div>
         <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
       </div>
     </div>
@@ -470,7 +470,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.10.0';
+const APP_VERSION = '2.11.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2812,19 +2812,24 @@ function importData(e) {
     try {
       const d = JSON.parse(ev.target.result);
       // A recovery baseline (see exportRecoveryBaseline()) has its matchLog compacted
-      // away to keep file size down — its items' ratings are only trustworthy as a
-      // COMPLETE replacement for an empty library, not as an update merged onto one that
-      // already has some of these items: unionItemsAndSchema() only ever adopts an
-      // incoming rating for an item the receiving device has no copy of at all, and with
-      // no matchLog there's no delta left to apply either, so any overlapping item would
-      // silently keep its old rating instead of picking up whatever changed upstream.
+      // away to keep file size down, and its tombstones dropped entirely (a reset means
+      // past deletions are no longer remembered going forward — see
+      // resetSharedBaseline()) — its items' ratings are only trustworthy as a COMPLETE
+      // replacement for an empty library, not as an update merged onto one that already
+      // has some of these items: unionItemsAndSchema() only ever adopts an incoming
+      // rating for an item the receiving device has no copy of at all, and with no
+      // matchLog there's no delta left to apply either, so any overlapping item would
+      // silently keep its old rating instead of picking up whatever changed upstream —
+      // and with no tombstones, an item this device already knows was deleted won't get
+      // re-deleted by this import either.
       if (d._meta && d._meta.matchLogCompacted && Object.keys(state.items).length > 0) {
         const proceed = confirm(
           "This file is a compacted recovery baseline — its match-by-match history was " +
-          "collapsed into final ratings to keep the file small. Importing it into a library " +
-          "that already has items can silently lose ranking updates for anything that " +
-          "already exists here (there's no per-match history left to apply, and existing " +
-          "items don't adopt an incoming rating directly).\n\n" +
+          "collapsed into final ratings and past deletions were dropped, to keep the file " +
+          "small and start clean. Importing it into a library that already has items can " +
+          "silently lose ranking updates for anything that already exists here (there's no " +
+          "per-match history left to apply, and existing items don't adopt an incoming " +
+          "rating directly), and won't re-apply any deletions either.\n\n" +
           "Only continue if this device was just cleared (Data tab → Clear all data) " +
           "before this import.\n\nContinue anyway?"
         );
@@ -3205,8 +3210,20 @@ async function exportRecoveryBaseline() {
   // this into a non-empty library would silently skip ranking updates for anything that
   // already exists there. importData() warns before merging a compacted file into a
   // non-empty library, using the _meta.matchLogCompacted flag set below.
+  //
+  // Tombstones (itemDeletes/itemUndeletes/catDeletes/catUndeletes) are dropped from the
+  // file for the same "start over completely" reason resetSharedBaseline() drops them
+  // from Firestore itself: a reset means past deletions are no longer this app's
+  // problem to remember going forward — deliberate, not an oversight (a resurrected
+  // item can just be re-deleted if it happens to reappear via some stale device
+  // uploading it later). Only the file is affected here, not this device's own live
+  // state — exportRecoveryBaseline() never mutates local data, only what gets exported.
   const payload = buildExportPayload();
   payload.matchLog = [];
+  payload.itemDeletes = [];
+  payload.itemUndeletes = [];
+  payload.catDeletes = [];
+  payload.catUndeletes = [];
   payload._meta.matchLogCompacted = true;
   downloadJson(payload, 'ranker.json');
   toast('Recovery baseline exported — import into a freshly cleared device on every machine');
@@ -3256,6 +3273,9 @@ async function resetSharedBaseline() {
   if (!confirm(
     "This permanently deletes ALL shared ranking data in the cloud and replaces it with " +
     "this device's current rankings (after pulling in anything else the cloud still has). " +
+    "Past deletions are forgotten too — if a stale device that never picked up a deletion " +
+    "uploads that item again after this, it comes back as a normal item, not blocked. If " +
+    "something matters, re-add it manually afterward rather than relying on this.\n\n" +
     'Every OTHER device must then use "Adopt fresh baseline" (Data tab) to pick up the ' +
     "reset — until they do, their next Upload/Pull will be working against cloud history " +
     "that no longer matches what they last saw.\n\n" +
@@ -3264,6 +3284,19 @@ async function resetSharedBaseline() {
 
   toast('Pulling everything from the cloud first…');
   if (!(await pullFromFirestore({ full: true }))) { toast('Reset aborted — pull failed, nothing was touched'); return; }
+
+  // A reset means starting over completely, deletions included — a deleted item and its
+  // tombstone are no longer relevant once this device's current state becomes the new
+  // baseline (deliberate design choice: if it still matters, it gets manually re-added,
+  // not resurrected via lingering tombstone bookkeeping). Cleared on the live local
+  // state too, not just what gets pushed below, so this device's own future uploads
+  // don't carry the old tombstones back in either. Tombstones don't block anything
+  // already absent from state.items — items were removed at delete time, independent of
+  // the tombstone list — so clearing this can't resurrect anything on THIS device.
+  state.itemDeletes = [];
+  state.itemUndeletes = [];
+  state.catDeletes = [];
+  state.catUndeletes = [];
 
   // Offline safety net in case a step below fails partway — same compacted shape as
   // exportRecoveryBaseline(), just saved here rather than being the thing other devices
