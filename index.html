@@ -383,29 +383,31 @@
       <div class="card-title">Cloud sync</div>
       <div class="card-desc">Upload/pull your rankings through Firestore instead of passing files by hand. Upload pushes whatever's new on this device; Pull fetches whatever's new from the cloud and merges it in — either can run in any order, any time.</div>
       <div id="cloud-auth"></div>
-      <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:.6rem">
-        <button onclick="uploadToFirestore()" id="cloud-upload-btn" disabled>&#8593; Upload rankings</button>
-        <button onclick="pullFromFirestore()" id="cloud-pull-btn" disabled>&#8595; Pull rankings</button>
+      <div id="cloud-sync-actions" hidden>
+        <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:.6rem">
+          <button onclick="uploadToFirestore()" id="cloud-upload-btn">&#8593; Upload rankings</button>
+          <button onclick="pullFromFirestore()" id="cloud-pull-btn">&#8595; Pull rankings</button>
+        </div>
+        <div id="cloud-sync-times" style="margin-top:.6rem"></div>
       </div>
-      <div id="cloud-sync-times" style="margin-top:.6rem"></div>
     </div>
-    <div class="card">
+    <div class="card" id="baseline-recovery-card" hidden>
       <div class="card-title">Baseline recovery</div>
       <div class="card-desc">For when sync has gotten confused and needs a clean restart. Anything only ever ranked on <em>another</em> device that was never uploaded from there can't be recovered by any of these — they're only as complete as Firestore itself is.</div>
       <div style="margin-top:.8rem">
         <div style="font-weight:600;font-size:13px">On the device you trust most right now</div>
         <div class="card-desc" style="margin-top:.2rem">"Reset shared baseline" pulls in everything Firestore has, wipes the cloud, then reseeds it from this device's own (now complete) rankings — fully automatic, no Firebase console access or file-passing needed. The reseed bakes final ratings into each item and starts the match history over from zero, so this also resets Firestore's history size back down instead of carrying the full log forward. Every other device must then click "Adopt fresh baseline" below.</div>
-        <button onclick="resetSharedBaseline()" id="cloud-reset-btn" disabled style="margin-top:.4rem">&#9888; Reset shared baseline</button>
+        <button onclick="resetSharedBaseline()" id="cloud-reset-btn" style="margin-top:.4rem">&#9888; Reset shared baseline</button>
       </div>
       <div style="margin-top:1rem">
         <div style="font-weight:600;font-size:13px">On every other device, after someone resets the baseline</div>
         <div class="card-desc" style="margin-top:.2rem">Clears this device and pulls the freshly reseeded cloud straight in. Use this, not a plain Pull — an un-cleared device would silently keep its own old ratings for anything it already has instead of adopting the reset ones.</div>
-        <button onclick="adoptFreshBaseline()" id="cloud-adopt-btn" disabled style="margin-top:.4rem">&#8595; Adopt fresh baseline</button>
+        <button onclick="adoptFreshBaseline()" id="cloud-adopt-btn" style="margin-top:.4rem">&#8595; Adopt fresh baseline</button>
       </div>
       <div style="margin-top:1rem">
         <div style="font-weight:600;font-size:13px">Manual / offline fallback</div>
         <div class="card-desc" style="margin-top:.2rem">Same full pull as "Reset shared baseline," but only downloads a JSON file — doesn't touch the cloud. Its match-by-match history is compacted into each item's final rating, so <strong>only import it into a freshly cleared device</strong> (Data tab → Clear all data first) — merging it onto a library that still has some of these items would silently skip their ranking updates.</div>
-        <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" disabled style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
+        <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
       </div>
     </div>
     <div class="card">
@@ -468,7 +470,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.10.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2892,8 +2894,19 @@ try {
 }
 renderCloudAuthUI(); // shows "unavailable" state immediately if init failed above; onAuthStateChanged re-renders once real auth state is known
 
+// Every action below requires a signed-in, allowlisted Google account to do anything
+// (each of uploadToFirestore()/pullFromFirestore()/resetSharedBaseline()/
+// adoptFreshBaseline()/exportRecoveryBaseline() bails immediately without one) — so
+// rather than just disabling their buttons, the containers holding them (Upload/Pull's
+// `cloud-sync-actions` and the entire `baseline-recovery-card`) stay hidden until
+// cloudUser is set. A signed-out user sees only "Sign in with Google," not a wall of
+// buttons and paragraphs describing features they can't use yet. `disabled` is kept in
+// the two auth-gate branches too, as a harmless second layer in case anything ever
+// un-hides these without going through this function.
 function renderCloudAuthUI() {
   const authEl = document.getElementById('cloud-auth');
+  const actionsEl = document.getElementById('cloud-sync-actions');
+  const baselineCard = document.getElementById('baseline-recovery-card');
   const uploadBtn = document.getElementById('cloud-upload-btn');
   const pullBtn = document.getElementById('cloud-pull-btn');
   const recoveryBtn = document.getElementById('cloud-recovery-btn');
@@ -2903,6 +2916,7 @@ function renderCloudAuthUI() {
 
   if (!cloudAvailable) {
     authEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Cloud sync unavailable (couldn\'t reach Firebase).</div>';
+    actionsEl.hidden = true; baselineCard.hidden = true;
     uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true; resetBtn.disabled = true; adoptBtn.disabled = true;
     return;
   }
@@ -2911,9 +2925,11 @@ function renderCloudAuthUI() {
       '<span style="font-size:13px;color:var(--text-secondary)">Signed in as ' + esc(cloudUser.email || cloudUser.displayName || 'unknown') + '</span>' +
       '<button class="ghost btn-sm" onclick="cloudSignOut()">Sign out</button>' +
       '</div>';
+    actionsEl.hidden = false; baselineCard.hidden = false;
     uploadBtn.disabled = false; pullBtn.disabled = false; recoveryBtn.disabled = false; resetBtn.disabled = false; adoptBtn.disabled = false;
   } else {
     authEl.innerHTML = '<button onclick="cloudSignIn()">Sign in with Google</button>';
+    actionsEl.hidden = true; baselineCard.hidden = true;
     uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true; resetBtn.disabled = true; adoptBtn.disabled = true;
   }
   renderCloudSyncTimes();
