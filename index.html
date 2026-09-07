@@ -381,7 +381,7 @@
     </div>
     <div class="card">
       <div class="card-title">Cloud sync</div>
-      <div class="card-desc">Upload/pull your rankings through Firestore instead of passing files by hand. Upload pushes whatever's new on this device; Pull fetches whatever's new from the cloud and merges it in — either can run in any order, any time.</div>
+      <div class="card-desc">Upload/pull your rankings through Firestore instead of passing files by hand. Upload pushes whatever's new on this device; Pull fetches whatever's new from the cloud and merges it in — either can run in any order, any time, unless the shared baseline was reset since this device last synced (Upload will refuse and tell you to Adopt fresh baseline first).</div>
       <div id="cloud-auth"></div>
       <div id="cloud-sync-actions" hidden>
         <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:.6rem">
@@ -470,7 +470,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.11.0';
+const APP_VERSION = '2.12.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -541,10 +541,17 @@ function freshState() {
     // history entries. See ARCHITECTURE.md.
     // lastUploaded* are per-device cursors so uploadToFirestore() only pushes what this
     // device hasn't already pushed, instead of re-writing the whole history every time.
+    // knownBaselineId is the last Firestore root-doc baselineId this device has actually
+    // seen (via a pull, or by being the device that just reset) — null until either
+    // happens. resetSharedBaseline() stamps a fresh baselineId on every reseed;
+    // uploadToFirestore() refuses an ordinary (non-reseed) push whose knownBaselineId
+    // doesn't match Firestore's current one, so a device that missed a reset can't
+    // blindly push stale pre-reset data onto the new baseline. See "Cloud sync" in
+    // ARCHITECTURE.md.
     settings: {
       smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0,
       lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0, lastUploadedUndeletesAt: 0,
-      lastUploadedCatDeletesAt: 0, lastUploadedCatUndeletesAt: 0
+      lastUploadedCatDeletesAt: 0, lastUploadedCatUndeletesAt: 0, knownBaselineId: null
     },
     history: [],
     matchLog: [],
@@ -699,6 +706,7 @@ function migrateData(data) {
   if (data.settings.lastUploadedUndeletesAt === undefined) data.settings.lastUploadedUndeletesAt = 0;
   if (data.settings.lastUploadedCatDeletesAt === undefined) data.settings.lastUploadedCatDeletesAt = 0;
   if (data.settings.lastUploadedCatUndeletesAt === undefined) data.settings.lastUploadedCatUndeletesAt = 0;
+  if (data.settings.knownBaselineId === undefined) data.settings.knownBaselineId = null;
 
   // Always stamp _meta so future loads know the current schema version
   data._meta = {
@@ -2991,6 +2999,25 @@ async function uploadToFirestore(opts) {
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
 
+    // Guard: an ordinary (non-reseed) upload must not push onto a baseline this device
+    // hasn't actually seen. If resetSharedBaseline() ran elsewhere since this device
+    // last synced, pushing blind risks resurrecting a tombstoned item (tombstones are
+    // dropped on reset — see resetSharedBaseline()) or mixing this device's pre-reset
+    // ratings into the fresh baseline. A full push is exempt: it's how a NEW baseline
+    // gets established in the first place, so there's nothing yet to match against.
+    // remoteBaselineId is undefined on any root doc that predates this guard or on a
+    // Firestore that's never been reset — the check only ever activates once a real
+    // reset has actually happened, so day-to-day sync for an app that's never used
+    // this feature is completely unaffected.
+    if (!full) {
+      const preCheckDoc = await sharedRef.get();
+      const remoteBaselineId = preCheckDoc.exists ? preCheckDoc.data().baselineId : undefined;
+      if (remoteBaselineId && remoteBaselineId !== state.settings.knownBaselineId) {
+        toast('The shared baseline was reset since this device last synced — run "Adopt fresh baseline" (Data tab) first, or you risk pushing stale or already-deleted data back in.');
+        return false;
+      }
+    }
+
     const itemsToPush = full ? Object.values(state.items) :
       Object.values(state.items).filter(i => (i.updatedAt || 0) > (state.settings.lastUploadedItemsAt || 0));
 
@@ -3063,11 +3090,19 @@ async function uploadToFirestore(opts) {
     // Root doc stays a small blob for cats/schema — low-churn enough that a plain
     // merge-write on every upload is fine, no per-field conflict handling needed.
     // Always its own single-write commit, independent of how many chunks preceded it.
-    await sharedRef.set({
+    // A full push also stamps a brand-new baselineId, establishing this reseed as the
+    // baseline every other device must match before its own next ordinary upload (see
+    // the guard above) — omitted entirely on an ordinary upload so the merge-write
+    // leaves whatever baselineId is already there untouched.
+    const newBaselineId = full ? uid() : undefined;
+    const rootWrite = {
       cats: state.cats, schema: state.schema,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: cloudUser.email || cloudUser.uid
-    }, { merge: true });
+    };
+    if (full) rootWrite.baselineId = newBaselineId;
+    await sharedRef.set(rootWrite, { merge: true });
+    if (full) state.settings.knownBaselineId = newBaselineId;
 
     if (itemsToPush.length) state.settings.lastUploadedItemsAt = Math.max(...itemsToPush.map(i => i.updatedAt));
     // A full push writes zero match docs (matchesToPush is always [] — see above), but
@@ -3116,6 +3151,12 @@ async function pullFromFirestore(opts) {
     // exist yet, and that must not be mistaken for an error that aborts the retry.
     if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return true; }
     const rootData = rootDoc.data();
+    // Record whatever baseline this device has now actually seen — this is how the
+    // uploadToFirestore() guard above learns a device is caught up after a reset (via
+    // adoptFreshBaseline()'s pull, or any ordinary Pull). Undefined on a root doc from
+    // before this guard existed, or one that's never been reset — same as never
+    // setting it, the guard only ever activates once a real reset has happened.
+    state.settings.knownBaselineId = rootData.baselineId || null;
 
     const cursor = (!full && state.lastSyncedServerTs) ? firebase.firestore.Timestamp.fromMillis(state.lastSyncedServerTs) : null;
     const itemsQ = cursor ? sharedRef.collection('items').where('syncedAt', '>', cursor) : sharedRef.collection('items');
