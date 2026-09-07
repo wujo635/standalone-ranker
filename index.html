@@ -470,7 +470,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.12.0';
+const APP_VERSION = '2.13.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3396,8 +3396,23 @@ async function adoptFreshBaseline() {
     'the cloud. Only do this after another device has run "Reset shared baseline" — ' +
     "otherwise you're just deleting this device's local data for nothing.\n\nContinue?"
   )) return;
+  // hidden is a personal, per-browser preference that has never traveled through any
+  // sync transport (see itemsWithoutHidden(), 1.13.1) — clearAllDataCore() below wipes
+  // it along with everything else, and the freshly-pulled items were never going to
+  // bring it back regardless. Snapshotting this device's own hidden ids first and
+  // reapplying them afterward (matched by id — an item whose id changed, e.g. a rename,
+  // is treated as a different item everywhere else in this app and is no exception
+  // here) preserves this device's own viewing preferences across the wipe without
+  // touching how hidden is synced (it still isn't, anywhere).
+  const hiddenIds = Object.values(state.items).filter(i => i.hidden).map(i => i.id);
   clearAllDataCore();
   await pullFromFirestore();
+  const restored = hiddenIds.filter(id => state.items[id]);
+  if (restored.length) {
+    restored.forEach(id => { state.items[id].hidden = true; });
+    save(); renderLibrary();
+    toast('Adopted baseline — restored ' + restored.length + ' hidden item' + (restored.length !== 1 ? 's' : ''));
+  }
 }
 
 function cloudErrorMessage(e) {
