@@ -470,7 +470,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.12.0';
+const APP_VERSION = '2.13.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -515,7 +515,8 @@ const CAT_DEFAULTS = {
       { name: 'Artist', required: true },
       { name: 'Album', required: false },
       { name: 'Year', required: false },
-      { name: 'Language', required: false }
+      { name: 'Language', required: false },
+      { name: 'Genre', required: false, multi: true }
     ]
   }
 };
@@ -866,6 +867,14 @@ function inferFieldType(cat, fieldName) {
   return type;
 }
 
+// A field explicitly flagged multi (e.g. Genre) always filters as 'multi' regardless
+// of its values — it never goes through inferFieldType()'s number/string sampling.
+function fieldFilterType(cat, fieldName) {
+  const field = (schemaFor(cat).fields || []).find(f => f.name === fieldName);
+  if (field?.multi) return 'multi';
+  return inferFieldType(cat, fieldName);
+}
+
 // Bug found in review: with no invalidation, a field's very first inferFieldType()
 // call (e.g. before any item existed, or with too little data yet to lean 80%
 // numeric) permanently cached the wrong type — an all-numeric field like Year could
@@ -903,6 +912,9 @@ function getFilteredItems(cat, items, filters) {
         if (filter.min !== undefined && num < filter.min) return false;
         if (filter.max !== undefined && num > filter.max) return false;
         if (filter.equals !== undefined && num !== filter.equals) return false;
+      } else if (filter.type === 'multi') {
+        const tokens = String(val).split(',').map(t => t.trim()).filter(Boolean);
+        if (!tokens.some(t => filter.values.includes(t))) return false;
       } else if (filter.type === 'string') {
         if (!filter.values.includes(String(val))) return false;
       }
@@ -989,7 +1001,7 @@ function buildFilterFieldCards(cat, fields, catFilters) {
     // Skip fields marked as non-filterable
     if (field.filterable === false) continue;
 
-    const type = inferFieldType(cat, field.name);
+    const type = fieldFilterType(cat, field.name);
     const filter = catFilters[field.name] || { type };
 
     if (!filterState[cat]) filterState[cat] = {};
@@ -1023,6 +1035,28 @@ function buildFilterFieldCards(cat, fields, catFilters) {
           </div>
         </div>
       </div>`;
+    } else if (type === 'multi') {
+      // Multi-value: unique values are individual comma-separated tokens, not raw strings
+      const items = Object.values(state.items).filter(i => i.cat === cat);
+      const uniqueVals = [...new Set(
+        items.flatMap(i => String((i.fields||{})[field.name] || '').split(',').map(t => t.trim()).filter(Boolean))
+      )];
+      uniqueVals.sort();
+      const selectedVals = filter.values || [];
+
+      html += `<div class="filter-card">
+        ${filterCardHeader(cat, field, filter)}
+        <div class="filter-values">`;
+      for (const val of uniqueVals) {
+        const isChecked = selectedVals.includes(val);
+        html += `<label class="filter-value-pill${isChecked ? ' active' : ''}">
+          <input type="checkbox" ${isChecked ? 'checked' : ''}
+            data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-value="${esc(val)}"
+            onchange="updateFilter(this)">
+          <span>${esc(val)}</span>
+        </label>`;
+      }
+      html += '</div></div>';
     } else {
       // Categorical: get unique values
       const items = Object.values(state.items).filter(i => i.cat === cat);
@@ -1053,7 +1087,7 @@ function updateFilter(el) {
   const field = el.dataset.field;
 
   if (!filterState[cat]) filterState[cat] = {};
-  if (!filterState[cat][field]) filterState[cat][field] = { type: inferFieldType(cat, field) };
+  if (!filterState[cat][field]) filterState[cat][field] = { type: fieldFilterType(cat, field) };
 
   if (el.type === 'number') {
     const op = el.dataset.op;
@@ -1204,6 +1238,9 @@ function renderEditingFields() {
       <button class="ghost btn-sm" onclick="toggleIdentity(${i})" title="Toggle identity field \u2014 part of what makes two items with the same title distinct (e.g. Year for Movies)" style="font-size:11px;padding:4px 6px">
         ${f.identity ? '\ud83d\udd11' : '\u2013'}
       </button>
+      <button class="ghost btn-sm" onclick="toggleMulti(${i})" title="Toggle multi-value \u2014 comma-separated list (e.g. Genre), filters on each value independently" style="font-size:11px;padding:4px 6px">
+        ${f.multi ? '\ud83c\udff7\ufe0f' : '\u2013'}
+      </button>
       <button class="ghost btn-sm" onclick="removeEditingField(${i})">\u2715</button>
     </div>`).join('');
 }
@@ -1218,6 +1255,9 @@ function toggleIdentity(i) {
   if (editingFields[i].identity) editingFields[i].required = true;
   renderEditingFields();
 }
+// Multi fields store a comma-separated list (see addItem()/saveItem() normalization)
+// and filter on each value independently (see fieldFilterType()/getFilteredItems()).
+function toggleMulti(i) { editingFields[i].multi = !editingFields[i].multi; renderEditingFields(); }
 function removeEditingField(i) { editingFields.splice(i,1); renderEditingFields(); }
 
 function addSchemaField() {
@@ -1379,13 +1419,23 @@ function renderAddForm() {
   const fields = extraFields(cat);
   const el = document.getElementById('add-form');
   const extraInputs = fields.map(f =>
-    `<input type="text" id="field-${esc(f.name)}" placeholder="${esc(f.name)}${f.required?' *':''}" style="flex:1;min-width:90px" onkeydown="if(event.key==='Enter')addItem()">`
+    `<input type="text" id="field-${esc(f.name)}" placeholder="${esc(f.name)}${f.multi?' (comma-separated)':''}${f.required?' *':''}" style="flex:1;min-width:90px" onkeydown="if(event.key==='Enter')addItem()">`
   ).join('');
   el.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:8px">
     <input type="text" id="inp-primary" placeholder="${esc(primary)} *" style="flex:2;min-width:140px" onkeydown="if(event.key==='Enter')addItem()">
     ${extraInputs}
     <button class="primary" onclick="addItem()">Add</button>
   </div>`;
+}
+
+// Multi fields are stored as a single comma-separated string (see fieldFilterType()/
+// getFilteredItems() for how filtering splits it back apart) — this is the single
+// place raw input gets normalized before it's saved: trimmed, emptied entries dropped,
+// duplicates collapsed.
+function normalizeFieldValue(f, rawVal) {
+  if (!f.multi) return rawVal;
+  const tokens = rawVal.split(',').map(t => t.trim()).filter(Boolean);
+  return [...new Set(tokens)].join(', ');
 }
 
 function addItem() {
@@ -1397,7 +1447,7 @@ function addItem() {
   const fieldValues = {};
   for (const f of fields) {
     const el = document.getElementById('field-' + f.name);
-    const val = el ? el.value.trim() : '';
+    const val = normalizeFieldValue(f, el ? el.value.trim() : '');
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
     fieldValues[f.name] = val;
   }
@@ -1475,13 +1525,13 @@ function saveItem(id) {
   if (!t) { toast(primary + ' is required'); document.getElementById('edit-primary-' + id).focus(); return; }
   for (const f of fields) {
     const el = document.getElementById('edit-field-' + id + '-' + f.name);
-    const val = el ? el.value.trim() : '';
+    const val = normalizeFieldValue(f, el ? el.value.trim() : '');
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
   }
   if (!item.fields) item.fields = {};
   fields.forEach(f => {
     const el = document.getElementById('edit-field-' + id + '-' + f.name);
-    if (el) item.fields[f.name] = el.value.trim();
+    if (el) item.fields[f.name] = normalizeFieldValue(f, el.value.trim());
   });
   const oldTitle = item.title;
   item.updatedAt = Date.now();
@@ -1581,7 +1631,7 @@ function renderLibrary() {
     const isEditing = expandedItemId === i.id;
     const editInputs = fields.map(f =>
       `<input type="text" id="edit-field-${i.id}-${esc(f.name)}"
-        placeholder="${esc(f.name)}${f.required?' *':''}"
+        placeholder="${esc(f.name)}${f.multi?' (comma-separated)':''}${f.required?' *':''}"
         value="${esc((i.fields||{})[f.name]||'')}"
         onkeydown="if(event.key==='Enter')saveItem('${i.id}');if(event.key==='Escape')editItem('${i.id}')">`
     ).join('');
