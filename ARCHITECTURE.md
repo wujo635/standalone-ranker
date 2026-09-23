@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.14.0` |
+| App version | `2.15.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -252,6 +252,8 @@ The "Export category as CSV" button in the Data tab produces a file in this exac
 `localStorage` key: `ranker-v1`
 
 `save()` serializes the full `state` object on every write. `load()` deserializes it on page load, applying any needed migrations. The app also checks for the legacy `media-ranker-v1` key and migrates it automatically on first load.
+
+**Write failures are loud (2.15.0).** `save()` used to swallow any `localStorage.setItem` error, so once storage filled up every later edit/vote looked saved but was gone on reload. Now a failed write logs to the console, toasts once, and sets `saveFailed`, which `renderSaveWarning()` turns into a persistent `#save-warning` banner under the header ("Changes are not being saved" plus an **Export backup now** button); the wording distinguishes a full quota (`QuotaExceededError`/`NS_ERROR_DOM_QUOTA_REACHED`) from storage being blocked. The banner clears itself on the next successful write. Separately, once the last successful write reaches `LS_WARN_RATIO` (80%) of `LS_LIMIT_CHARS` (~5.2M characters) the banner shows a softer "storage is N% full" warning, and the Data tab's Version card shows a **Browser storage used** row (highlighted past the same threshold).
 
 ### Merging rankings between devices
 
@@ -568,7 +570,9 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 |---|---|
 | `load()` | Reads localStorage, runs `migrateData()`, rebuilds selects, renders all views |
 | `migrateData(data)` | Applies all schema version migrations in sequence; called by both `load()` and `importData()` before touching state |
-| `save()` | Serializes `state` to localStorage |
+| `save()` | Serializes `state` to localStorage; on failure sets `saveFailed` and shows the save-failure banner instead of failing silently (2.15.0) |
+| `renderSaveWarning()` | Shows/hides the `#save-warning` banner: error state when the last write failed, soft warning when usage is ≥ 80% of `LS_LIMIT_CHARS`, hidden otherwise |
+| `fieldsEqual(a, b)` | Compares two `item.fields` objects by value, treating a missing key and `''` as equal; used by `saveItem()`/`bulkAddCSVImport()` to skip no-op `updatedAt` bumps |
 | `rebuildCatSelects()` | Syncs both `<select>` elements to `state.cats` |
 | `schemaFor(cat)` | Returns `{ primary, fields }` for a category, with safe defaults |
 | `primaryLabel(cat)` | Returns the primary field label string for a category |
@@ -590,7 +594,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `saveSchema()` | Writes editing state back to `state.schema`, saves |
 | `confirmDeleteCat()` | Confirms with item count, deletes category + its items, saves; also tombstones the category itself in `state.catDeletes` (2.5.0) so the deletion propagates, not just its items — see "Category deletions" |
 | `editItem(id)` | Toggles inline edit expansion for an item row; collapses any other open row |
-| `saveItem(id)` | Validates and writes edited field values back to state, saves; if the title or an identity field's value changed the item's id, rekeys it locally and tombstones the old id (2.4.0) so the rename propagates to other devices instead of leaving a stale duplicate — see "Merging rankings between devices" known gaps |
+| `saveItem(id)` | Validates and writes edited field values back to state, saves; if the title or an identity field's value changed the item's id, rekeys it locally and tombstones the old id (2.4.0) so the rename propagates to other devices instead of leaving a stale duplicate — see "Merging rankings between devices" known gaps. The duplicate-id check runs before `item` is mutated (a rejected rename leaves the item untouched), and saving with no actual change toasts "No changes" without bumping `updatedAt` (2.15.0) |
 | `initRankView()` | Entry point for the Rank tab — dispatches to `loadPair()` or `loadPodium()` based on current mode |
 | `setRankMode(mode)` | Switches between `standard` and `podium` modes, updates toggle UI, reloads |
 | `loadPair()` | Picks 2 random items from the active rank category, stores them in `currentPair` (for keyboard voting), renders VS cards with the running session count |
@@ -623,7 +627,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `parsePreloadCSV(text)` | Parses `#directive` header rows and data rows; returns `{ok, category, primary, fields, items}` or `{ok:false, error}` |
 | `splitCSVLine(line)` | Splits a CSV line handling quoted fields with commas inside |
 | `resolveCSVImport(result)` | Handles conflict resolution when category already exists — prompts for bulk add, replace, or cancel; dispatches to `bulkAddCSVImport()` or `applyCSVImport()` |
-| `bulkAddCSVImport(result)` | Matches incoming items to existing ones by title (case-insensitive); updates field values on matches, preserves ELO and win/loss record; adds unmatched items fresh at ELO 1000 |
+| `bulkAddCSVImport(result)` | Matches incoming items to existing ones by title (case-insensitive); updates field values on matches, preserves ELO and win/loss record; adds unmatched items fresh at ELO 1000. Only bumps `updatedAt` on a match whose values actually changed (2.15.0), so re-importing an unchanged CSV doesn't queue the whole category for Firestore re-upload; the toast reports added/updated/unchanged counts |
 | `applyCSVImport(result, updateSchema)` | Writes parsed CSV items and optionally schema into state |
 | `renderStats()` | Renders version info + item/vote counts in the Data tab |
 | `itemsWithoutHidden()` | Returns a copy of `state.items` with the `hidden` key stripped from every item; used by `buildExportPayload()` so hidden status (a personal, per-browser preference) never travels in an exported file |
@@ -655,7 +659,7 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `freshState()` | Returns a brand-new empty `state` object with all fields (including a fresh `deviceId`) — used by the initial `let state = freshState()` and by `clearAllData()`, so both start from the exact same shape |
 | `clearAllData()` | Confirms, resets state to `freshState()`, clears localStorage |
 | `uid()` | Generates a short collision-resistant ID — legacy fallback, no longer used by the sync/merge system as of 2.0.0 |
-| `esc(s)` | HTML-escapes strings before injecting into innerHTML |
+| `esc(s)` | HTML-escapes strings (including `"` and `'`, 2.15.0) for text content and quoted attribute values. **Not** safe inside inline JS string literals (`onclick="f('${esc(x)}')"`) — the HTML parser decodes `&#39;` back to `'` before the JS runs — so user text reaches handlers via `data-*` attributes read with `this.dataset` instead |
 
 ---
 
@@ -886,7 +890,7 @@ For a personal ranker this is unlikely to be a real concern — even a very dedi
 
 ### localStorage cap
 
-Browsers limit localStorage to ~5MB. At ~500 bytes per item that's roughly 10,000 items before issues arise. The limit comes sooner if you add notes, tags, or other large fields. Fix: switch to IndexedDB (same browser, async API, much higher limits).
+Browsers limit localStorage to ~5MB. At ~500 bytes per item that's roughly 10,000 items before issues arise, but the full `matchLog` counts too, so real usage climbs faster than item count alone suggests (a real Aug 2026 backup was already ~2.8MB). As of 2.15.0 hitting the limit is no longer silent — see "Persistence" for the save-failure banner and the Data tab's storage usage row — but it still stops saving. Fix: switch to IndexedDB (same browser, async API, much higher limits).
 
 ### Random pair selection
 
