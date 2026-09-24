@@ -120,6 +120,9 @@
   .save-warning { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--danger); border-radius: 8px; background: var(--danger-bg); color: var(--text-primary); font-size: 13px; }
   .save-warning.is-error { color: var(--danger); }
   .save-warning.hidden { display: none; }
+  .lb-footer { text-align: center; padding: 12px 0; font-size: 13px; color: var(--text-muted); }
+  .lb-footer:empty { display: none; }
+  .lb-footer button { margin-left: 4px; }
   .save-warning button { margin-left: 8px; }
 
   .field-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
@@ -477,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.15.0';
+const APP_VERSION = '2.16.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2286,28 +2289,96 @@ function renderHistory() {
 }
 
 // --- Leaderboard ---
+// Infinite scroll (2.16.0): rows render in LB_BATCH chunks. An IntersectionObserver
+// watches a sentinel just below the last row and appends the next chunk (via
+// insertAdjacentHTML, no rebuild of rows already shown) once it's within 400px of the
+// viewport. lbShown survives re-renders, so a vote/sync/edit redraws the same number of
+// rows instead of snapping back to the top; it resets only when the category or its
+// field filters change (same fingerprint idea as the Library's libPageKey).
+const LB_BATCH = 50;
+let lbShown = LB_BATCH;   // rows to render on the next full renderLB()
+let lbShowKey = null;     // lbCat + filter fingerprint that lbShown belongs to
+let lbRendered = 0;       // rows currently in the DOM
+let lbList = [];          // full sorted list from the last renderLB(); appendLBRows() slices it
+let lbBot = 0, lbRange = 1;
+let lbObserver = null;
+
 function renderLB() {
+  // renderLB() is called after every vote, edit, sync, and filter change. While the tab
+  // is hidden that's pure wasted work (thousands of rows for a big category), and
+  // switchTab('leaderboard') re-renders on entry anyway — so skip it entirely.
+  if (!document.getElementById('view-leaderboard').classList.contains('active')) return;
   const allCats = [...new Set(Object.values(state.items).map(i => i.cat))];
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
     `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" onclick="lbCat=this.dataset.cat;renderLB()">${esc(c)}</button>`).join('');
-  let list = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
+  lbList = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
+  const key = lbCat + '\u0000' + activeFilterKey(lbCat);
+  if (key !== lbShowKey) { lbShown = LB_BATCH; lbShowKey = key; }
   const el = document.getElementById('lb-list');
-  if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
-  const top = list[0].elo, bot = list[list.length-1].elo, range = top - bot || 1;
+  if (lbObserver) lbObserver.disconnect();
+  lbRendered = 0;
+  if (!lbList.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
+  // Bar widths are relative to the full list's range, not just the rendered slice, so
+  // a row looks the same whether it arrived in the first batch or the tenth.
+  lbBot = lbList[lbList.length-1].elo; lbRange = lbList[0].elo - lbBot || 1;
+  el.innerHTML = '<div class="card" id="lb-rows"></div><div id="lb-footer" class="lb-footer"></div>';
+  appendLBRows(lbShown);
+}
+
+// Fingerprint of only the filters that actually narrow the list (same "active" rules
+// as getFilteredItems()). Raw JSON of filterState[cat] isn't stable enough: building
+// the filter UI (e.g. opening the Rank tab) seeds inert placeholders like
+// {Group: {type: 'string'}}, which would otherwise look like a filter change and reset
+// the Leaderboard back to its first batch.
+function activeFilterKey(cat) {
+  const active = {};
+  for (const [name, f] of Object.entries(filterState[cat] || {})) {
+    if (!f || !f.type) continue;
+    const narrows = f.nonBlank || (f.type === 'number'
+      ? (f.min !== undefined || f.max !== undefined || f.equals !== undefined)
+      : (f.values && f.values.length > 0));
+    if (narrows) active[name] = f;
+  }
+  return JSON.stringify(active);
+}
+
+function lbRowHtml(i, idx) {
   const medals = ['🥇','🥈','🥉'];
-  el.innerHTML = '<div class="card">' + list.map((i,idx) => {
-    const meta = itemMetaInline(i);
-    return `<div class="item-row">
+  const meta = itemMetaInline(i);
+  return `<div class="item-row">
       <span class="${idx<3?'rank-medal':'rank-num'}">${idx<3?medals[idx]:'#'+(idx+1)}</span>
       <div class="flex1">
         <div class="item-title">${esc(i.title)}${meta?` <span class="item-meta" style="font-weight:400">${meta}</span>`:''}
         </div>
-        <div class="score-bar" style="margin-top:5px"><div class="score-fill" style="width:${Math.round((i.elo-bot)/range*100)}%"></div></div>
+        <div class="score-bar" style="margin-top:5px"><div class="score-fill" style="width:${Math.round((i.elo-lbBot)/lbRange*100)}%"></div></div>
       </div>
-      <span class="item-meta">${Math.round(i.elo)} \u00b7 ${i.wins}W ${i.losses}L</span>
+      <span class="item-meta">${Math.round(i.elo)} · ${i.wins}W ${i.losses}L</span>
     </div>`;
-  }).join('') + '</div>';
+}
+
+// Appends up to `count` more rows after the ones already rendered, then rebuilds the
+// footer. The footer's sentinel is a fresh element each time, and observing a new
+// element always fires one initial callback — so if the sentinel is still near the
+// viewport after an append (tall screen), the next batch loads without any scrolling.
+function appendLBRows(count) {
+  const rows = document.getElementById('lb-rows');
+  if (!rows) return;
+  const end = Math.min(lbRendered + count, lbList.length);
+  rows.insertAdjacentHTML('beforeend', lbList.slice(lbRendered, end).map((i, k) => lbRowHtml(i, lbRendered + k)).join(''));
+  lbRendered = end;
+  lbShown = Math.max(lbShown, end);
+  const footer = document.getElementById('lb-footer');
+  if (lbObserver) lbObserver.disconnect();
+  if (lbRendered < lbList.length) {
+    footer.innerHTML = `<div id="lb-sentinel"></div>Showing ${lbRendered} of ${lbList.length} · <button class="ghost btn-sm" onclick="appendLBRows(lbList.length)">Show all</button>`;
+    if (!lbObserver) lbObserver = new IntersectionObserver(
+      entries => { if (entries.some(e => e.isIntersecting)) appendLBRows(LB_BATCH); },
+      { rootMargin: '0px 0px 400px 0px' });
+    lbObserver.observe(document.getElementById('lb-sentinel'));
+  } else {
+    footer.innerHTML = lbList.length > LB_BATCH ? `All ${lbList.length} items shown` : '';
+  }
 }
 
 // --- CSV Preload ---

@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.15.0` |
+| App version | `2.16.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -556,7 +556,7 @@ The skip button is hidden in Tier mode — session control is handled by the ini
 | New Category | `view-newcat` | `openNewCatModal()`, `saveNewCat()`, `addNewCatField()` |
 | Schema Editor | `view-schema` | `openSchemaEditor()`, `saveSchema()`, `addSchemaField()` |
 | Rank | `view-rank` | `initRankView()`, `setRankMode()`, `loadPair()`, `vsCard()`, `vote()`, `loadPodium()`, `renderPodium()`, `submitPodium()`, `loadTier()`, `submitTier()` |
-| Leaderboard | `view-leaderboard` | `renderLB()` |
+| Leaderboard | `view-leaderboard` | `renderLB()`, `appendLBRows()`, `lbRowHtml()` |
 | History | `view-history` | `renderHistory()`, `recordRanking()`, `undoRanking()` |
 | Data | `view-data` | `exportData()`, `importData()`, `uploadToFirestore()`, `pullFromFirestore()`, `renderStats()`, `renderDeletedItems()`, `undeleteItem()`, `clearAllData()` |
 
@@ -618,7 +618,10 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `submitPodium()` | Derives all implied pairwise ELO updates from podium order, saves, loads next round |
 | `eloUpdate(w, l)` | Pure ELO math, mutates winner/loser objects in place |
 | `applyEloUpdate(winner, loser)` | Calls `eloUpdate()` and returns the `{wid, lid, wChange, lChange}` delta record used by `recordRanking()`/`undoRanking()`; shared by `vote()`, `submitPodium()`, `submitTier()` |
-| `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals |
+| `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals, first `lbShown` rows only (infinite scroll, 2.16.0); returns immediately if the Leaderboard tab isn't active |
+| `appendLBRows(count)` | Appends the next `count` rows after those already rendered (no rebuild), then refreshes the footer and re-observes a fresh sentinel; `appendLBRows(lbList.length)` backs the **Show all** button |
+| `lbRowHtml(item, idx)` | One leaderboard row; score bar is relative to the full list's ELO range (`lbBot`/`lbRange`), not the rendered slice |
+| `activeFilterKey(cat)` | JSON of only the filters that actually narrow `cat`'s list (same rules as `getFilteredItems()`); used for the Leaderboard's reset fingerprint so inert filter-UI placeholders don't count as a change |
 | `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
 | `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in leaderboard and tier's untiered list |
 | `itemMetaStacked(item)` | Renders `itemMeta()` as stacked `<span>` blocks for VS and Podium rank cards |
@@ -722,6 +725,17 @@ The Library list is paginated at `LIB_PAGE_SIZE` (50) items per page to avoid th
 - A fingerprint of `(cat, query, filterState[cat])` is computed each render and compared to the previous render's; when it differs, the page resets to 1 — this is what makes changing the search term or a field filter always land back on page 1 of the new results, from any page
 - The page number is clamped to the valid range every render, so deleting/hiding items that shrinks the list below the current page can't strand the view
 - Editing an item in place doesn't change the fingerprint, so the current page is preserved while editing
+
+### Leaderboard infinite scroll (2.16.0)
+
+The Leaderboard uses infinite scroll rather than the Library's page buttons, since a ranking is read top-down.
+
+**Implementation**:
+- `renderLB()` sorts the full filtered list into `lbList`, then renders only the first `lbShown` rows (`LB_BATCH` = 50) into `#lb-rows`, followed by a `#lb-footer` holding an invisible `#lb-sentinel`, a "Showing N of M" count, and a **Show all** button
+- An `IntersectionObserver` (`rootMargin` 400px below the viewport) fires when the sentinel nears the screen and calls `appendLBRows(LB_BATCH)`, which uses `insertAdjacentHTML` to add rows without touching those already rendered. The footer (and so the sentinel) is rebuilt after every append; observing a new element always delivers one initial callback, so on a tall screen batches keep loading until the sentinel is actually off-screen
+- `lbShown` survives re-renders, so a vote, sync, or edit redraws the same number of rows (no jump back to the top). It resets to one batch only when a fingerprint of `(lbCat, activeFilterKey(lbCat))` changes. `activeFilterKey()` ignores inert filter entries — building the filter UI seeds placeholders like `{type:'string'}`, which with a raw `JSON.stringify(filterState[cat])` key (the Library's approach) would look like a change and reset the list
+- **Hidden-tab skip:** `renderLB()` returns immediately unless `#view-leaderboard` is the active view. It's called after every vote/edit/sync/filter change, so without this every vote in a large category rebuilt thousands of off-screen rows; `switchTab('leaderboard')` re-renders on entry, so nothing goes stale
+- Tradeoff: browser find (Ctrl+F) only sees loaded rows; **Show all** restores the old render-everything behavior on demand
 - Prev/Next controls plus a "Page X of Y (Z items)" indicator render below the list only when there's more than one page
 - Bulk hide/unhide (`bulkSetHidden()`) is unaffected by pagination — it still calls `filteredLibraryList()` directly and acts on every matching item across all pages, not just the visible page (see below)
 
@@ -877,16 +891,16 @@ Deliberately out of scope for now (this app is built around "a couple of people 
 
 ### Rendering
 
-`renderLibrary()` and `renderLB()` rebuild the entire list via `innerHTML` on every update. `renderLibrary()` is paginated (2.6.0, `LIB_PAGE_SIZE` = 50 — see "Library pagination" above), which caps its per-render DOM cost regardless of category size; `renderLB()` (Leaderboard) is not yet paginated. Overall this is fine up to ~500 items per category. Beyond that:
+`renderLibrary()` and `renderLB()` rebuild their list via `innerHTML` on every update, but both now cap how much they render: the Library is paginated (2.6.0, `LIB_PAGE_SIZE` = 50 — see "Library pagination" above) and the Leaderboard uses infinite scroll (2.16.0, `LB_BATCH` = 50 — see "Leaderboard infinite scroll" above) and skips rendering entirely while its tab is hidden. The Leaderboard's DOM still grows as the user scrolls deeper (or clicks Show all), since loaded rows aren't recycled. Remaining thresholds:
 
 | Items per category | Symptom | Fix |
 |---|---|---|
 | < 500 | No issues | — |
-| 500–2,000 | Render flicker on slower devices (Leaderboard only — Library is paginated) | Paginate `renderLB()` too, or add virtual scrolling ([clusterize.js](https://clusterize.js.org/) drops in with minimal changes) |
+| 500–2,000 | Only if the Leaderboard is scrolled deep or Show all is used | Virtual scrolling ([clusterize.js](https://clusterize.js.org/)) if it ever matters |
 | 2,000–10,000 | localStorage pressure + slow renders | Switch to IndexedDB + virtual scroll |
 | 10,000+ | Both | Backend + virtual scroll |
 
-For a personal ranker this is unlikely to be a real concern — even a very dedicated user would struggle to hit 500 items in a single category.
+Real categories do exceed this — NBA Players holds ~4,900 items (Aug 2026) — which is what motivated the Leaderboard change.
 
 ### localStorage cap
 
