@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.16.0';
+const APP_VERSION = '2.16.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -560,7 +560,7 @@ function freshState() {
     // blindly push stale pre-reset data onto the new baseline. See "Cloud sync" in
     // ARCHITECTURE.md.
     settings: {
-      smartPairMode: false, deviceId: makeDeviceId(), userName: '', matchSeq: 0,
+      smartPairMode: false, rankMode: 'standard', deviceId: makeDeviceId(), userName: '', matchSeq: 0,
       lastUploadedSeq: 0, lastUploadedItemsAt: 0, lastUploadedDeletesAt: 0, lastUploadedUndeletesAt: 0,
       lastUploadedCatDeletesAt: 0, lastUploadedCatUndeletesAt: 0, knownBaselineId: null
     },
@@ -611,7 +611,12 @@ const LS_WARN_RATIO = 0.8;
 let saveFailed = false;
 let saveFailedQuota = false;
 let savedChars = 0;
+// Set by load() when saved data exists but couldn't be parsed/migrated: { message, raw }.
+// While set, save() writes nothing, so the unreadable-but-maybe-recoverable original
+// stays in localStorage untouched until the user downloads it or discards it.
+let loadFailed = null;
 function save() {
+  if (loadFailed) { renderSaveWarning(); return; }
   const json = JSON.stringify(state);
   try {
     localStorage.setItem('ranker-v1', json);
@@ -632,7 +637,14 @@ function renderSaveWarning() {
   const el = document.getElementById('save-warning');
   if (!el) return;
   const nearFull = savedChars / LS_LIMIT_CHARS >= LS_WARN_RATIO;
-  if (saveFailed) {
+  if (loadFailed) {
+    el.className = 'save-warning is-error';
+    el.innerHTML = `<strong>Your saved data couldn't be loaded, so saving is paused.</strong> Ranker started empty and won't overwrite what's stored (error: ${esc(loadFailed.message)}). Download the raw data to recover it; if you import a backup instead, choose "Discard and resume saving" afterwards so the import is kept.
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn-sm danger" onclick="downloadUnreadableData()">Download raw saved data</button>
+        <button class="btn-sm ghost" onclick="discardUnreadableData()">Discard and resume saving</button>
+      </div>`;
+  } else if (saveFailed) {
     el.className = 'save-warning is-error';
     const why = saveFailedQuota ? "This browser's storage for Ranker is full" : 'This browser refused to save Ranker’s data (storage blocked or unavailable)';
     el.innerHTML = `<strong>Changes are not being saved.</strong> ${why}, so anything you do now will be lost on reload. <button class="btn-sm danger" onclick="exportData()">Export backup now</button>`;
@@ -643,6 +655,24 @@ function renderSaveWarning() {
     el.className = 'save-warning hidden';
     el.innerHTML = '';
   }
+}
+
+function downloadUnreadableData() {
+  if (!loadFailed) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([loadFailed.raw], { type: 'text/plain' }));
+  a.download = 'ranker-unreadable-' + new Date().toISOString().slice(0, 10) + '.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+
+function discardUnreadableData() {
+  if (!loadFailed) return;
+  if (!confirm("Discard the saved data that couldn't be loaded and resume saving? Whatever is on screen now will replace it. Download the raw data first if you might want to recover it.")) return;
+  loadFailed = null;
+  save();
+  renderStats();
+  toast('Saving resumed');
 }
 
 // --- Data migration ---
@@ -772,25 +802,45 @@ function migrateData(data) {
 }
 
 function load() {
+  let src = null;
   try {
     const raw = localStorage.getItem('ranker-v1');
     // also try old key from previous version
     const legacy = !raw && localStorage.getItem('media-ranker-v1');
-    const src = raw || legacy;
+    src = raw || legacy;
     if (raw) savedChars = raw.length;
-    if (src) {
+  } catch(e) {
+    // Storage itself is unreadable (blocked, private mode quirks). Nothing to protect
+    // here — save() will fail the same way and raise its own banner.
+    console.error('[load] localStorage read failed', e);
+  }
+  if (src) {
+    try {
       const parsed = JSON.parse(src);
       const migrated = migrateData(parsed);
       state = migrated;
       ensureSchemaWellFormed();
+    } catch(e) {
+      // Saved data exists but couldn't be parsed/migrated. Previously this was swallowed:
+      // the app started from an empty state and the very next save() overwrote the
+      // user's real data with it. Now: start empty so the app is usable, but block
+      // every save() until the user either downloads the raw data or explicitly
+      // discards it (see renderSaveWarning()).
+      console.error('[load] saved data could not be loaded', e);
+      state = freshState();
+      loadFailed = { message: (e && e.message) || String(e), raw: src };
     }
-  } catch(e) {}
-  // Restore settings
+  }
+  // Restore per-device settings
   if (state.settings?.smartPairMode !== undefined) {
     smartPairMode = state.settings.smartPairMode;
     document.getElementById('smart-pair-toggle').checked = smartPairMode;
   }
-  rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats(); renderSaveWarning();
+  if (['standard', 'podium', 'tier'].includes(state.settings?.rankMode)) rankMode = state.settings.rankMode;
+  applyRankModeUI(rankMode);
+  // No eager loadPair() here: the Library is the startup tab and switchTab('rank')
+  // runs initRankView() on entry, so a pair would just be drawn off-screen.
+  rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSaveWarning();
 }
 
 // --- Utilities ---
@@ -1774,8 +1824,18 @@ function itemMetaStacked(item) {
   return lines.map(l => '<span class="vs-meta" style="display:block;margin-top:3px">' + l + '</span>').join('');
 }
 
+// Persisted per device in state.settings.rankMode (2.16.1), like smartPairMode, so the
+// Rank tab reopens in whichever mode was last used instead of always resetting to 1v1.
 function setRankMode(mode) {
   rankMode = mode;
+  state.settings = state.settings || {};
+  state.settings.rankMode = mode;
+  save();
+  applyRankModeUI(mode);
+  initRankView();
+}
+
+function applyRankModeUI(mode) {
   document.getElementById('mode-btn-standard').classList.toggle('active', mode === 'standard');
   document.getElementById('mode-btn-podium').classList.toggle('active', mode === 'podium');
   document.getElementById('mode-btn-tier').classList.toggle('active', mode === 'tier');
@@ -1784,7 +1844,6 @@ function setRankMode(mode) {
   if (mode !== 'tier') {
     document.getElementById('rank-skip-btn').textContent = mode === 'podium' ? '\u21bb New round' : '\u21bb Skip this pair';
   }
-  initRankView();
 }
 
 function toggleSmartPair(enabled) {
@@ -3069,8 +3128,9 @@ function clearAllDataCore() {
   state = freshState();
   lbCat = BUILTIN_CATS[0];
   localStorage.removeItem('ranker-v1');
+  loadFailed = null; // the unreadable data it was protecting is gone now
   fieldTypeCache = {};
-  rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSyncStatus();
+  rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSyncStatus(); renderSaveWarning();
 }
 
 function clearAllData() {
