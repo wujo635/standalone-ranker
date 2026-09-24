@@ -16,7 +16,7 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## Scale / infra
 
-- **Rendering at scale.** `renderLibrary()`/`renderLB()` rebuild via `innerHTML` on every update; flicker starts at 500–2,000 items/category. Fix: virtual scrolling (clusterize.js) or paginate. [ARCHITECTURE.md:791](ARCHITECTURE.md:791)
+- **Virtual scrolling (only if needed).** Library is paginated (2.6.0) and Leaderboard uses infinite scroll (2.16.0), but Leaderboard rows are never recycled, so scrolling very deep or using Show all still puts every row in the DOM. clusterize.js-style virtualization would cap that. [ARCHITECTURE.md "Rendering"](ARCHITECTURE.md)
 - **localStorage cap (~5MB).** Roughly 10,000 items before issues. Fix: switch to IndexedDB. [ARCHITECTURE.md:802](ARCHITECTURE.md:802)
 - **Switch localStorage → real backend.** Swap `save()`/`load()` for `fetch()` calls against a REST API or serverless function; state is already JSON-serializable. [ARCHITECTURE.md:726](ARCHITECTURE.md:726)
 
