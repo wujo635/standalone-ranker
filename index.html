@@ -116,6 +116,11 @@
   .stat-row { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
   .stat-row:last-child { border-bottom: none; }
   .stat-label { color: var(--text-secondary); } .stat-val { font-weight: 500; }
+  .stat-val.warn { color: var(--danger); }
+  .save-warning { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--danger); border-radius: 8px; background: var(--danger-bg); color: var(--text-primary); font-size: 13px; }
+  .save-warning.is-error { color: var(--danger); }
+  .save-warning.hidden { display: none; }
+  .save-warning button { margin-left: 8px; }
 
   .field-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
   .field-row:last-child { border-bottom: none; }
@@ -226,6 +231,8 @@
     <h1>Ranker</h1>
     <p>Create categories, add items, and rank everything head to head.</p>
   </header>
+
+  <div id="save-warning" class="save-warning hidden" role="alert"></div>
 
   <nav>
     <button class="active" onclick="switchTab('library')">Library</button>
@@ -470,7 +477,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.14.0';
+const APP_VERSION = '2.15.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -591,7 +598,49 @@ let editingCat = null;
 let editingFields = [];
 
 // --- Persistence ---
-function save() { try { localStorage.setItem('ranker-v1', JSON.stringify(state)); } catch(e) {} }
+// localStorage is capped at roughly 5M characters per origin, and a large category
+// (thousands of items plus the full matchLog) puts state in the multi-MB range. A
+// failed write must be loud: swallowing it meant every later edit/vote looked saved
+// but was silently gone on reload. `saveFailed` drives the persistent #save-warning
+// banner; `savedChars` (last successful write's size) drives the Data tab usage row.
+const LS_LIMIT_CHARS = 5 * 1024 * 1024;
+const LS_WARN_RATIO = 0.8;
+let saveFailed = false;
+let saveFailedQuota = false;
+let savedChars = 0;
+function save() {
+  const json = JSON.stringify(state);
+  try {
+    localStorage.setItem('ranker-v1', json);
+    savedChars = json.length;
+    saveFailed = false;
+  } catch(e) {
+    console.error('[save] localStorage write failed', e);
+    // Chrome/Safari: QuotaExceededError; Firefox: NS_ERROR_DOM_QUOTA_REACHED. Anything
+    // else (e.g. SecurityError when storage is blocked) gets the generic wording.
+    saveFailedQuota = e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED');
+    if (!saveFailed) toast(saveFailedQuota ? 'Save failed: browser storage is full' : 'Save failed: browser storage unavailable');
+    saveFailed = true;
+  }
+  renderSaveWarning();
+}
+
+function renderSaveWarning() {
+  const el = document.getElementById('save-warning');
+  if (!el) return;
+  const nearFull = savedChars / LS_LIMIT_CHARS >= LS_WARN_RATIO;
+  if (saveFailed) {
+    el.className = 'save-warning is-error';
+    const why = saveFailedQuota ? "This browser's storage for Ranker is full" : 'This browser refused to save Ranker’s data (storage blocked or unavailable)';
+    el.innerHTML = `<strong>Changes are not being saved.</strong> ${why}, so anything you do now will be lost on reload. <button class="btn-sm danger" onclick="exportData()">Export backup now</button>`;
+  } else if (nearFull) {
+    el.className = 'save-warning';
+    el.innerHTML = `Browser storage is ${Math.round(savedChars / LS_LIMIT_CHARS * 100)}% full. Consider exporting a backup — saving will fail once it reaches the limit.`;
+  } else {
+    el.className = 'save-warning hidden';
+    el.innerHTML = '';
+  }
+}
 
 // --- Data migration ---
 // Called on both load() and importData() before touching state.
@@ -725,6 +774,7 @@ function load() {
     // also try old key from previous version
     const legacy = !raw && localStorage.getItem('media-ranker-v1');
     const src = raw || legacy;
+    if (raw) savedChars = raw.length;
     if (src) {
       const parsed = JSON.parse(src);
       const migrated = migrateData(parsed);
@@ -737,7 +787,7 @@ function load() {
     smartPairMode = state.settings.smartPairMode;
     document.getElementById('smart-pair-toggle').checked = smartPairMode;
   }
-  rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats();
+  rebuildCatSelects(); renderLibrary(); loadPair(); renderLB(); renderStats(); renderSaveWarning();
 }
 
 // --- Utilities ---
@@ -796,7 +846,11 @@ function identitySuffixFor(cat, fields) {
 // namespace match ids so two devices' independently-generated matchLog entries can
 // never collide when unioned during a merge.
 function makeDeviceId() { return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
-function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Escapes for both text content and quoted attribute values (value="...", data-*="...").
+// Not safe for splicing into inline JS strings (onclick="f('${esc(x)}')") — the HTML
+// parser decodes &#39; back to ' before the JS runs — so pass user text to handlers
+// via a data-* attribute and read it back with this.dataset instead.
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 // Every toast also logs to the console, so a message that faded before you finished
 // reading it (or a rapid sequence — e.g. resetSharedBaseline()'s several status
 // toasts in a row) is still recoverable via the browser console's scrollback.
@@ -966,14 +1020,14 @@ function renderFilterUI(cat) {
 
 function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
   let html = '<div class="filter-panel">';
-  html += '<div class="filter-panel-header" onclick="filterCollapsed[\'' + esc(cat) + '\'] = !filterCollapsed[\'' + esc(cat) + '\'];document.getElementById(\'' + filterId + '\').style.display = filterCollapsed[\'' + esc(cat) + '\'] ? \'none\' : \'flex\';">';
+  html += '<div class="filter-panel-header" data-cat="' + esc(cat) + '" onclick="filterCollapsed[this.dataset.cat] = !filterCollapsed[this.dataset.cat];this.nextElementSibling.style.display = filterCollapsed[this.dataset.cat] ? \'none\' : \'flex\';">';
   html += '<div class="section-label">Filter' + (activeCount ? ` <span class="filter-count">${activeCount}</span>` : '') + '</div>';
   html += '<span class="filter-caret">' + (isCollapsed ? '▶' : '▼') + '</span>';
   html += '</div>';
 
   html += '<div id="' + filterId + '" class="filter-fields" style="display:' + (isCollapsed ? 'none' : 'flex') + '">';
   if (activeCount > 0) {
-    html += '<button class="ghost btn-sm filter-clear" onclick="event.stopPropagation();clearAllFilters(\'' + esc(cat) + '\')">✕ Clear</button>';
+    html += '<button class="ghost btn-sm filter-clear" data-cat="' + esc(cat) + '" onclick="event.stopPropagation();clearAllFilters(this.dataset.cat)">✕ Clear</button>';
   }
   html += fieldsHtml;
   html += '</div>'; // Close filter-fields div
@@ -1438,6 +1492,15 @@ function normalizeFieldValue(f, rawVal) {
   return [...new Set(tokens)].join(', ');
 }
 
+// Whether two item.fields objects hold the same values. A missing key and '' count as
+// equal, since the edit form writes '' for every schema field an item never had.
+function fieldsEqual(a, b) {
+  a = a || {}; b = b || {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) if (String(a[k] ?? '') !== String(b[k] ?? '')) return false;
+  return true;
+}
+
 function addItem() {
   const cat = libCat();
   const primary = primaryLabel(cat);
@@ -1528,21 +1591,31 @@ function saveItem(id) {
     const val = normalizeFieldValue(f, el ? el.value.trim() : '');
     if (f.required && !val) { toast(f.name + ' is required'); el && el.focus(); return; }
   }
-  if (!item.fields) item.fields = {};
+  const newFields = { ...(item.fields || {}) };
   fields.forEach(f => {
     const el = document.getElementById('edit-field-' + id + '-' + f.name);
-    if (el) item.fields[f.name] = normalizeFieldValue(f, el.value.trim());
+    if (el) newFields[f.name] = normalizeFieldValue(f, el.value.trim());
   });
-  const oldTitle = item.title;
-  item.updatedAt = Date.now();
-  item.title = t;
   // id is derived from cat+title+identity field values (see itemKey()) — a title edit
   // or an identity-flagged field's value changing both mean the id changes too. Rekey
   // the item; any match log / history entries pointing at the old id become orphaned,
-  // same as if the item had been deleted (see itemKey()).
-  const newId = itemKey(cat, t, identitySuffixFor(cat, item.fields));
+  // same as if the item had been deleted (see itemKey()). The collision check runs
+  // before touching `item`, so a rejected rename leaves it exactly as it was.
+  const newId = itemKey(cat, t, identitySuffixFor(cat, newFields));
+  if (newId !== id && state.items[newId]) { toast('An item with this ' + primary + (fields.some(f=>f.identity) ? ' and these identity field values' : '') + ' already exists'); return; }
+  // Saving with nothing actually changed must not bump updatedAt — that alone queues
+  // the item for re-upload to Firestore (uploadToFirestore()'s updatedAt cursor) and
+  // makes it win last-write-wins merges it has no real claim to.
+  if (t === item.title && fieldsEqual(item.fields, newFields)) {
+    expandedItemId = null;
+    renderLibrary(); toast('No changes');
+    return;
+  }
+  const oldTitle = item.title;
+  item.fields = newFields;
+  item.updatedAt = Date.now();
+  item.title = t;
   if (newId !== id) {
-    if (state.items[newId]) { toast('An item with this ' + primary + (fields.some(f=>f.identity) ? ' and these identity field values' : '') + ' already exists'); return; }
     item.id = newId;
     delete state.items[id];
     state.items[newId] = item;
@@ -2217,7 +2290,7 @@ function renderLB() {
   const allCats = [...new Set(Object.values(state.items).map(i => i.cat))];
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
-    `<button class="pill${c===lbCat?' active':''}" onclick="lbCat='${esc(c)}';renderLB()">${esc(c)}</button>`).join('');
+    `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" onclick="lbCat=this.dataset.cat;renderLB()">${esc(c)}</button>`).join('');
   let list = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
   const el = document.getElementById('lb-list');
   if (!list.length) { el.innerHTML = '<div class="empty">Nothing here yet.</div>'; return; }
@@ -2375,7 +2448,7 @@ function resolveCSVImport(result) {
 // New titles not found in existing items are added fresh at ELO 1000.
 // Schema directives in the CSV are ignored — existing schema is kept.
 function bulkAddCSVImport({ category, items }) {
-  let added = 0, updated = 0;
+  let added = 0, updated = 0, unchanged = 0;
   items.forEach(({ title, fields: fieldValues }) => {
     // Match by the same identity-aware id addItem()/saveItem() use — not title alone
     // — so two rows sharing a title but differing on an identity field (e.g. Year)
@@ -2383,17 +2456,25 @@ function bulkAddCSVImport({ category, items }) {
     const id = itemKey(category, title, identitySuffixFor(category, fieldValues));
     const match = state.items[id];
     if (match) {
-      // Update field values, preserve ELO and record
-      match.fields = Object.assign(match.fields || {}, fieldValues);
-      match.updatedAt = Date.now();
-      updated++;
+      // Update field values, preserve ELO and record. Only bump updatedAt when a value
+      // actually changed: re-importing an unchanged roster used to mark every matched
+      // item as edited, which re-uploaded the whole category to Firestore on the next
+      // Upload (and on every other device's next Upload after it pulled).
+      const merged = Object.assign({}, match.fields || {}, fieldValues);
+      if (!fieldsEqual(match.fields, merged)) {
+        match.fields = merged;
+        match.updatedAt = Date.now();
+        updated++;
+      } else {
+        unchanged++;
+      }
     } else {
       // New item — add fresh
       state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
       added++;
     }
   });
-  toast('Bulk add: ' + added + ' added, ' + updated + ' updated in ' + category);
+  toast('Bulk add: ' + added + ' added, ' + updated + ' updated, ' + unchanged + ' unchanged in ' + category);
 }
 
 function applyCSVImport({ category, primary, fields, items }, updateSchema) {
@@ -2407,14 +2488,19 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
 
 // --- Data ---
 function renderStats() {
-  const savedRaw = localStorage.getItem('ranker-v1');
+  let savedRaw = null;
+  try { savedRaw = localStorage.getItem('ranker-v1'); } catch(e) {}
   let savedSchema = '—';
   try { const s = JSON.parse(savedRaw); savedSchema = s._meta ? String(s._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)'; } catch(e) {}
+  const usedChars = savedRaw ? savedRaw.length : 0;
+  const usedRatio = usedChars / LS_LIMIT_CHARS;
+  const storageVal = `${(usedChars / 1e6).toFixed(2)} MB of ~${(LS_LIMIT_CHARS / 1e6).toFixed(1)} MB (${Math.round(usedRatio * 100)}%)`;
   document.getElementById('version-info').innerHTML = [
     ['App version', APP_VERSION],
     ['Data schema version', DATA_SCHEMA_VERSION],
     ['Saved data schema', savedSchema],
-  ].map(([l,v]) => `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val">${esc(String(v))}</span></div>`).join('');
+    ['Browser storage used', storageVal, usedRatio >= LS_WARN_RATIO || saveFailed],
+  ].map(([l,v,warn]) => `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val${warn?' warn':''}">${esc(String(v))}</span></div>`).join('');
 
   const counts = {}; let totalVotes = 0;
   Object.values(state.items).forEach(i => { counts[i.cat]=(counts[i.cat]||0)+1; totalVotes+=i.wins; });
