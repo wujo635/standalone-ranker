@@ -8,6 +8,8 @@ A single-file web app for ranking anything using pairwise ELO comparisons. Categ
 
 Open `index.html` in any modern browser. That's it.
 
+To run the tests (development only — the app itself needs no install): `npm install` once, then `npm test`. See "Testing" below.
+
 ---
 
 ## Current versions
@@ -67,6 +69,28 @@ index.html
 ├── <body>        Seven views: Library, New Category, Schema Editor, Rank, Leaderboard, History, Data
 └── <script>      All app logic (~2490 lines of vanilla JS)
 ```
+
+Development-only files alongside it (never loaded by the app):
+
+```
+package.json              devDependency (jsdom) + `npm test` script
+tests/helpers/app.js      loads the real index.html into jsdom for tests
+tests/migrate.test.js     migrateData() version chain + load()
+tests/merge.test.js       mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
+.github/workflows/tests.yml  runs `npm test` on every PR and push to main
+```
+
+## Testing
+
+Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/jsdom/jsdom), the only dependency, dev-only. `tests/helpers/app.js`'s `loadApp()` loads the actual `index.html` into a fresh jsdom page per test and runs its inline script, so tests exercise exactly the code that ships — nothing is extracted or duplicated. jsdom never fetches external `<script src>` tags, so the Firebase CDN doesn't load and the app takes its normal "cloud sync unavailable" path.
+
+- **Driving the page:** `app.get(expr)`, `app.call(fnName, ...args)`, `app.run(code)`, and `app.setState(obj)` evaluate in the page's global scope, so they see top-level `let`/`const` bindings like `state`. `loadApp({ saved })` seeds `localStorage['ranker-v1']` before the script runs, for testing `load()`.
+- **Everything crosses the boundary as JSON.** Objects created inside jsdom belong to another JS realm, which makes `assert.deepStrictEqual` fail on otherwise-identical values; JSON also mirrors how real data reaches the app (file import, localStorage).
+- **The two merge entry paths are modelled exactly as the app calls them:** file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with no `migrateData()`, and item docs without ratings.
+- **Regression-first:** most merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). When fixing a sync or migration bug, add a test that fails without the fix.
+- **When adding a `DATA_SCHEMA_VERSION`:** add a fixture of the previous shape to `tests/migrate.test.js` alongside the new `migrateData()` block.
+
+Coverage today is limited to `migrateData()`, `load()`, and `mergeImport()` (plus the helpers they call). Firestore upload/pull themselves, rendering, and the CSV parser aren't covered yet.
 
 ---
 

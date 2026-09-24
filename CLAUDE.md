@@ -14,3 +14,7 @@ Whenever you change `index.html` in a way that affects behavior (new feature, bu
 4. If the change affects documented functions, data model, tab views, or design decisions sections in `ARCHITECTURE.md`, update those too — don't just append to the changelog.
 
 Skip this only for changes that don't touch `index.html` behavior (e.g. editing these docs, `.claude/` config).
+
+## Tests
+
+Run `npm test` (after a one-time `npm install`) whenever you change `index.html`, and make sure it passes before committing. When fixing a sync, merge, or migration bug, add a test that fails without the fix — see "Testing" in `ARCHITECTURE.md`.
