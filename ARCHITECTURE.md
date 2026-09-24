@@ -14,7 +14,7 @@ Open `index.html` in any modern browser. That's it.
 
 | | Value |
 |---|---|
-| App version | `2.16.0` |
+| App version | `2.16.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -255,6 +255,8 @@ The "Export category as CSV" button in the Data tab produces a file in this exac
 
 **Write failures are loud (2.15.0).** `save()` used to swallow any `localStorage.setItem` error, so once storage filled up every later edit/vote looked saved but was gone on reload. Now a failed write logs to the console, toasts once, and sets `saveFailed`, which `renderSaveWarning()` turns into a persistent `#save-warning` banner under the header ("Changes are not being saved" plus an **Export backup now** button); the wording distinguishes a full quota (`QuotaExceededError`/`NS_ERROR_DOM_QUOTA_REACHED`) from storage being blocked. The banner clears itself on the next successful write. Separately, once the last successful write reaches `LS_WARN_RATIO` (80%) of `LS_LIMIT_CHARS` (~5.2M characters) the banner shows a softer "storage is N% full" warning, and the Data tab's Version card shows a **Browser storage used** row (highlighted past the same threshold).
 
+**Unreadable saved data pauses saving (2.16.1).** If `ranker-v1` exists but `JSON.parse`/`migrateData()`/`ensureSchemaWellFormed()` throws, `load()` used to swallow the error and start from an empty state — and the next `save()` then overwrote the user's real (possibly recoverable) data with that empty state. Now `load()` starts from `freshState()` so the app is usable, but sets `loadFailed = { message, raw }`, and `save()` writes nothing while it's set. The `#save-warning` banner (highest priority, above the storage-full states) explains this and offers **Download raw saved data** (`downloadUnreadableData()`, a `.txt` of the untouched raw string) and **Discard and resume saving** (`discardUnreadableData()`, confirm-gated, clears `loadFailed` and saves whatever is on screen — e.g. after importing a backup). `clearAllDataCore()` also clears `loadFailed`, since it removes the stored data itself. A storage *read* failure (blocked localStorage) isn't treated this way — there's no stored data to protect, and `save()` surfaces its own banner.
+
 ### Merging rankings between devices
 
 JSON import (and Firestore pull) always goes through `mergeImport()`, which is now an **unconditional set union by id** — there is no "which side is ahead" question, no baseline, no ancestry chain, and no confirm dialog. Three real bugs in a row (1.17.1, 1.18.0, 1.18.1) all traced back to the same root cause: classifying how two client-side snapshots relate before picking a replay strategy is inherently fragile. As of 2.0.0 (schema v6) that classification step is gone entirely, not patched again.
@@ -401,7 +403,7 @@ Every subcollection doc's ID is the fact's own id (`itemId`/`matchId`), so writi
 - `adoptFreshBaseline()` (2.9.0) — the counterpart to `resetSharedBaseline()` for every other device; see the walkthrough below. Preserves this device's own hidden-item markings across its `clearAllDataCore()` wipe (2.13.0) — snapshots hidden ids beforehand, re-applies them to any surviving id after the pull, and toasts a restored-count only when it actually restores something. Doesn't change how `hidden` syncs (it still doesn't, anywhere) — purely a "don't lose this device's own preference to its own local wipe" fix.
 - `cloudErrorMessage(e)` — maps Firestore error codes (`permission-denied`, `unavailable`) to a plain-language toast
 
-**Resetting the shared baseline between User A and User B (2.9.0, fully automated):** the manual-Firestore-reset workflow this app has needed several times (see the 2.5.2/2.5.3, 2.7.3, and TODO.md's open Movies-discrepancy incidents) is now two button clicks total, with no Firebase console access and no file passed between devices — and, as of a same-version follow-up fix, actually bounds Firestore's own long-term growth rather than just the downloaded backup file's size. Both `resetSharedBaseline()` and `adoptFreshBaseline()` are available to the two allowlisted UIDs directly because the existing security rule already grants them full read/write on `rankers/shared` and everything under it (see the rules block further down) — deleting a doc is just another write under that same rule, no elevated/admin access needed. Use this whenever a sync bug has produced a discrepancy that isn't worth untangling fact-by-fact — pick whichever user's data you trust more as User A:
+**Resetting the shared baseline between User A and User B (2.9.0, fully automated):** the manual-Firestore-reset workflow this app has needed several times (see the 2.5.2/2.5.3 and 2.7.3 incidents, and the Aug 2026 Movies count discrepancy between the two users' devices) is now two button clicks total, with no Firebase console access and no file passed between devices — and, as of a same-version follow-up fix, actually bounds Firestore's own long-term growth rather than just the downloaded backup file's size. Both `resetSharedBaseline()` and `adoptFreshBaseline()` are available to the two allowlisted UIDs directly because the existing security rule already grants them full read/write on `rankers/shared` and everything under it (see the rules block further down) — deleting a doc is just another write under that same rule, no elevated/admin access needed. Use this whenever a sync bug has produced a discrepancy that isn't worth untangling fact-by-fact — pick whichever user's data you trust more as User A:
 
 1. **On User A's device: Data tab → "Baseline recovery" → "⚠ Reset shared baseline."** `resetSharedBaseline()` does the entire cloud-side reset in one call: full pull (absorbs anything Firestore has, including matches that only ever reached it via User B's own uploads), **clears all four tombstone logs on the live local state** (2.10.0 — see below), a downloaded `ranker-pre-reset-backup.json` as an offline safety net (same compacted shape as `exportRecoveryBaseline()`'s file — a fallback if a later step fails, not the thing other devices adopt from), `wipeFirestoreCollections()`, a reset of this device's own upload cursors (so the reseed below doesn't think any of this was already pushed), then `uploadToFirestore({ full: true })` to reseed Firestore from this device's complete state — **ratings baked directly into item docs, matches collection reseeded empty, no tombstones reseeded either** (see the `uploadToFirestore(opts)` entry above). Gated behind a `confirm()` spelling out that it's destructive, cloud-wide, and forgets past deletions too.
 2. **On every other device: Data tab → "Baseline recovery" → "↓ Adopt fresh baseline."** `adoptFreshBaseline()` clears that device's local state (`clearAllDataCore()`, the same reset `clearAllData()` uses, extracted so this function's own scenario-specific `confirm()` is the only prompt shown) and immediately pulls the freshly reseeded Firestore straight in. No file needs to reach this device — every item this device didn't already have adopts its baked-in rating directly (the `mergeImport(incoming, { cloudOrigin: true })` path above), and any match ranked after the reset gets applied normally on top, correctly, regardless of when this device happens to pull.
@@ -529,7 +531,7 @@ With a full pool of 5 items, one podium round generates up to 9 ELO updates vs 1
 
 ELO scores and win/loss counts are intentionally hidden during ranking (both 1v1 and Podium) to avoid anchoring bias. They remain visible in the Library and Leaderboard.
 
-The mode toggle (1 vs 1 / Podium) is persistent within a session but not saved to localStorage — it resets to Standard on page reload. To persist it, add `rankMode` to the `state` object.
+The mode toggle (1 vs 1 / Podium / Tier) is saved per device in `state.settings.rankMode` (2.16.1) and restored by `load()`, so the Rank tab reopens in the last-used mode. Like `smartPairMode`, it has a default in `freshState()` and is treated as `'standard'` when absent or unrecognized, so older saved data needs no migration.
 
 ### Tier
 
@@ -568,7 +570,9 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 
 | Function | What it does |
 |---|---|
-| `load()` | Reads localStorage, runs `migrateData()`, rebuilds selects, renders all views |
+| `load()` | Reads localStorage, runs `migrateData()`, restores per-device settings (`smartPairMode`, `rankMode`), rebuilds selects, renders views (not the Rank tab — `switchTab('rank')` initializes it on entry). If saved data can't be parsed/migrated, starts empty and sets `loadFailed`, which pauses `save()` (2.16.1) |
+| `downloadUnreadableData()` | Downloads the raw, unparseable `ranker-v1` string captured in `loadFailed` as a `.txt` for manual recovery |
+| `discardUnreadableData()` | Confirm-gated: clears `loadFailed` and resumes saving, replacing the unreadable stored data with the current state |
 | `migrateData(data)` | Applies all schema version migrations in sequence; called by both `load()` and `importData()` before touching state |
 | `save()` | Serializes `state` to localStorage; on failure sets `saveFailed` and shows the save-failure banner instead of failing silently (2.15.0) |
 | `renderSaveWarning()` | Shows/hides the `#save-warning` banner: error state when the last write failed, soft warning when usage is ≥ 80% of `LS_LIMIT_CHARS`, hidden otherwise |
@@ -596,7 +600,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `editItem(id)` | Toggles inline edit expansion for an item row; collapses any other open row |
 | `saveItem(id)` | Validates and writes edited field values back to state, saves; if the title or an identity field's value changed the item's id, rekeys it locally and tombstones the old id (2.4.0) so the rename propagates to other devices instead of leaving a stale duplicate — see "Merging rankings between devices" known gaps. The duplicate-id check runs before `item` is mutated (a rejected rename leaves the item untouched), and saving with no actual change toasts "No changes" without bumping `updatedAt` (2.15.0) |
 | `initRankView()` | Entry point for the Rank tab — dispatches to `loadPair()` or `loadPodium()` based on current mode |
-| `setRankMode(mode)` | Switches between `standard` and `podium` modes, updates toggle UI, reloads |
+| `setRankMode(mode)` | Switches between `standard`/`podium`/`tier`, saves it to `state.settings.rankMode` (2.16.1), updates toggle UI via `applyRankModeUI()`, reloads the rank view |
+| `applyRankModeUI(mode)` | Syncs the mode buttons' active state and the skip/new-round button to `mode`; also called by `load()` when restoring the saved mode |
 | `loadPair()` | Picks 2 random items from the active rank category, stores them in `currentPair` (for keyboard voting), renders VS cards with the running session count |
 | `vsCard(winner, loser, keyHint)` | Returns HTML string for one side of a comparison card, with an optional keyboard-shortcut hint next to "Pick this" |
 | `handleRankVoteKey(e)` | `document`-level `keydown` listener (registered once); votes via `ArrowLeft`/`1` (left card) or `ArrowRight`/`2` (right card) when standard mode's Rank tab is active and a pair is loaded; ignores input/textarea/select focus |
@@ -815,17 +820,16 @@ The CSV parser reads `#category`, `#primary`, and `#field` directives. To add ne
 
 ### Smart pair selection
 
-The Rank tab includes an optional **Smart pairing** toggle that changes how items are selected for comparison. When enabled, instead of picking two completely random items (which often results in lopsided matchups), smart pairing sorts items by ELO and picks two adjacent items — guaranteeing they have similar ratings and the outcome is uncertain.
+The Rank tab includes an optional **Smart pairing** toggle that changes how items are selected for comparison. When enabled, instead of picking items completely at random (which often results in lopsided matchups), it picks items with similar ratings so the outcome is uncertain.
 
 **Implementation**: 
-- `smartPair(list)` — sorts by ELO, picks a random position idx, returns `[sorted[idx], sorted[idx+1]]`
-- `randomPair(list)` — original random logic, used when toggle is off
-- Applied to all three ranking modes: VS (`loadPair`), Podium (`loadPodium`), and Tier (`startTierSession`)
-- Toggle is stored in `smartPairMode` flag and synced via `toggleSmartPair(enabled)`
+- **1v1** (`loadPair` → `smartPair(list)`): picks a random anchor item, then pairs it with the single item closest to it in ELO
+- **Podium** (`loadPodium`, only with ≥ 5 items): sorts by ELO and takes a random contiguous window of the round's pool size
+- **Tier** (`startTierSession`): after any priority items, fills the session from a random ELO-sorted window of `n + 2` items instead of a shuffled pool
+- `randomPair(list)` — original random logic, used when the toggle is off
+- The toggle is the `smartPairMode` flag, set via `toggleSmartPair(enabled)`, which also saves it to `state.settings.smartPairMode`; `load()` restores it, so it persists across reloads
 
 **Effect**: Convergence is faster (fewer uninformative blowouts), especially with large item pools (50+). Random mode is still the default — smart pairing is opt-in.
-
-**Extending**: To make the toggle persist across sessions, add `smartPairMode` to the `state` object and sync it in `save()`/`load()`. Currently it resets to `false` on page reload.
 
 ### Switch from localStorage to a backend
 

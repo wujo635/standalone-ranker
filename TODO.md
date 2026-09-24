@@ -10,8 +10,6 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## UI / persistence gaps
 
-- **Persist Smart pairing toggle.** `smartPairMode` resets to `false` on reload; needs adding to `state`. [ARCHITECTURE.md:724](ARCHITECTURE.md:724)
-- **Persist ranking mode (1v1/Podium).** Resets to Standard on reload; same fix shape as above. [ARCHITECTURE.md:465](ARCHITECTURE.md:465)
 - **Wire up `settings.userName`.** Added in schema v4 alongside `deviceId` but never used in any UI; reserved for human-readable attribution on history entries. [ARCHITECTURE.md:827](ARCHITECTURE.md:827)
 
 ## Scale / infra
