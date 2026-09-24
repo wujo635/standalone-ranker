@@ -621,7 +621,8 @@ Tab switching is handled by `switchTab(id)`, which toggles `.active` on both nav
 | `renderLB()` | Renders ELO-sorted leaderboard with category pills and medals, first `lbShown` rows only (infinite scroll, 2.16.0); returns immediately if the Leaderboard tab isn't active |
 | `appendLBRows(count)` | Appends the next `count` rows after those already rendered (no rebuild), then refreshes the footer and re-observes a fresh sentinel; `appendLBRows(lbList.length)` backs the **Show all** button |
 | `lbRowHtml(item, idx)` | One leaderboard row; score bar is relative to the full list's ELO range (`lbBot`/`lbRange`), not the rendered slice |
-| `activeFilterKey(cat)` | JSON of only the filters that actually narrow `cat`'s list (same rules as `getFilteredItems()`); used for the Leaderboard's reset fingerprint so inert filter-UI placeholders don't count as a change |
+| `filterNarrows(f)` | Whether one `filterState` entry actually narrows a list (number min/max/equals, string/multi `values`, or `nonBlank`) — the same conditions `getFilteredItems()` applies. Single source for the filter panel's active count (badge + Clear button) and `activeFilterKey()` |
+| `activeFilterKey(cat)` | JSON of only the entries in `filterState[cat]` that pass `filterNarrows()`; used for the Leaderboard's reset fingerprint so inert filter-UI placeholders don't count as a change |
 | `itemMeta(item, useLabels?)` | Returns array of formatted field strings; auto-labels when 2+ fields populated |
 | `itemMetaInline(item)` | Joins `itemMeta()` with ` · ` for single-line display in leaderboard and tier's untiered list |
 | `itemMetaStacked(item)` | Renders `itemMeta()` as stacked `<span>` blocks for VS and Podium rank cards |

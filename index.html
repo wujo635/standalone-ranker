@@ -943,6 +943,18 @@ function invalidateFieldTypeCache(cat) {
   Object.keys(fieldTypeCache).forEach(k => { if (k.startsWith(cat + ':')) delete fieldTypeCache[k]; });
 }
 
+// Whether one filterState entry actually narrows a list — the same conditions
+// getFilteredItems() applies. Shared by the filter panel's active count (badge + Clear
+// button) and the Leaderboard's reset fingerprint; the panel's copy used to list only
+// number/string types, so a multi-value filter (e.g. Genre) never showed as active.
+function filterNarrows(f) {
+  if (!f || !f.type) return false;
+  if (f.nonBlank) return true;
+  return f.type === 'number'
+    ? (f.min !== undefined || f.max !== undefined || f.equals !== undefined)
+    : !!(f.values && f.values.length > 0);
+}
+
 function getFilteredItems(cat, items, filters) {
   if (!filters || !filters[cat]) return items;
   const catFilters = filters[cat];
@@ -1001,11 +1013,7 @@ function renderFilterUI(cat) {
   }
 
   const catFilters = filterState[cat] || {};
-  const activeCount = Object.values(catFilters).filter(f => f && (
-    (f.type === 'number' && (f.min !== undefined || f.max !== undefined || f.equals !== undefined)) ||
-    (f.type === 'string' && f.values && f.values.length > 0) ||
-    f.nonBlank
-  )).length;
+  const activeCount = Object.values(catFilters).filter(filterNarrows).length;
 
   // Initialize collapse state (default to collapsed)
   if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
@@ -2334,11 +2342,7 @@ function renderLB() {
 function activeFilterKey(cat) {
   const active = {};
   for (const [name, f] of Object.entries(filterState[cat] || {})) {
-    if (!f || !f.type) continue;
-    const narrows = f.nonBlank || (f.type === 'number'
-      ? (f.min !== undefined || f.max !== undefined || f.equals !== undefined)
-      : (f.values && f.values.length > 0));
-    if (narrows) active[name] = f;
+    if (filterNarrows(f)) active[name] = f;
   }
   return JSON.stringify(active);
 }
