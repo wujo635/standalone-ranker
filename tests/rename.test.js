@@ -117,6 +117,35 @@ describe('on the receiving device', () => {
     assert.equal(B.get('state.history[0].winner.id'), newId);
   });
 
+  test('the moved copy survives later syncs (its rename tombstone stays on the old id)', () => {
+    rename(A, 'Heat', 'Heat (1995)');
+    pull(B, A);
+    assert.deepEqual(B.get('state.itemDeletes').map(t => t.itemId), [HEAT()], 'not rewritten onto the new id');
+    pull(B, A);
+    importFrom(B, A);
+    assert.deepEqual(titles(B), ['Heat (1995)', 'Ronin']);
+    assert.deepEqual(rating(items(B)[key('Heat (1995)')]), [1048, 3, 0]);
+  });
+
+  test('renaming back and forth repeatedly keeps one live item on both devices', () => {
+    // The third rename is the one that goes wrong if remapItemIds() rewrites tombstones:
+    // the first rename's tombstone (Heat -> Heat (1995)) would become a delete of the
+    // item's current id.
+    rename(A, 'Heat', 'Heat (1995)');
+    rename(A, 'Heat (1995)', 'Heat');
+    rename(A, 'Heat', 'Heat (1995)');
+    assert.deepEqual(titles(A), ['Heat (1995)', 'Ronin']);
+    const renames = A.get('state.itemDeletes').filter(t => t.renamedTo);
+    assert.deepEqual(renames.filter(t => t.itemId === t.renamedTo), [], 'no rename tombstone was rewritten to point at itself');
+    assert.equal(renames.length, 3, 'one rename tombstone per rename, each still on its own old id');
+    pull(B, A);
+    pull(A, B);
+    for (const [name, dev] of [['A', A], ['B', B]]) {
+      assert.deepEqual(titles(dev), ['Heat (1995)', 'Ronin'], name);
+      assert.deepEqual(rating(items(dev)[key('Heat (1995)')]), [1048, 3, 0], name);
+    }
+  });
+
   test('a file import gives the same result', () => {
     rename(A, 'Heat', 'Heat (1995)');
     importFrom(B, A);

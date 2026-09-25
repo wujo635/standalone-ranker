@@ -92,6 +92,15 @@ describe('items and fields', () => {
     assert.deepEqual(s.items[ronin.id].fields, { Year: '1998' });
   });
 
+  test('a newer edit brings its title along, so a case-only title change syncs (2.17.0)', () => {
+    // "heat" and "Heat" share an id (itemKey() lowercases), so this is an edit, not a
+    // rename. Before 2.17.0 only fields were taken and the old casing stuck forever.
+    const heat = item('Movies', 'heat', { updatedAt: 100 });
+    setLocal({ items: byId([heat]) });
+    importFile(exportPayload({ items: byId([{ ...heat, title: 'Heat', updatedAt: 200 }]) }));
+    assert.equal(state().items[heat.id].title, 'Heat');
+  });
+
   test('hidden stays per-device: kept on existing items, forced false on new ones', () => {
     const heat = item('Movies', 'Heat', { hidden: true, updatedAt: 100 });
     setLocal({ items: byId([heat]) });
