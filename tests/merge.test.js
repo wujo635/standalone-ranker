@@ -158,19 +158,64 @@ describe('matches', () => {
     assert.deepEqual(state().items, inOrder);
   });
 
-  test('a match between a brand-new item and an existing one is deferred, not recorded (file import)', () => {
-    // unionItemsAndSchema() freshly seeds Ronin from the file (its rating already
-    // includes m3), so m3 can't be applied without double-counting Ronin — it is left
-    // out of matchLog so a later merge can pick it up once Ronin is no longer fresh.
+  // Mixed pairing: a file brings a brand-new item (Ronin, freshly seeded — its rating
+  // already includes the match) that beat an item this device already had (Heat, whose
+  // rating doesn't). Only Heat's side may be applied.
+  const mixedPairing = () => {
     const heat = item('Movies', 'Heat');
-    setLocal({ items: byId([heat]) });
     const ronin = item('Movies', 'Ronin', { elo: 1016, wins: 1 });
     const m3 = match('dOther-1', ronin, heat);
-    importFile(exportPayload({ items: byId([heat, ronin]), matchLog: [m3] }));
+    return { heat, ronin, m3, payload: exportPayload({ items: byId([heat, ronin]), matchLog: [m3] }) };
+  };
+
+  test('a match between a brand-new item and an existing one updates only the existing side (2.16.2)', () => {
+    const { heat, ronin, payload } = mixedPairing();
+    setLocal({ items: byId([heat]) });
+    importFile(payload);
     const s = state();
-    assert.deepEqual(rating(s.items[heat.id]), [1000, 0, 0]);
+    const [, heatElo] = eloAfter(ronin, heat);
+    assert.deepEqual(rating(s.items[heat.id]), [heatElo, 0, 1], 'existing item gets its loss now');
+    assert.deepEqual(rating(s.items[ronin.id]), [1016, 1, 0], 'new item unchanged: its rating already had this win');
+    assert.deepEqual(s.matchLog.map(m => m.id), ['dOther-1'], 'recorded, so it is never applied again');
+  });
+
+  test('importing the same file again does not double-count the new item (2.16.2 regression)', () => {
+    // Before 2.16.2 the match was held back on the first import, then applied to BOTH
+    // sides on the second — giving Ronin a second win for one match.
+    const { heat, ronin, payload } = mixedPairing();
+    setLocal({ items: byId([heat]) });
+    importFile(payload);
+    const once = state();
+    importFile(payload);
+    const twice = state();
+    assert.deepEqual(twice.items, once.items);
+    assert.deepEqual(rating(twice.items[ronin.id]), [1016, 1, 0]);
+    assert.equal(twice.matchLog.length, 1);
+  });
+
+  test('a later cloud pull of the same match does not double-count it (2.16.2 regression)', () => {
+    const { heat, ronin, m3, payload } = mixedPairing();
+    setLocal({ items: byId([heat]) });
+    importFile(payload);
+    const afterImport = state();
+    const doc = i => ({ id: i.id, cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt });
+    pullCloud({ items: byId([doc(heat), doc(ronin)]), cats: ['Movies'], schema: {}, matchLog: [m3], itemDeletes: [], itemUndeletes: [], catDeletes: [], catUndeletes: [] });
+    assert.deepEqual(state().items, afterImport.items);
+  });
+
+  test('one-sided updates are applied in (ts, seq) order alongside ordinary matches', () => {
+    const heat = item('Movies', 'Heat'), batman = item('Movies', 'Batman');
+    setLocal({ items: byId([heat, batman]) });
+    const ronin = item('Movies', 'Ronin', { elo: 1016, wins: 1 });
+    const m1 = match('dOther-1', heat, batman, 10, 1);  // both existing: full update
+    const m2 = match('dOther-2', ronin, heat, 20, 2);   // mixed: Heat's side only
+    importFile(exportPayload({ items: byId([ronin]), matchLog: [m2, m1] }));
+    const s = state();
+    const [heatAfterM1, batmanAfterM1] = eloAfter(heat, batman);
+    const [, heatAfterM2] = eloAfter(ronin, { elo: heatAfterM1 });
+    assert.deepEqual(rating(s.items[batman.id]), [batmanAfterM1, 0, 1]);
+    assert.deepEqual(rating(s.items[heat.id]), [heatAfterM2, 1, 1]);
     assert.deepEqual(rating(s.items[ronin.id]), [1016, 1, 0]);
-    assert.deepEqual(s.matchLog, []);
   });
 
   test('matches touching an item this device does not have are recorded but skipped', () => {
