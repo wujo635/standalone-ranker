@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.16.2';
+const APP_VERSION = '2.17.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1392,7 +1392,12 @@ function addSchemaField() {
 // introduced itemKey() in the first place (see migrateData()'s `v < 4` block) —
 // used here for the schema-editor-triggered bulk rekey below, where a whole
 // category's worth of items/matches/history can change id at once.
-function remapItemIds(idMap) {
+// `opts.tombstones: false` leaves state.itemDeletes alone. A rename (saveItem(), or
+// applying a synced renamedTo tombstone in mergeImport()) must not remap tombstones:
+// the rename's own tombstone is keyed by the OLD id on purpose, and remapping it would
+// turn "old id was renamed" into "new id was deleted". The bulk identity rekey keeps the
+// default, since there existing tombstones should follow items onto the new id scheme.
+function remapItemIds(idMap, opts = {}) {
   const remappedItems = {};
   Object.values(state.items).forEach(item => {
     const newId = idMap[item.id] || item.id;
@@ -1403,7 +1408,9 @@ function remapItemIds(idMap) {
     if (idMap[m.wid]) m.wid = idMap[m.wid];
     if (idMap[m.lid]) m.lid = idMap[m.lid];
   });
-  state.itemDeletes.forEach(t => { if (idMap[t.itemId]) t.itemId = idMap[t.itemId]; });
+  if (opts.tombstones !== false) {
+    state.itemDeletes.forEach(t => { if (idMap[t.itemId]) t.itemId = idMap[t.itemId]; });
+  }
   state.history.forEach(entry => {
     if (entry.winner && idMap[entry.winner.id]) entry.winner.id = idMap[entry.winner.id];
     if (entry.loser && idMap[entry.loser.id]) entry.loser.id = idMap[entry.loser.id];
@@ -1677,17 +1684,22 @@ function saveItem(id) {
   item.updatedAt = Date.now();
   item.title = t;
   if (newId !== id) {
-    item.id = newId;
-    delete state.items[id];
-    state.items[newId] = item;
-    // Tombstone the old id so this rename actually propagates — without this, another
-    // device that already has a copy at the old id never learns it's stale, and just
-    // keeps it forever alongside the new one once it pulls the new id in as a separate
-    // item. mergeImport()'s existing tombstone handling (see "Item deletions") already
-    // removes a matching item on any device that pulls this, for free — no new sync
-    // mechanism needed. Real report: editing a Song's title left a duplicate (old +
-    // new titled entries) on the other device after the next sync.
-    state.itemDeletes.push({ itemId: id, ts: Date.now(), deviceId: state.settings.deviceId, title: oldTitle, cat });
+    // Move the item and its matchLog/history references (so Undo keeps working), but
+    // not tombstones: the rename tombstone below must stay keyed by the old id.
+    remapItemIds({ [id]: newId }, { tombstones: false });
+    // Renaming back to a title this item (or another) used to have: its id still has
+    // an active tombstone, which would delete this item on the next sync. Undelete it.
+    if (currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes).has(newId)) {
+      const prior = latestPerItemId(state.itemDeletes.filter(d => d.itemId === newId))[0];
+      state.itemUndeletes.push({ itemId: newId, ts: Math.max(Date.now(), prior.ts + 1), deviceId: state.settings.deviceId, title: t, cat });
+    }
+    // Tombstone the old id WITH renamedTo (2.17.0). Another device that has a copy at
+    // the old id moves it to newId, keeping its own rating and matches, instead of
+    // deleting it (see mergeImport()). Before 2.4.0 there was no tombstone at all, which
+    // left duplicates (real report: a renamed Song kept both titles on the other device);
+    // from 2.4.0 to 2.16.x it was a plain delete, so a Firestore pull recreated the
+    // renamed item at 1000/0W-0L on the other device.
+    state.itemDeletes.push({ itemId: id, ts: tsAfterUndeletes(id), deviceId: state.settings.deviceId, title: oldTitle, cat, renamedTo: newId });
   }
   expandedItemId = null;
   invalidateFieldTypeCache(cat);
@@ -2680,7 +2692,9 @@ function renderDeletedItems() {
   if (!el) return;
   const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
   const latestDeletes = latestPerItemId(state.itemDeletes);
-  const rows = latestDeletes.filter(t => tombstoned.has(t.itemId)).sort((a,b) => b.ts - a.ts);
+  // Rename tombstones (renamedTo) aren't deletions: the item lives on under its new id,
+  // and undeleting the old id would bring back a stale duplicate.
+  const rows = latestDeletes.filter(t => tombstoned.has(t.itemId) && !t.renamedTo).sort((a,b) => b.ts - a.ts);
   if (!rows.length) {
     deletedItemsShowAll = false;
     el.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">No deleted items.</div>';
@@ -2823,7 +2837,9 @@ function applyNewMatches(newMatches, seededIds = new Set()) {
   const sorted = [...newMatches].sort((a, b) => a.ts - b.ts || a.seq - b.seq);
   sorted.forEach(m => {
     const w = state.items[m.wid], l = state.items[m.lid];
-    if (!w || !l) return;
+    // wid === lid only when two entries that played each other were merged into one
+    // by a synced rename (see moveOrMergeItem()) — nothing meaningful to apply.
+    if (!w || !l || m.wid === m.lid) return;
     const wSeeded = seededIds.has(m.wid), lSeeded = seededIds.has(m.lid);
     if (wSeeded && lSeeded) return;
     if (!wSeeded && !lSeeded) { eloUpdate(w, l); return; }
@@ -2865,6 +2881,58 @@ function currentlyTombstonedKeys(deletes, undeletes, keyOf) {
   return keys;
 }
 function currentlyTombstonedIds(deletes, undeletes) { return currentlyTombstonedKeys(deletes, undeletes, t => t.itemId); }
+
+// Renames (2.17.0): a single-item rename is an itemDeletes tombstone for the old id with
+// `renamedTo: newId`. Returns a function mapping any item id to where it lives now:
+// follow renamedTo while the id is currently tombstoned, stopping at the first live id.
+// If the chain ends at a plain tombstone (no renamedTo), the returned id is itself
+// tombstoned, meaning the item was deleted. Only each id's LATEST tombstone counts
+// (latestPerItemId), so a delete after a rename wins. A rename back can't cycle, because
+// it undeletes the target (see saveItem()) and a live id stops the walk. `seen` is a
+// guard against corrupt data anyway.
+function makeIdResolver() {
+  const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
+  const latest = {};
+  latestPerItemId(state.itemDeletes).forEach(t => { latest[t.itemId] = t; });
+  return id => {
+    const seen = new Set();
+    while (tombstoned.has(id) && latest[id]?.renamedTo && !seen.has(id)) {
+      seen.add(id);
+      id = latest[id].renamedTo;
+    }
+    return id;
+  };
+}
+
+// Moves a local item from fromId to toId, taking its matchLog/history references with it
+// (tombstones deliberately untouched, see remapItemIds()). If toId already holds an
+// item (e.g. this device separately added the renamed-to title), the two entries are
+// merged: wins/losses summed, rating from whichever entry has more matches (tie: keep
+// toId's), fields/title last-write-wins by updatedAt, hidden stays toId's. Any match
+// between the two entries becomes a self-match; applyNewMatches() skips those.
+function moveOrMergeItem(fromId, toId) {
+  const src = state.items[fromId], dst = state.items[toId];
+  if (dst) {
+    const played = i => (i.wins || 0) + (i.losses || 0);
+    const srcNewer = (src.updatedAt || 0) > (dst.updatedAt || 0);
+    state.items[toId] = {
+      ...dst,
+      elo: played(src) > played(dst) ? src.elo : dst.elo,
+      wins: (dst.wins || 0) + (src.wins || 0),
+      losses: (dst.losses || 0) + (src.losses || 0),
+      ...(srcNewer ? { title: src.title, fields: src.fields, updatedAt: src.updatedAt } : {}),
+    };
+    delete state.items[fromId];
+  }
+  remapItemIds({ [fromId]: toId }, { tombstones: false });
+}
+
+// A timestamp guaranteed to beat every undelete already recorded for itemId. A rename
+// or delete in the same millisecond as an undelete of that id would otherwise lose the
+// tie-break (see undeleteItem(), which does the mirror image for undeletes).
+function tsAfterUndeletes(itemId) {
+  return Math.max(Date.now(), ...state.itemUndeletes.filter(u => u.itemId === itemId).map(u => u.ts + 1));
+}
 function currentlyTombstonedCats(deletes, undeletes) { return currentlyTombstonedKeys(deletes, undeletes, t => t.cat); }
 
 // New items are unioned in (adding is always safe). For items both sides already have,
@@ -2940,6 +3008,12 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
       if (!state.cats.includes(inc.cat)) state.cats.push(inc.cat);
       added++;
     } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
+      // Title travels with the rest of the edit. Same id means the titles can only
+      // differ in case/whitespace (itemKey() lowercases and trims) — or, since 2.17.0,
+      // because this copy was just moved here by a synced rename and still carries its
+      // old title. Before 2.17.0 only fields were taken, so a case-only title edit
+      // never synced either.
+      cur.title = inc.title;
       cur.fields = inc.fields;
       cur.updatedAt = inc.updatedAt;
     }
@@ -3024,7 +3098,19 @@ function mergeImport(incoming, opts) {
   const tombstoneIds = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
   // Remove any item this merge newly learns was deleted, before unioning items in, so
   // an incoming copy that doesn't yet know about the delete can't resurrect it locally.
-  tombstoneIds.forEach(id => { if (state.items[id]) delete state.items[id]; });
+  // A tombstone that is really a rename (renamedTo, 2.17.0) moves the local copy to where
+  // the item lives now, rating and matches included, merging into an entry already there
+  // (see moveOrMergeItem()). Only a chain ending at a plain delete removes the item.
+  const resolveId = makeIdResolver();
+  tombstoneIds.forEach(id => {
+    if (!state.items[id]) return;
+    const target = resolveId(id);
+    if (target !== id && !tombstoneIds.has(target)) moveOrMergeItem(id, target);
+    else delete state.items[id];
+  });
+  // Local matches recorded against an id that has since been renamed follow it too
+  // (a no-op for ids moved just above, which remapItemIds() already rewrote).
+  state.matchLog.forEach(m => { m.wid = resolveId(m.wid); m.lid = resolveId(m.lid); });
 
   state.catDeletes = latestPerCat([...state.catDeletes, ...(incoming.catDeletes || [])]);
   state.catUndeletes = latestPerCat([...state.catUndeletes, ...(incoming.catUndeletes || [])]);
@@ -3074,7 +3160,10 @@ function mergeImport(incoming, opts) {
   // running Reset, then a third device adopting the baseline afterward, would otherwise
   // treat those post-reset matches as "already seen" without ever having applied them.
   const localIds = new Set(state.matchLog.map(m => m.id));
-  const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id));
+  // Resolved through renames: a device that voted before hearing of a rename recorded
+  // the old id, and that vote belongs to the renamed item.
+  const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id))
+    .map(m => ({ ...m, wid: resolveId(m.wid), lid: resolveId(m.lid) }));
   applyNewMatches(newMatches, cloudOrigin ? new Set() : freshlySeeded);
   state.matchLog = dedupeById([...state.matchLog, ...newMatches]);
 
@@ -3242,6 +3331,22 @@ function cloudSignOut() {
   cloudAuth.signOut();
 }
 
+// The one place an itemDeletes tombstone is mapped to and from its Firestore doc, so
+// upload and pull can't drift apart on which fields travel. title/cat go up as null
+// when missing: Firestore rejects undefined field values outright, and tombstones
+// created before 2.2.0 genuinely have no title/cat.
+// renamedTo (2.17.0) marks a rename rather than a delete; it goes up as null on a plain
+// tombstone and is only set on the way back down when present, so plain tombstones
+// round-trip unchanged. Older app versions ignore the field and see a plain delete.
+function tombstoneDoc(t) {
+  return { itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null, renamedTo: t.renamedTo ?? null };
+}
+function tombstoneFromDoc(d) {
+  const t = { itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat };
+  if (d.renamedTo) t.renamedTo = d.renamedTo;
+  return t;
+}
+
 // Firestore is now a real append-only log, not a blob: the root doc (CLOUD_DOC) only
 // holds low-churn cats/schema, and items/matches/itemDeletes each live in their own
 // subcollection with one document per fact, doc-ID keyed by that fact's own id — so
@@ -3335,7 +3440,7 @@ async function uploadToFirestore(opts) {
     // bug: tombstones created before title/cat were added to deleteItem() (pre-2.2.0)
     // have no title/cat at all, so t.title/t.cat here can genuinely be undefined.
     deletesToPush.forEach(t => writes.push([sharedRef.collection('itemDeletes').doc(t.itemId), {
-      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null,
+      ...tombstoneDoc(t),
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     // Keyed by itemId, same as itemDeletes — a later undelete of the same item just
@@ -3465,7 +3570,7 @@ async function pullFromFirestore(opts) {
     });
     deletesSnap.forEach(doc => {
       const d = doc.data();
-      incoming.itemDeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat });
+      incoming.itemDeletes.push(tombstoneFromDoc(d));
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
     undeletesSnap.forEach(doc => {

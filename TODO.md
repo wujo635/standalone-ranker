@@ -4,7 +4,6 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## Sync / data model
 
-- **Replace rename tombstone with a real rename log.** Editing an item's title or an identity field currently computes a new deterministic id and tombstones the old one (`saveItem()`, [index.html:1405](index.html:1405)) — same mechanism as a real delete. This orphans local `matchLog`/`history` entries pointing at the old id, and can permanently block reusing that exact title+identity combo later (the "Superman" incident, [ARCHITECTURE.md:329](ARCHITECTURE.md:329)). Proposed fix: an append-only `itemRenames` log (`{oldId, newId, ts, deviceId}`), unioned like `matchLog`, applied on merge via the existing `remapItemIds()` machinery instead of delete-then-recreate. Needs a new Firestore subcollection and a schema-version bump. See [ARCHITECTURE.md:822](ARCHITECTURE.md:822).
 - **Undo for item/category deletions.** Deletions are permanent today (confirm prompt only, no undo stack). Would need a soft-delete (`deleted: true`) plus a "Recently deleted" view. [ARCHITECTURE.md:812](ARCHITECTURE.md:812)
 - **Expand cloud sync beyond two users.** Deliberately out of scope for now. Short-term: swap the hardcoded two-UID Firestore rule for an allowlist collection. Long-term (self-serve, multiple groups): a from-scratch redesign of the sync layer, not an incremental change. [ARCHITECTURE.md:746](ARCHITECTURE.md:746)
 
