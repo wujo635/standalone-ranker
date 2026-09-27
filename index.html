@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.17.0';
+const APP_VERSION = '2.17.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1308,15 +1308,12 @@ function saveNewCat() {
   const primary = document.getElementById('newcat-primary').value.trim() || 'Name';
   state.cats.push(name);
   state.schema[name] = { primary, fields: [...pendingFields] };
-  // Unconditional, not just for names that happen to be currently tombstoned: creating
-  // a category always means "this name should exist and sync from now on," so this
-  // undelete fact simply always wins over any past delete of the same name (including
-  // one this device hasn't even pulled yet — Math.max guards the tie/race). Unlike item
-  // undelete, this needs no dedicated UI/button — there's no data to consciously choose
-  // to restore, since deleting a category already permanently wipes its items/schema;
-  // recreating a same-named category is a brand-new thing that should just work.
-  const priorDeleteTs = state.catDeletes.filter(t => t.cat === name).reduce((max, t) => Math.max(max, t.ts), 0);
-  state.catUndeletes.push({ cat: name, ts: Math.max(Date.now(), priorDeleteTs + 1), deviceId: state.settings.deviceId });
+  // Creating a category always means "this name should exist and sync from now on."
+  // Unlike item undelete, this needs no dedicated UI/button — there's no data to
+  // consciously choose to restore, since deleting a category already permanently wipes
+  // its items/schema; recreating a same-named category is a brand-new thing that should
+  // just work. See undeleteCategory().
+  undeleteCategory(name);
   rebuildCatSelects();
   document.getElementById('sel-cat').value = name;
   save(); renderLibrary(); switchTab('library'); toast('Category created: ' + name);
@@ -1585,6 +1582,7 @@ function addItem() {
   const id = itemKey(cat, t, identitySuffixFor(cat, fieldValues));
   if (state.items[id]) { toast('An item with this ' + primary + ' already exists'); return; }
   state.items[id] = { id, cat, title: t, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
+  undeleteIfTombstoned(id, t, cat);
   document.getElementById('inp-primary').value = '';
   fields.forEach(f => { const el = document.getElementById('field-' + f.name); if (el) el.value = ''; });
   invalidateFieldTypeCache(cat);
@@ -1689,10 +1687,7 @@ function saveItem(id) {
     remapItemIds({ [id]: newId }, { tombstones: false });
     // Renaming back to a title this item (or another) used to have: its id still has
     // an active tombstone, which would delete this item on the next sync. Undelete it.
-    if (currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes).has(newId)) {
-      const prior = latestPerItemId(state.itemDeletes.filter(d => d.itemId === newId))[0];
-      state.itemUndeletes.push({ itemId: newId, ts: Math.max(Date.now(), prior.ts + 1), deviceId: state.settings.deviceId, title: t, cat });
-    }
+    undeleteIfTombstoned(newId, t, cat);
     // Tombstone the old id WITH renamedTo (2.17.0). Another device that has a copy at
     // the old id moves it to newId, keeping its own rating and matches, instead of
     // deleting it (see mergeImport()). Before 2.4.0 there was no tombstone at all, which
@@ -2580,6 +2575,9 @@ function resolveCSVImport(result) {
       return;
     }
   } else {
+    // A CSV that creates a category is the same "this name should exist" intent as
+    // New Category — without this, a previously deleted category name stays blocked.
+    undeleteCategory(category);
     applyCSVImport(result, true);
     toast('Created ' + category + ' with ' + items.length + ' items');
   }
@@ -2595,6 +2593,7 @@ function resolveCSVImport(result) {
 // Schema directives in the CSV are ignored — existing schema is kept.
 function bulkAddCSVImport({ category, items }) {
   let added = 0, updated = 0, unchanged = 0;
+  const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
   items.forEach(({ title, fields: fieldValues }) => {
     // Match by the same identity-aware id addItem()/saveItem() use — not title alone
     // — so two rows sharing a title but differing on an identity field (e.g. Year)
@@ -2615,8 +2614,9 @@ function bulkAddCSVImport({ category, items }) {
         unchanged++;
       }
     } else {
-      // New item — add fresh
+      // New item — add fresh (undeleting its id if that title was deleted before)
       state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
+      undeleteIfTombstoned(id, title, category, tombstoned);
       added++;
     }
   });
@@ -2626,9 +2626,14 @@ function bulkAddCSVImport({ category, items }) {
 function applyCSVImport({ category, primary, fields, items }, updateSchema) {
   if (!state.cats.includes(category)) state.cats.push(category);
   if (updateSchema) state.schema[category] = { primary, fields };
+  // Replace tombstones every existing item first (deleteItemsInCat()), so every row
+  // whose title didn't change lands on a freshly tombstoned id — undelete each one, or
+  // the next sync deletes it again (real data loss before 2.17.1).
+  const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
   items.forEach(({ title, fields: fieldValues }) => {
     const id = itemKey(category, title, identitySuffixFor(category, fieldValues));
     state.items[id] = { id, cat: category, title, fields: fieldValues, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() };
+    undeleteIfTombstoned(id, title, category, tombstoned);
   });
 }
 
@@ -2932,6 +2937,32 @@ function moveOrMergeItem(fromId, toId) {
 // tie-break (see undeleteItem(), which does the mirror image for undeletes).
 function tsAfterUndeletes(itemId) {
   return Math.max(Date.now(), ...state.itemUndeletes.filter(u => u.itemId === itemId).map(u => u.ts + 1));
+}
+
+// Every path that creates an item at an id (add form, CSV bulk add / create / replace,
+// a rename back in saveItem()) calls this. Ids come from titles, so re-creating a
+// deleted title lands on an id whose tombstone is still active, and without an undelete
+// the next sync deletes the new item again on every device (the 2.2.0 "Superman" trap;
+// CSV Replace hit it for every unchanged row, since it tombstones the whole category
+// before re-creating its rows). Only records an undelete when this device currently has
+// the id tombstoned — not on every add, which would mean an undelete record plus a
+// Firestore write for every item ever created (thousands on a bulk import) to cover the
+// rare race of a delete this device hasn't pulled yet. Bulk callers pass `tombstoned`,
+// computed once, instead of recomputing it per row.
+function undeleteIfTombstoned(itemId, title, cat, tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes)) {
+  if (!tombstoned.has(itemId)) return;
+  const prior = latestPerItemId(state.itemDeletes.filter(d => d.itemId === itemId))[0];
+  state.itemUndeletes.push({ itemId, ts: Math.max(Date.now(), prior.ts + 1), deviceId: state.settings.deviceId, title, cat });
+  tombstoned.delete(itemId);
+}
+
+// Creating a category (New Category, or a CSV import that creates one) always records
+// a category undelete, not just when the name is currently tombstoned: it's one record
+// per category, and it also wins over a delete of the same name this device hasn't
+// pulled yet. Math.max guards the tie/race with a known delete.
+function undeleteCategory(name) {
+  const priorDeleteTs = state.catDeletes.filter(t => t.cat === name).reduce((max, t) => Math.max(max, t.ts), 0);
+  state.catUndeletes.push({ cat: name, ts: Math.max(Date.now(), priorDeleteTs + 1), deviceId: state.settings.deviceId });
 }
 function currentlyTombstonedCats(deletes, undeletes) { return currentlyTombstonedKeys(deletes, undeletes, t => t.cat); }
 
