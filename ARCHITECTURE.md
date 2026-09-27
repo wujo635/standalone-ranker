@@ -72,6 +72,7 @@ tests/migrate.test.js          migrateData() version chain + load()
 tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
 tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
+tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -87,9 +88,10 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
+- **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
 - **Regression-first:** sync/merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). CLAUDE.md requires a test that fails without the fix for any such bug.
 
-Not covered yet: Firestore upload/pull themselves (would need a fake Firestore), the CSV parser, and click-level UI tests of buttons/handlers.
+Not covered yet: Firestore upload/pull themselves (would need a fake Firestore) and the CSV parser.
 
 ---
 
