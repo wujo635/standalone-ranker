@@ -9,6 +9,7 @@
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { loadApp } = require('./helpers/app');
+const { pull, importFrom } = require('./helpers/sync');
 
 let A, B;
 beforeEach(() => { A = loadApp(); B = loadApp(); seed(A, 'dA'); seed(B, 'dB'); });
@@ -46,23 +47,6 @@ function voteOn(app, winnerTitle, loserTitle) {
   app.run(`eloUpdate(state.items[${JSON.stringify(w)}], state.items[${JSON.stringify(l)}]); recordMatch('Movies', ${JSON.stringify(w)}, ${JSON.stringify(l)});`);
 }
 
-// What pullFromFirestore() hands mergeImport() after `src` uploads: item docs without
-// ratings, matches, and tombstones round-tripped through the same doc mapping the
-// upload/pull code uses (tombstoneDoc() on the sender, tombstoneFromDoc() on the receiver).
-function pull(dst, src) {
-  const s = src.get('state');
-  const items = {};
-  Object.values(s.items).forEach(i => { items[i.id] = { id: i.id, cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt }; });
-  const docs = src.get(`state.itemDeletes.map(tombstoneDoc)`);
-  const itemDeletes = dst.get(`${JSON.stringify(docs)}.map(tombstoneFromDoc)`);
-  const incoming = { items, cats: s.cats, schema: s.schema, matchLog: s.matchLog,
-    itemDeletes, itemUndeletes: s.itemUndeletes, catDeletes: s.catDeletes, catUndeletes: s.catUndeletes };
-  dst.run(`mergeImport(${JSON.stringify(incoming)}, { cloudOrigin: true })`);
-}
-// File path: src exports, dst imports (importData() -> mergeImport(migrateData(json))).
-function importFrom(dst, src) {
-  dst.run(`mergeImport(migrateData(${JSON.stringify(src.get('buildExportPayload()'))}))`);
-}
 
 const items = app => app.get('state.items');
 const rating = i => [i.elo, i.wins, i.losses];
