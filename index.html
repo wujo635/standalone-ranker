@@ -238,11 +238,11 @@
   <div id="save-warning" class="save-warning hidden" role="alert"></div>
 
   <nav>
-    <button class="active" onclick="switchTab('library')">Library</button>
-    <button onclick="switchTab('rank')">Rank</button>
-    <button onclick="switchTab('leaderboard')">Leaderboard</button>
-    <button onclick="switchTab('history')">History</button>
-    <button onclick="switchTab('data')">Data</button>
+    <button class="active" data-action="switchTab" data-args='["library"]'>Library</button>
+    <button data-action="switchTab" data-args='["rank"]'>Rank</button>
+    <button data-action="switchTab" data-args='["leaderboard"]'>Leaderboard</button>
+    <button data-action="switchTab" data-args='["history"]'>History</button>
+    <button data-action="switchTab" data-args='["data"]'>Data</button>
   </nav>
 
   <!-- Library -->
@@ -250,9 +250,9 @@
     <div class="card">
       <div class="section-label">Category</div>
       <div class="row" style="margin-bottom:.85rem">
-        <select id="sel-cat" onchange="document.getElementById('lib-search').value='';resetFilters(libCat());renderLibrary()"></select>
-        <button onclick="openNewCatModal()">+ New category</button>
-        <button class="ghost btn-sm" onclick="openSchemaEditor()" title="Edit fields">⚙ Fields</button>
+        <select id="sel-cat" data-change="onLibCatChange"></select>
+        <button data-action="openNewCatModal">+ New category</button>
+        <button class="ghost btn-sm" data-action="openSchemaEditor" title="Edit fields">⚙ Fields</button>
       </div>
       <div class="section-label">Add item</div>
       <div id="add-form"></div>
@@ -260,8 +260,8 @@
     <div class="card">
       <div class="section-label">Search</div>
       <div class="search-wrap">
-        <input type="text" id="lib-search" placeholder="Search by title or fields…" onkeyup="renderLibrary()">
-        <button type="button" id="lib-search-clear" class="search-clear" onmousedown="event.preventDefault()" onclick="clearLibSearch()" title="Clear search" aria-label="Clear search" style="display:none">✕</button>
+        <input type="text" id="lib-search" placeholder="Search by title or fields…" data-keyup="renderLibrary">
+        <button type="button" id="lib-search-clear" class="search-clear" data-keep-focus data-action="clearLibSearch" title="Clear search" aria-label="Clear search" style="display:none">✕</button>
       </div>
     </div>
     <div class="card">
@@ -291,16 +291,16 @@
         <div class="section-label">Extra fields <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted)">(optional)</span></div>
         <div id="newcat-fields"></div>
         <div class="row" style="margin-top:.6rem;margin-bottom:1.25rem;flex-wrap:wrap;gap:8px">
-          <input type="text" id="newcat-field-inp" placeholder="Field name…" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')addNewCatField()">
+          <input type="text" id="newcat-field-inp" placeholder="Field name…" style="flex:1;min-width:120px" data-enter="addNewCatField">
           <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:var(--text-secondary);white-space:nowrap;cursor:pointer">
             <input type="checkbox" id="newcat-field-req"> Required
           </label>
-          <button onclick="addNewCatField()">Add field</button>
+          <button data-action="addNewCatField">Add field</button>
         </div>
 
         <div class="row" style="justify-content:flex-end;gap:8px">
-          <button onclick="switchTab('library')">Cancel</button>
-          <button class="primary" onclick="saveNewCat()">Create category</button>
+          <button data-action="switchTab" data-args='["library"]'>Cancel</button>
+          <button class="primary" data-action="saveNewCat">Create category</button>
         </div>
       </div>
     </div>
@@ -322,18 +322,18 @@
         <div class="section-label">Extra fields</div>
         <div id="schema-fields"></div>
         <div class="row" style="margin-top:.6rem;margin-bottom:1.25rem;flex-wrap:wrap;gap:8px">
-          <input type="text" id="schema-field-inp" placeholder="New field name…" style="flex:1;min-width:120px" onkeydown="if(event.key==='Enter')addSchemaField()">
+          <input type="text" id="schema-field-inp" placeholder="New field name…" style="flex:1;min-width:120px" data-enter="addSchemaField">
           <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:var(--text-secondary);white-space:nowrap;cursor:pointer">
             <input type="checkbox" id="schema-field-req"> Required
           </label>
-          <button onclick="addSchemaField()">Add</button>
+          <button data-action="addSchemaField">Add</button>
         </div>
 
         <div class="row" style="justify-content:space-between">
-          <button class="danger btn-sm" onclick="confirmDeleteCat()">Delete category</button>
+          <button class="danger btn-sm" data-action="confirmDeleteCat">Delete category</button>
           <div class="row" style="gap:8px">
-            <button onclick="switchTab('library')">Cancel</button>
-            <button class="primary" onclick="saveSchema()">Save</button>
+            <button data-action="switchTab" data-args='["library"]'>Cancel</button>
+            <button class="primary" data-action="saveSchema">Save</button>
           </div>
         </div>
       </div>
@@ -345,22 +345,22 @@
     <div class="row" style="margin-bottom:1rem;flex-wrap:wrap;gap:10px">
       <div class="row" style="gap:8px">
         <div class="section-label" style="margin-bottom:0">Category</div>
-        <select id="rank-cat" onchange="resetFilters(rankCat());standardSessionVotes=0;initRankView()"></select>
+        <select id="rank-cat" data-change="onRankCatChange"></select>
       </div>
       <div class="mode-toggle">
-        <button class="mode-btn active" id="mode-btn-standard" onclick="setRankMode('standard')">1 vs 1</button>
-        <button class="mode-btn" id="mode-btn-podium" onclick="setRankMode('podium')">Podium</button>
-        <button class="mode-btn" id="mode-btn-tier" onclick="setRankMode('tier')">Tier</button>
+        <button class="mode-btn active" id="mode-btn-standard" data-action="setRankMode" data-args='["standard"]'>1 vs 1</button>
+        <button class="mode-btn" id="mode-btn-podium" data-action="setRankMode" data-args='["podium"]'>Podium</button>
+        <button class="mode-btn" id="mode-btn-tier" data-action="setRankMode" data-args='["tier"]'>Tier</button>
       </div>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);margin-left:auto;white-space:nowrap;cursor:pointer">
-        <input type="checkbox" id="smart-pair-toggle" onchange="toggleSmartPair(this.checked)" style="accent-color:var(--accent)"> Smart pairing
+        <input type="checkbox" id="smart-pair-toggle" data-change="toggleSmartPair" data-pass="checked" style="accent-color:var(--accent)"> Smart pairing
       </label>
     </div>
     <div class="card">
       <div id="rank-filters"></div>
     </div>
     <div id="rank-pair"></div>
-    <div class="skip-row" id="rank-skip-row"><button class="skip-btn" id="rank-skip-btn" onclick="initRankView()">↻ Skip this pair</button></div>
+    <div class="skip-row" id="rank-skip-row"><button class="skip-btn" id="rank-skip-btn" data-action="initRankView">↻ Skip this pair</button></div>
   </div>
 
   <!-- Leaderboard -->
@@ -380,14 +380,14 @@
       <div class="card-title">Export</div>
       <div class="card-desc">Download your entire library as JSON, or export the current category as a clean CSV — no rankings — so others can import it as a fresh starting point.</div>
       <div class="row" style="flex-wrap:wrap;gap:8px">
-        <button onclick="exportData()">↓ Export JSON</button>
-        <button onclick="exportCategoryCSV()">↓ Export category as CSV</button>
+        <button data-action="exportData">↓ Export JSON</button>
+        <button data-action="exportCategoryCSV">↓ Export category as CSV</button>
       </div>
     </div>
     <div class="card">
       <div class="card-title">Import</div>
       <div class="card-desc">Load a previously exported JSON file. New items and comparisons made on either device are always merged in automatically — nothing is ever discarded, so there's nothing to confirm.</div>
-      <input type="file" id="file-inp" accept=".json" onchange="importData(event)">
+      <input type="file" id="file-inp" accept=".json" data-change="importData" data-pass="event">
     </div>
     <div class="card">
       <div class="card-title">Cloud sync</div>
@@ -395,8 +395,8 @@
       <div id="cloud-auth"></div>
       <div id="cloud-sync-actions" hidden>
         <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:.6rem">
-          <button onclick="uploadToFirestore()" id="cloud-upload-btn">&#8593; Upload rankings</button>
-          <button onclick="pullFromFirestore()" id="cloud-pull-btn">&#8595; Pull rankings</button>
+          <button data-action="uploadToFirestore" id="cloud-upload-btn">&#8593; Upload rankings</button>
+          <button data-action="pullFromFirestore" id="cloud-pull-btn">&#8595; Pull rankings</button>
         </div>
         <div id="cloud-sync-times" style="margin-top:.6rem"></div>
       </div>
@@ -407,17 +407,17 @@
       <div style="margin-top:.8rem">
         <div style="font-weight:600;font-size:13px">On the device you trust most right now</div>
         <div class="card-desc" style="margin-top:.2rem">"Reset shared baseline" pulls in everything Firestore has, wipes the cloud, then reseeds it from this device's own (now complete) rankings — fully automatic, no Firebase console access or file-passing needed. The reseed bakes final ratings into each item and starts the match history over from zero, so this also resets Firestore's history size back down instead of carrying the full log forward. <strong>Past deletions are forgotten too</strong> — a reset means starting over completely; if a stale device that missed a deletion uploads that item again afterward, it comes back as a normal item instead of being blocked. Every other device must then click "Adopt fresh baseline" below.</div>
-        <button onclick="resetSharedBaseline()" id="cloud-reset-btn" style="margin-top:.4rem">&#9888; Reset shared baseline</button>
+        <button data-action="resetSharedBaseline" id="cloud-reset-btn" style="margin-top:.4rem">&#9888; Reset shared baseline</button>
       </div>
       <div style="margin-top:1rem">
         <div style="font-weight:600;font-size:13px">On every other device, after someone resets the baseline</div>
         <div class="card-desc" style="margin-top:.2rem">Clears this device and pulls the freshly reseeded cloud straight in. Use this, not a plain Pull — an un-cleared device would silently keep its own old ratings for anything it already has instead of adopting the reset ones.</div>
-        <button onclick="adoptFreshBaseline()" id="cloud-adopt-btn" style="margin-top:.4rem">&#8595; Adopt fresh baseline</button>
+        <button data-action="adoptFreshBaseline" id="cloud-adopt-btn" style="margin-top:.4rem">&#8595; Adopt fresh baseline</button>
       </div>
       <div style="margin-top:1rem">
         <div style="font-weight:600;font-size:13px">Manual / offline fallback</div>
         <div class="card-desc" style="margin-top:.2rem">Same full pull as "Reset shared baseline," but only downloads a JSON file — doesn't touch the cloud. Its match-by-match history is compacted into each item's final rating and past deletions are dropped, so <strong>only import it into a freshly cleared device</strong> (Data tab → Clear all data first) — merging it onto a library that still has some of these items would silently skip their ranking updates and not re-apply any deletions.</div>
-        <button onclick="exportRecoveryBaseline()" id="cloud-recovery-btn" style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
+        <button data-action="exportRecoveryBaseline" id="cloud-recovery-btn" style="margin-top:.4rem">&#8595; Full resync + export baseline</button>
       </div>
     </div>
     <div class="card">
@@ -431,8 +431,8 @@
     </div>
     <div class="card">
       <div class="card-title">Preload from CSV</div>
-      <div class="card-desc">Import a formatted CSV file to create a category with its schema and items. <a href="#" onclick="showCsvHelp();return false;">See format guide</a>.</div>
-      <input type="file" id="csv-inp" accept=".csv" onchange="importCSV(event)">
+      <div class="card-desc">Import a formatted CSV file to create a category with its schema and items. <a href="#" data-action="showCsvHelp">See format guide</a>.</div>
+      <input type="file" id="csv-inp" accept=".csv" data-change="importCSV" data-pass="event">
     </div>
     <div id="csv-help" style="display:none" class="card">
       <div class="card-title">CSV format guide</div>
@@ -452,7 +452,7 @@ Stephen Curry,Warriors,PG,2009</pre>
     <div class="card">
       <div class="card-title">Clear all data</div>
       <div class="card-desc">Permanently deletes everything — all items, categories, and field definitions. Export first if you want a backup.</div>
-      <button class="danger" onclick="clearAllData()">Clear all data</button>
+      <button class="danger" data-action="clearAllData">Clear all data</button>
     </div>
     <div class="card">
       <div class="card-title">Version</div>
@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.17.1';
+const APP_VERSION = '2.17.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -641,13 +641,13 @@ function renderSaveWarning() {
     el.className = 'save-warning is-error';
     el.innerHTML = `<strong>Your saved data couldn't be loaded, so saving is paused.</strong> Ranker started empty and won't overwrite what's stored (error: ${esc(loadFailed.message)}). Download the raw data to recover it; if you import a backup instead, choose "Discard and resume saving" afterwards so the import is kept.
       <div class="row" style="gap:8px;margin-top:8px">
-        <button class="btn-sm danger" onclick="downloadUnreadableData()">Download raw saved data</button>
-        <button class="btn-sm ghost" onclick="discardUnreadableData()">Discard and resume saving</button>
+        <button class="btn-sm danger" data-action="downloadUnreadableData">Download raw saved data</button>
+        <button class="btn-sm ghost" data-action="discardUnreadableData">Discard and resume saving</button>
       </div>`;
   } else if (saveFailed) {
     el.className = 'save-warning is-error';
     const why = saveFailedQuota ? "This browser's storage for Ranker is full" : 'This browser refused to save Ranker’s data (storage blocked or unavailable)';
-    el.innerHTML = `<strong>Changes are not being saved.</strong> ${why}, so anything you do now will be lost on reload. <button class="btn-sm danger" onclick="exportData()">Export backup now</button>`;
+    el.innerHTML = `<strong>Changes are not being saved.</strong> ${why}, so anything you do now will be lost on reload. <button class="btn-sm danger" data-action="exportData">Export backup now</button>`;
   } else if (nearFull) {
     el.className = 'save-warning';
     el.innerHTML = `Browser storage is ${Math.round(savedChars / LS_LIMIT_CHARS * 100)}% full. Consider exporting a backup — saving will fail once it reaches the limit.`;
@@ -904,6 +904,51 @@ function makeDeviceId() { return 'd' + Date.now().toString(36) + Math.random().t
 // parser decodes &#39; back to ' before the JS runs — so pass user text to handlers
 // via a data-* attribute and read it back with this.dataset instead.
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+// --- Event delegation ---
+// There are no inline on*= handlers. Controls declare what they do with data-*
+// attributes, and one document-level listener per event type calls the named function:
+//   data-action="fn"   click              data-change="fn"  change
+//   data-keyup="fn"    keyup              data-enter="fn"   keydown Enter
+//   data-escape="fn"   keydown Escape
+//   data-args='[...]'  JSON arguments — build with argsAttr(), which escapes them
+//   data-pass="el" | "checked" | "event"   pass the element, its checked state, or the
+//                      event instead. Kept separate from data-args so user text in an
+//                      argument (a category name, say) can never be mistaken for one.
+//   data-keep-focus    mousedown doesn't take focus (e.g. the search ✕ button)
+// The function is looked up by name when the event fires (window[name]), which keeps
+// markup and code decoupled and lets tests stub a function by name. Only the innermost
+// element carrying the attribute acts, so a button inside a clickable panel header
+// doesn't also toggle the header. A link with an action never navigates.
+function argsAttr(...args) { return ` data-args="${esc(JSON.stringify(args))}"`; }
+
+function runDataHandler(el, attr, event) {
+  const name = el.dataset[attr];
+  const fn = window[name];
+  if (typeof fn !== 'function') { console.error('[events] no function "' + name + '" for data-' + attr); return; }
+  const pass = el.dataset.pass;
+  const args = pass === 'el' ? [el] : pass === 'checked' ? [el.checked] : pass === 'event' ? [event]
+    : el.dataset.args ? JSON.parse(el.dataset.args) : [];
+  fn(...args);
+}
+
+function delegate(type, attr, when = () => true) {
+  document.addEventListener(type, e => {
+    if (!when(e) || !e.target.closest) return;
+    const el = e.target.closest('[data-' + attr + ']');
+    if (!el) return;
+    if (type === 'click' && el.tagName === 'A') e.preventDefault();
+    runDataHandler(el, attr, e);
+  });
+}
+delegate('click', 'action');
+delegate('change', 'change');
+delegate('keyup', 'keyup');
+delegate('keydown', 'enter', e => e.key === 'Enter');
+delegate('keydown', 'escape', e => e.key === 'Escape');
+document.addEventListener('mousedown', e => {
+  if (e.target.closest && e.target.closest('[data-keep-focus]')) e.preventDefault();
+});
 // Every toast also logs to the console, so a message that faded before you finished
 // reading it (or a rapid sequence — e.g. resetSharedBaseline()'s several status
 // toasts in a row) is still recoverable via the browser console's scrollback.
@@ -1081,14 +1126,14 @@ function renderFilterUI(cat) {
 
 function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
   let html = '<div class="filter-panel">';
-  html += '<div class="filter-panel-header" data-cat="' + esc(cat) + '" onclick="filterCollapsed[this.dataset.cat] = !filterCollapsed[this.dataset.cat];this.nextElementSibling.style.display = filterCollapsed[this.dataset.cat] ? \'none\' : \'flex\';">';
+  html += '<div class="filter-panel-header" data-cat="' + esc(cat) + '" data-action="toggleFilterPanel" data-pass="el">';
   html += '<div class="section-label">Filter' + (activeCount ? ` <span class="filter-count">${activeCount}</span>` : '') + '</div>';
   html += '<span class="filter-caret">' + (isCollapsed ? '▶' : '▼') + '</span>';
   html += '</div>';
 
   html += '<div id="' + filterId + '" class="filter-fields" style="display:' + (isCollapsed ? 'none' : 'flex') + '">';
   if (activeCount > 0) {
-    html += '<button class="ghost btn-sm filter-clear" data-cat="' + esc(cat) + '" onclick="event.stopPropagation();clearAllFilters(this.dataset.cat)">✕ Clear</button>';
+    html += '<button class="ghost btn-sm filter-clear" data-action="clearAllFilters"' + argsAttr(cat) + '>✕ Clear</button>';
   }
   html += fieldsHtml;
   html += '</div>'; // Close filter-fields div
@@ -1104,7 +1149,7 @@ function filterCardHeader(cat, field, filter) {
           <label class="filter-has-value">
             <input type="checkbox" ${filter.nonBlank ? 'checked' : ''}
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="nonblank"
-              onchange="updateFilter(this)">
+              data-change="updateFilter" data-pass="el">
             Has value
           </label>
         </div>`;
@@ -1134,19 +1179,19 @@ function buildFilterFieldCards(cat, fields, catFilters) {
             <span>≥</span>
             <input type="number" placeholder="min" value="${minVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="min"
-              onchange="updateFilter(this)">
+              data-change="updateFilter" data-pass="el">
           </div>
           <div class="filter-num-field">
             <span>≤</span>
             <input type="number" placeholder="max" value="${maxVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="max"
-              onchange="updateFilter(this)">
+              data-change="updateFilter" data-pass="el">
           </div>
           <div class="filter-num-field">
             <span>=</span>
             <input type="number" placeholder="exact" value="${eqVal}"
               data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-op="equals"
-              onchange="updateFilter(this)" title="Exact match">
+              data-change="updateFilter" data-pass="el" title="Exact match">
           </div>
         </div>
       </div>`;
@@ -1167,7 +1212,7 @@ function buildFilterFieldCards(cat, fields, catFilters) {
         html += `<label class="filter-value-pill${isChecked ? ' active' : ''}">
           <input type="checkbox" ${isChecked ? 'checked' : ''}
             data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-value="${esc(val)}"
-            onchange="updateFilter(this)">
+            data-change="updateFilter" data-pass="el">
           <span>${esc(val)}</span>
         </label>`;
       }
@@ -1187,7 +1232,7 @@ function buildFilterFieldCards(cat, fields, catFilters) {
         html += `<label class="filter-value-pill${isChecked ? ' active' : ''}">
           <input type="checkbox" ${isChecked ? 'checked' : ''}
             data-cat="${esc(cat)}" data-field="${esc(field.name)}" data-value="${esc(String(val))}"
-            onchange="updateFilter(this)">
+            data-change="updateFilter" data-pass="el">
           <span>${esc(String(val))}</span>
         </label>`;
       }
@@ -1240,6 +1285,13 @@ function updateFilter(el) {
   }
 }
 
+// Filter panel header: expands/collapses the field cards right after it.
+function toggleFilterPanel(header) {
+  const cat = header.dataset.cat;
+  filterCollapsed[cat] = !filterCollapsed[cat];
+  header.nextElementSibling.style.display = filterCollapsed[cat] ? 'none' : 'flex';
+}
+
 function clearAllFilters(cat) {
   resetFilters(cat);
   if (document.getElementById('view-library').classList.contains('active')) {
@@ -1284,7 +1336,7 @@ function renderPendingFields() {
     <div class="field-row">
       <span class="field-name">${esc(f.name)}</span>
       <span class="field-badge ${f.required?'badge-req':'badge-opt'}">${f.required?'required':'optional'}</span>
-      <button class="ghost btn-sm" onclick="removePendingField(${i})">\u2715</button>
+      <button class="ghost btn-sm" data-action="removePendingField" data-args="[${i}]">\u2715</button>
     </div>`).join('');
 }
 
@@ -1341,19 +1393,19 @@ function renderEditingFields() {
   el.innerHTML = editingFields.map((f,i) => `
     <div class="field-row">
       <span class="field-name">${esc(f.name)}</span>
-      <button class="ghost btn-sm" onclick="toggleRequired(${i})" title="Toggle required/optional">
+      <button class="ghost btn-sm" data-action="toggleRequired" data-args="[${i}]" title="Toggle required/optional">
         <span class="field-badge ${f.required?'badge-req':'badge-opt'}">${f.required?'required':'optional'}</span>
       </button>
-      <button class="ghost btn-sm" onclick="toggleFilterable(${i})" title="Toggle in filter UI" style="font-size:11px;padding:4px 6px">
+      <button class="ghost btn-sm" data-action="toggleFilterable" data-args="[${i}]" title="Toggle in filter UI" style="font-size:11px;padding:4px 6px">
         ${f.filterable !== false ? '\ud83d\udd0d' : '\u2205'}
       </button>
-      <button class="ghost btn-sm" onclick="toggleIdentity(${i})" title="Toggle identity field \u2014 part of what makes two items with the same title distinct (e.g. Year for Movies)" style="font-size:11px;padding:4px 6px">
+      <button class="ghost btn-sm" data-action="toggleIdentity" data-args="[${i}]" title="Toggle identity field \u2014 part of what makes two items with the same title distinct (e.g. Year for Movies)" style="font-size:11px;padding:4px 6px">
         ${f.identity ? '\ud83d\udd11' : '\u2013'}
       </button>
-      <button class="ghost btn-sm" onclick="toggleMulti(${i})" title="Toggle multi-value \u2014 comma-separated list (e.g. Genre), filters on each value independently" style="font-size:11px;padding:4px 6px">
+      <button class="ghost btn-sm" data-action="toggleMulti" data-args="[${i}]" title="Toggle multi-value \u2014 comma-separated list (e.g. Genre), filters on each value independently" style="font-size:11px;padding:4px 6px">
         ${f.multi ? '\ud83c\udff7\ufe0f' : '\u2013'}
       </button>
-      <button class="ghost btn-sm" onclick="removeEditingField(${i})">\u2715</button>
+      <button class="ghost btn-sm" data-action="removeEditingField" data-args="[${i}]">\u2715</button>
     </div>`).join('');
 }
 
@@ -1516,6 +1568,13 @@ function confirmDeleteCat() {
 
 // --- Library ---
 function libCat() { return document.getElementById('sel-cat').value; }
+
+// Library category select: a new category starts with an empty search and no filters.
+function onLibCatChange() {
+  document.getElementById('lib-search').value = '';
+  resetFilters(libCat());
+  renderLibrary();
+}
 function libItems() { return Object.values(state.items).filter(i => i.cat === libCat()); }
 
 const LIB_PAGE_SIZE = 50;
@@ -1538,12 +1597,12 @@ function renderAddForm() {
   const fields = extraFields(cat);
   const el = document.getElementById('add-form');
   const extraInputs = fields.map(f =>
-    `<input type="text" id="field-${esc(f.name)}" placeholder="${esc(f.name)}${f.multi?' (comma-separated)':''}${f.required?' *':''}" style="flex:1;min-width:90px" onkeydown="if(event.key==='Enter')addItem()">`
+    `<input type="text" id="field-${esc(f.name)}" placeholder="${esc(f.name)}${f.multi?' (comma-separated)':''}${f.required?' *':''}" style="flex:1;min-width:90px" data-enter="addItem">`
   ).join('');
   el.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:8px">
-    <input type="text" id="inp-primary" placeholder="${esc(primary)} *" style="flex:2;min-width:140px" onkeydown="if(event.key==='Enter')addItem()">
+    <input type="text" id="inp-primary" placeholder="${esc(primary)} *" style="flex:2;min-width:140px" data-enter="addItem">
     ${extraInputs}
-    <button class="primary" onclick="addItem()">Add</button>
+    <button class="primary" data-action="addItem">Add</button>
   </div>`;
 }
 
@@ -1751,8 +1810,8 @@ function renderLibrary() {
     return;
   }
   const bulkBar = `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:.5rem">
-    <button class="ghost btn-sm" onclick="bulkSetHidden(true)" title="Hide every item matching the current search/filter, across all pages">◎ Hide all matching (${list.length})</button>
-    <button class="ghost btn-sm" onclick="bulkSetHidden(false)" title="Unhide every item matching the current search/filter, across all pages">◉ Unhide all matching (${list.length})</button>
+    <button class="ghost btn-sm" data-action="bulkSetHidden" data-args="[true]" title="Hide every item matching the current search/filter, across all pages">◎ Hide all matching (${list.length})</button>
+    <button class="ghost btn-sm" data-action="bulkSetHidden" data-args="[false]" title="Unhide every item matching the current search/filter, across all pages">◉ Unhide all matching (${list.length})</button>
   </div>`;
 
   const pageKey = cat + '' + query + '' + JSON.stringify(filterState[cat] || {});
@@ -1762,9 +1821,9 @@ function renderLibrary() {
   const pageStart = (libPage - 1) * LIB_PAGE_SIZE;
   const pageItems = list.slice(pageStart, pageStart + LIB_PAGE_SIZE);
   const pagerHtml = pageCount > 1 ? `<div class="row" style="justify-content:center;align-items:center;gap:10px;margin-top:.75rem">
-    <button class="ghost btn-sm" onclick="libGoToPage(${libPage - 1})" ${libPage <= 1 ? 'disabled' : ''}>‹ Prev</button>
+    <button class="ghost btn-sm" data-action="libGoToPage" data-args="[${libPage - 1}]" ${libPage <= 1 ? 'disabled' : ''}>‹ Prev</button>
     <span class="item-meta-line">Page ${libPage} of ${pageCount} (${list.length} items)</span>
-    <button class="ghost btn-sm" onclick="libGoToPage(${libPage + 1})" ${libPage >= pageCount ? 'disabled' : ''}>Next ›</button>
+    <button class="ghost btn-sm" data-action="libGoToPage" data-args="[${libPage + 1}]" ${libPage >= pageCount ? 'disabled' : ''}>Next ›</button>
   </div>` : '';
 
   el.innerHTML = bulkBar + '<div class="card">' + pageItems.map(i => {
@@ -1774,17 +1833,17 @@ function renderLibrary() {
       `<input type="text" id="edit-field-${i.id}-${esc(f.name)}"
         placeholder="${esc(f.name)}${f.multi?' (comma-separated)':''}${f.required?' *':''}"
         value="${esc((i.fields||{})[f.name]||'')}"
-        onkeydown="if(event.key==='Enter')saveItem('${i.id}');if(event.key==='Escape')editItem('${i.id}')">`
+        data-enter="saveItem" data-escape="editItem"${argsAttr(i.id)}>`
     ).join('');
     const editForm = isEditing ? `
       <div class="edit-row">
         <input type="text" id="edit-primary-${i.id}"
           value="${esc(i.title)}"
           placeholder="${esc(primaryLabel(i.cat))} *"
-          onkeydown="if(event.key==='Enter')saveItem('${i.id}');if(event.key==='Escape')editItem('${i.id}')">
+          data-enter="saveItem" data-escape="editItem"${argsAttr(i.id)}>
         ${editInputs}
-        <button class="primary btn-sm" onclick="saveItem('${i.id}')">Save</button>
-        <button class="ghost btn-sm" onclick="editItem('${i.id}')">Cancel</button>
+        <button class="primary btn-sm" data-action="saveItem"${argsAttr(i.id)}>Save</button>
+        <button class="ghost btn-sm" data-action="editItem"${argsAttr(i.id)}>Cancel</button>
       </div>` : '';
     return `<div class="item-row${isEditing?' is-editing':''}${i.hidden?' is-hidden':''}">
       <div class="flex1">
@@ -1793,9 +1852,9 @@ function renderLibrary() {
         ${editForm}
       </div>
       ${!isEditing ? `<span class="item-elo">ELO ${Math.round(i.elo)}</span>` : ''}
-      <button class="btn-sm ghost" onclick="toggleHidden('${i.id}')" aria-label="${i.hidden?'Unhide':'Hide'} ${esc(i.title)}" title="${i.hidden?'Unhide (include in ranking)':'Hide (exclude from ranking)'}">${i.hidden ? '\u25c9' : '\u25ce'}</button>
-      <button class="btn-sm ghost" onclick="editItem('${i.id}')" aria-label="Edit ${esc(i.title)}" title="Edit">\u270e</button>
-      <button class="btn-sm ghost" onclick="deleteItem('${i.id}')" aria-label="Remove ${esc(i.title)}" title="Remove">\u2715</button>
+      <button class="btn-sm ghost" data-action="toggleHidden"${argsAttr(i.id)} aria-label="${i.hidden?'Unhide':'Hide'} ${esc(i.title)}" title="${i.hidden?'Unhide (include in ranking)':'Hide (exclude from ranking)'}">${i.hidden ? '\u25c9' : '\u25ce'}</button>
+      <button class="btn-sm ghost" data-action="editItem"${argsAttr(i.id)} aria-label="Edit ${esc(i.title)}" title="Edit">\u270e</button>
+      <button class="btn-sm ghost" data-action="deleteItem"${argsAttr(i.id)} aria-label="Remove ${esc(i.title)}" title="Remove">\u2715</button>
     </div>`;
   }).join('') + '</div>' + pagerHtml;
 }
@@ -1809,6 +1868,13 @@ let currentPair = null;          // [a, b] items in the current 1v1 pair, for ke
 let standardSessionVotes = 0;    // comparisons made in standard mode since the category was selected
 
 function rankCat() { return document.getElementById('rank-cat').value; }
+
+// Rank category select: clears its filters and the 1v1 session counter.
+function onRankCatChange() {
+  resetFilters(rankCat());
+  standardSessionVotes = 0;
+  initRankView();
+}
 
 function itemMeta(item, useLabels) {
   const fields = extraFields(item.cat);
@@ -1915,7 +1981,7 @@ function loadPair() {
 
 function vsCard(winner, loser, keyHint) {
   const meta = itemMetaStacked(winner);
-  return `<div class="vs-card" onclick="vote('${winner.id}','${loser.id}')" tabindex="0" role="button" aria-label="Vote for ${esc(winner.title)}">
+  return `<div class="vs-card" data-action="vote"${argsAttr(winner.id, loser.id)} tabindex="0" role="button" aria-label="Vote for ${esc(winner.title)}">
     <span class="vs-label">Pick this${keyHint ? ` <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted)">(${esc(keyHint)})</span>` : ''}</span>
     <span class="vs-title">${esc(winner.title)}</span>
     ${meta ? `<span class="vs-meta">${meta}</span>` : ''}
@@ -2024,9 +2090,9 @@ function renderPodium() {
     const meta = itemMetaStacked(item);
     const availablePlaces = [1,2,3].filter(p => !Object.values(podiumPlacements).includes(p) || podiumPlacements[item.id] === p);
     const placeButtons = place
-      ? `<button class="podium-btn ghost" onclick="clearPodiumPlace('${item.id}')">Clear</button>`
+      ? `<button class="podium-btn ghost" data-action="clearPodiumPlace"${argsAttr(item.id)}>Clear</button>`
       : availablePlaces.map(p =>
-          `<button class="podium-btn" onclick="assignPlace('${item.id}',${p})">${placeLabels[p]}</button>`
+          `<button class="podium-btn" data-action="assignPlace"${argsAttr(item.id, p)}>${placeLabels[p]}</button>`
         ).join('');
     return `
       <div class="podium-item${place ? ' selected-'+place : ''}">
@@ -2043,7 +2109,7 @@ function renderPodium() {
   el.innerHTML = `
     <div class="podium-hint">Assign 🥇 🥈 🥉 to your top 3 from this group.</div>
     <div class="podium-grid">${itemRows}</div>
-    ${allPlaced ? `<div class="podium-actions"><button class="primary" onclick="submitPodium()">Confirm podium</button></div>` : ''}`;
+    ${allPlaced ? `<div class="podium-actions"><button class="primary" data-action="submitPodium">Confirm podium</button></div>` : ''}`;
 }
 
 function assignPlace(itemId, place) {
@@ -2130,7 +2196,7 @@ function loadTier() {
     '<input type="number" id="tier-size-input" min="3" max="' + maxSize + '" value="' + Math.min(tierSessionSize, maxSize) + '" ' +
     'style="width:70px;text-align:center;font-size:14px">' +
     '</div>' +
-    '<button class="primary" onclick="startTierSession()">Start session</button>' +
+    '<button class="primary" data-action="startTierSession">Start session</button>' +
     '</div>';
 }
 
@@ -2187,7 +2253,7 @@ function renderTier() {
     placed.forEach(i => {
       chips += '<div class="tier-chip">' +
         '<span class="tier-chip-name" title="' + esc(i.title) + '">' + esc(i.title) + '</span>' +
-        '<button class="tier-chip-remove" data-id="' + i.id + '" onclick="removeTierPlacement(this.dataset.id)">\u00d7</button>' +
+        '<button class="tier-chip-remove" data-id="' + i.id + '" data-action="removeTierPlacement"' + argsAttr(i.id) + '>\u00d7</button>' +
         '</div>';
     });
     lanes += '<div class="tier-row">' +
@@ -2202,7 +2268,7 @@ function renderTier() {
     const meta = itemMetaInline(i);
     let btns = '';
     TIERS.forEach(t => {
-      btns += '<button class="tier-item-btn ' + TIER_CLASS[t] + '" data-id="' + i.id + '" data-tier="' + t + '" onclick="assignTier(this.dataset.id, this.dataset.tier)">' + t + '</button>';
+      btns += '<button class="tier-item-btn ' + TIER_CLASS[t] + '" data-id="' + i.id + '" data-tier="' + t + '" data-action="assignTier"' + argsAttr(i.id, t) + '>' + t + '</button>';
     });
     itemRows += '<div class="tier-item">' +
       '<div class="tier-item-info">' +
@@ -2222,7 +2288,7 @@ function renderTier() {
       : '') +
     '</div>' +
     (allPlaced
-      ? '<div class="podium-actions" style="margin-top:1rem"><button class="primary" onclick="submitTier()">Confirm tier results</button></div>'
+      ? '<div class="podium-actions" style="margin-top:1rem"><button class="primary" data-action="submitTier">Confirm tier results</button></div>'
       : '');
 }
 
@@ -2352,7 +2418,7 @@ function renderHistory() {
     }
     const undoable = canUndo(entry);
     const undoBtn = undoable
-      ? `<button class="danger btn-sm" onclick="undoRanking(${idx})">↶ Undo</button>`
+      ? `<button class="danger btn-sm" data-action="undoRanking" data-args="[${idx}]">↶ Undo</button>`
       : `<button class="danger btn-sm" disabled title="An item in this ranking was deleted" style="opacity:.5;cursor:not-allowed">↶ Undo unavailable</button>`;
     return `<div class="card">
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:.5rem">${dt} · ${esc(entry.category)}</div>
@@ -2377,6 +2443,9 @@ let lbList = [];          // full sorted list from the last renderLB(); appendLB
 let lbBot = 0, lbRange = 1;
 let lbObserver = null;
 
+function selectLBCat(cat) { lbCat = cat; renderLB(); }
+function showAllLBRows() { appendLBRows(lbList.length); }
+
 function renderLB() {
   // renderLB() is called after every vote, edit, sync, and filter change. While the tab
   // is hidden that's pure wasted work (thousands of rows for a big category), and
@@ -2385,7 +2454,7 @@ function renderLB() {
   const allCats = [...new Set(Object.values(state.items).map(i => i.cat))];
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
-    `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" onclick="lbCat=this.dataset.cat;renderLB()">${esc(c)}</button>`).join('');
+    `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" data-action="selectLBCat"${argsAttr(c)}>${esc(c)}</button>`).join('');
   lbList = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
   const key = lbCat + '\u0000' + activeFilterKey(lbCat);
   if (key !== lbShowKey) { lbShown = LB_BATCH; lbShowKey = key; }
@@ -2441,7 +2510,7 @@ function appendLBRows(count) {
   const footer = document.getElementById('lb-footer');
   if (lbObserver) lbObserver.disconnect();
   if (lbRendered < lbList.length) {
-    footer.innerHTML = `<div id="lb-sentinel"></div>Showing ${lbRendered} of ${lbList.length} · <button class="ghost btn-sm" onclick="appendLBRows(lbList.length)">Show all</button>`;
+    footer.innerHTML = `<div id="lb-sentinel"></div>Showing ${lbRendered} of ${lbList.length} · <button class="ghost btn-sm" data-action="showAllLBRows">Show all</button>`;
     if (!lbObserver) lbObserver = new IntersectionObserver(
       entries => { if (entries.some(e => e.isIntersecting)) appendLBRows(LB_BATCH); },
       { rootMargin: '0px 0px 400px 0px' });
@@ -2692,6 +2761,8 @@ function renderSyncStatus() {
 // hatch is one click away for the rare case of hunting down an older one.
 const DELETED_ITEMS_PAGE_SIZE = 50;
 let deletedItemsShowAll = false;
+function toggleDeletedItemsShowAll() { deletedItemsShowAll = !deletedItemsShowAll; renderDeletedItems(); }
+
 function renderDeletedItems() {
   const el = document.getElementById('deleted-items-list');
   if (!el) return;
@@ -2710,14 +2781,14 @@ function renderDeletedItems() {
   const header = rows.length > DELETED_ITEMS_PAGE_SIZE
     ? `<div class="row" style="justify-content:space-between;margin-bottom:.5rem">
         <span style="font-size:12px;color:var(--text-muted)">Showing ${shown.length} of ${rows.length}</span>
-        <button class="ghost btn-sm" onclick="deletedItemsShowAll = !deletedItemsShowAll; renderDeletedItems();">${deletedItemsShowAll ? 'Show fewer' : 'Show all'}</button>
+        <button class="ghost btn-sm" data-action="toggleDeletedItemsShowAll">${deletedItemsShowAll ? 'Show fewer' : 'Show all'}</button>
       </div>`
     : '';
   el.innerHTML = header + shown.map(t => `
     <div class="field-row">
       <span class="field-name">${esc(t.title || t.itemId)}${t.cat ? ' <span style="color:var(--text-muted);font-weight:400">(' + esc(t.cat) + ')</span>' : ''}</span>
       <span style="font-size:12px;color:var(--text-muted)">${esc(new Date(t.ts).toLocaleString())}</span>
-      <button class="ghost btn-sm" onclick="undeleteItem('${t.itemId}')">Undelete</button>
+      <button class="ghost btn-sm" data-action="undeleteItem"${argsAttr(t.itemId)}>Undelete</button>
     </div>`).join('');
 }
 
@@ -3331,12 +3402,12 @@ function renderCloudAuthUI() {
   if (cloudUser) {
     authEl.innerHTML = '<div class="row" style="gap:8px;flex-wrap:wrap">' +
       '<span style="font-size:13px;color:var(--text-secondary)">Signed in as ' + esc(cloudUser.email || cloudUser.displayName || 'unknown') + '</span>' +
-      '<button class="ghost btn-sm" onclick="cloudSignOut()">Sign out</button>' +
+      '<button class="ghost btn-sm" data-action="cloudSignOut">Sign out</button>' +
       '</div>';
     actionsEl.hidden = false; baselineCard.hidden = false;
     uploadBtn.disabled = false; pullBtn.disabled = false; recoveryBtn.disabled = false; resetBtn.disabled = false; adoptBtn.disabled = false;
   } else {
-    authEl.innerHTML = '<button onclick="cloudSignIn()">Sign in with Google</button>';
+    authEl.innerHTML = '<button data-action="cloudSignIn">Sign in with Google</button>';
     actionsEl.hidden = true; baselineCard.hidden = true;
     uploadBtn.disabled = true; pullBtn.disabled = true; recoveryBtn.disabled = true; resetBtn.disabled = true; adoptBtn.disabled = true;
   }

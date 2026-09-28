@@ -445,6 +445,27 @@ describe('Leaderboard', () => {
     assert.equal($('#lb-cats .pill.active').textContent, 'Big');
   });
 
+  test('category names with quotes and apostrophes survive being passed to handlers', () => {
+    // User text travels in data-args (argsAttr() escapes it). This is the class of bug
+    // fixed in 2.15.0, when names were spliced into inline JS strings.
+    const cat = `Director's "Cut"`;
+    const id = key('X', cat);
+    app.run(`state.cats.push(${JSON.stringify(cat)}); state.schema[${JSON.stringify(cat)}] = { primary: 'Title', fields: [{ name: 'Tag', required: false }] };
+      state.items[${JSON.stringify(id)}] = { id: ${JSON.stringify(id)}, cat: ${JSON.stringify(cat)}, title: 'X', fields: { Tag: 'a' }, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: 1 };
+      rebuildCatSelects();`);
+    click(tab('Leaderboard'));
+    click(byText('#lb-cats .pill', cat));
+    assert.equal(app.get('lbCat'), cat);
+    click(tab('Library'));
+    change($('#sel-cat'), cat);
+    const header = $('#lib-filters .filter-panel-header');
+    if (header.nextElementSibling.style.display === 'none') click(header);
+    change($('#lib-filters input[data-field="Tag"][data-value="a"]'), true);
+    const clear = spy('clearAllFilters');
+    click(byText('#lib-filters button', '✕ Clear'));
+    assert.deepEqual(clear, [[cat]]);
+  });
+
   test('Show all loads every row', () => {
     click(tab('Leaderboard'));
     click(byText('#lb-cats .pill', 'Big'));
