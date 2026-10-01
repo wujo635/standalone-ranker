@@ -66,7 +66,7 @@ For every selected album or EP:
 | Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. |
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests ("feat. X") out of Artist, so the Artist filter stays clean. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. |
 | Album | The release-group title (the original album name). Leave blank for a non-album single. |
-| Year | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
+| Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
 | Language | `language` from `tracks`. If it's missing, use the artist's main language. If a track is known to be in a different language, override it for that track only. |
 | Genre | The album's genres: `genre "<Album> (album)"`, falling back to `"<Album>"` or `"<Album> (<Artist> album)"`. Take the first 1–3, comma-separated (Genre is a multi-value field). The same value goes on every track of that album. For a non-album single, try the song's own page, then the artist's. If nothing is found, leave it blank. Don't guess. |
 
@@ -86,7 +86,7 @@ file doesn't exist, say once in the final message that exporting Songs to that p
 this check.
 
 ### 6. Preview, then write
-Show a compact preview: one table per release (#, Title, Year, Genre), plus a short list of
+Show a compact preview: one table per release (#, Title, Year Released, Genre), plus a short list of
 anything skipped or uncertain:
 - skipped tracks
 - dropped duplicates
@@ -96,7 +96,7 @@ anything skipped or uncertain:
 
 Ask "Write the CSV?" (allow edits first). Then:
 
-1. Write the rows as a JSON array of `{Title, Artist, Album, Year, Language, Genre}` to the
+1. Write the rows as a JSON array of `{Title, Artist, Album, "Year Released", Language, Genre}` (the keys must match the Songs schema's field names exactly; `csv` rejects unknown keys) to the
    session scratchpad.
 2. Run `csv <rows.json> imports/<artist-slug>[-<album-slug>].csv`. `imports/` is gitignored.
    Use a lowercase-hyphenated slug.
