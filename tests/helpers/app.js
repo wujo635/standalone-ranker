@@ -25,6 +25,12 @@ function loadApp({ saved } = {}) {
     runScripts: 'dangerously',
     virtualConsole,
     beforeParse(window) {
+      // jsdom has no IntersectionObserver; the Leaderboard's infinite scroll constructs
+      // one whenever a category has more rows than one batch. A no-op stand-in keeps
+      // renderLB() working; tests load more rows via Show all instead of scrolling.
+      if (!window.IntersectionObserver) {
+        window.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
+      }
       // Seeds localStorage before the app's script runs, so load() sees it on startup.
       if (saved !== undefined) {
         window.localStorage.setItem('ranker-v1', typeof saved === 'string' ? saved : JSON.stringify(saved));

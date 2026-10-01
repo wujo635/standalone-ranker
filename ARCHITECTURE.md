@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.17.1` |
+| App version | `2.17.2` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -72,6 +72,7 @@ tests/migrate.test.js          migrateData() version chain + load()
 tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
 tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
+tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -87,9 +88,10 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
+- **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
 - **Regression-first:** sync/merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). CLAUDE.md requires a test that fails without the fix for any such bug.
 
-Not covered yet: Firestore upload/pull themselves (would need a fake Firestore), the CSV parser, and click-level UI tests of buttons/handlers.
+Not covered yet: Firestore upload/pull themselves (would need a fake Firestore) and the CSV parser.
 
 ---
 
@@ -452,6 +454,24 @@ The History tab (`renderHistory()`) shows the last 50 rankings; `undoRanking()` 
 
 ---
 
+## Event wiring
+
+*(2.17.2)* There are no inline `on*=` handlers. Controls declare what they do with `data-*` attributes, and one document-level listener per event type (`delegate()`) calls the named global function (`runDataHandler()`):
+
+| Attribute | Fires on |
+|---|---|
+| `data-action="fn"` | click |
+| `data-change="fn"` | change |
+| `data-keyup="fn"` | keyup |
+| `data-enter="fn"` / `data-escape="fn"` | keydown Enter / Escape |
+
+- **Arguments:** `data-args` holds a JSON array — always built with `argsAttr(...args)`, which escapes it for the attribute, so user text (a category name with quotes or apostrophes) arrives intact. `data-pass="el" | "checked" | "event"` passes the element, its `checked` state, or the event instead; it's a separate attribute so no user-supplied argument can ever be mistaken for one of these.
+- **Lookup by name at event time** (`window[name]`) keeps markup and code decoupled — and lets the click tests stub a function by name.
+- **Only the innermost element** carrying the attribute acts, so a button inside a clickable panel header (the filter panel's ✕ Clear) doesn't also toggle the header — no `stopPropagation()` needed.
+- A link (`<a>`) with a `data-action` never navigates; `data-keep-focus` makes mousedown leave focus where it is (the search ✕ button).
+- Inline code that used to be several statements lives in small named functions: `onLibCatChange()`, `onRankCatChange()`, `toggleFilterPanel()`, `selectLBCat()`, `showAllLBRows()`, `toggleDeletedItemsShowAll()`.
+- **Adding a control:** give it the right attribute and `argsAttr(...)`, and make sure the function is a top-level `function` declaration (so it's on `window`). Add a test to `tests/ui.test.js` that finds it by id, text, aria-label, or title.
+
 ## Tab views
 
 | Tab | View ID | Key functions |
@@ -490,7 +510,7 @@ Items are filtered by their extra fields in the Library, Leaderboard, and every 
 - **State:** `filterState[cat][field] = { type, values, min, max, equals, nonBlank }`; `filterCollapsed[cat]` (collapsed by default). Filters aren't persisted, and reset when the category changes.
 - **Types:** `fieldFilterType()` returns `'multi'` for multi fields, else `inferFieldType()`: `'number'` if ≥ 80% of up to 20 sampled values parse as numbers, else `'string'`. Results are cached in `fieldTypeCache`, invalidated per category whenever its items change (`invalidateFieldTypeCache()`).
 - **Matching** (AND across fields): numbers use min/max/equals; strings match selected values exactly; multi fields match if any token is selected; "Has value" (`nonBlank`, any type) excludes blanks. A field with no active condition is ignored. `filterNarrows()` is the single definition of "active", shared by the filter panel's count/Clear button and `activeFilterKey()`.
-- **UI:** `renderFilterUI(cat)` builds the cards once (`buildFilterFieldCards()`, skipping `filterable: false` fields) and renders them into both `#lib-filters` and `#rank-filters` via `buildFilterPanel()`. `updateFilter(el)` handles input changes; `clearAllFilters()`/`resetFilters()` clear. Handlers read the category from `data-cat` attributes (never from strings spliced into inline JS, which broke on apostrophes).
+- **UI:** `renderFilterUI(cat)` builds the cards once (`buildFilterFieldCards()`, skipping `filterable: false` fields) and renders them into both `#lib-filters` and `#rank-filters` via `buildFilterPanel()`. `updateFilter(el)` handles input changes; `clearAllFilters()`/`resetFilters()` clear. The panel header carries `data-cat`; the Clear button passes the category through `argsAttr()` (see "Event wiring").
 - **Schema flags** set in the Fields editor: `filterable` (🔍), `identity`, `multi` (🏷️).
 
 ---
@@ -579,8 +599,10 @@ One line each; the sections above have the details.
 | `importCSV(e)` / `parsePreloadCSV(text)` / `splitCSVLine(line)` | Read and parse a preload CSV |
 | `resolveCSVImport(result)` / `bulkAddCSVImport()` / `applyCSVImport()` | Bulk add / replace / create |
 | `exportCategoryCSV()` / `csvCell(v)` | CSV export |
-| `esc(s)` | HTML-escape for text and quoted attributes (including `"` and `'`). Not safe inside inline JS strings — pass user text to handlers via `data-*` attributes |
+| `esc(s)` | HTML-escape for text and quoted attributes (including `"` and `'`) |
 | `toast(msg)` / `switchTab(id)` / `uid()` / `makeDeviceId()` | UI and id utilities |
+| `argsAttr(...args)` / `runDataHandler()` / `delegate()` | Event wiring — see "Event wiring" |
+| `onLibCatChange()` / `onRankCatChange()` / `toggleFilterPanel(header)` / `selectLBCat(cat)` / `showAllLBRows()` / `toggleDeletedItemsShowAll()` | Small handlers for controls whose behaviour used to be inline code |
 
 ---
 
