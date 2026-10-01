@@ -9,6 +9,11 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## UI / persistence gaps
 
+- **"Look it up" link on Rank cards.** A small search icon on the items being compared in the Rank view (1v1, Podium, Tier) that opens a web search in a new tab, so a user who doesn't recognize a title — typically a song — can check it before picking. Decided:
+  - **Per-category toggle, off by default** (e.g. a `lookup` flag on `state.schema[cat]`, set in the category's schema editor), so it works for Songs, Movies, or anything else. Since it lives on the schema, it syncs like any other schema change.
+  - **Rank view, not Library** — that's where an unfamiliar title actually gets in the way.
+  - **YouTube search link**, so the user can hear the song: `https://www.youtube.com/results?search_query=` + `encodeURIComponent(title + ' ' + identity fields)` (for Songs, Title + Artist), opened with `target="_blank" rel="noopener"`. This is a plain link to YouTube's search page, not the YouTube Data API, so there's no API key and no quota. Possibly a per-category choice of YouTube vs. Google.
+  - **Must not trigger a pick:** the icon needs its own `data-action` and must stop the click from reaching the card's pick handler (1v1/Podium cards are click targets); give it a tap target big enough on mobile and pin it with a click test that a lookup click records no match.
 - **Wire up `settings.userName`.** Added in schema v4 alongside `deviceId` but never used in any UI; reserved for human-readable attribution on history entries. [ARCHITECTURE.md "Known gaps in the merge model"](ARCHITECTURE.md)
 
 ## Scale / infra
