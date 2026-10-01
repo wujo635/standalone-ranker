@@ -9,6 +9,7 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## UI / persistence gaps
 
+- **"Search this song" link for Songs items.** A small search icon/link on Songs entries (Library rows, possibly the Rank cards and Leaderboard) that opens a web search for the song in a new tab, so a user who doesn't recognize a title can look it up. Build the query from Title + Artist (both always present: Artist is required), e.g. `https://www.google.com/search?q=` + `encodeURIComponent(title + ' ' + artist)`; open with `target="_blank" rel="noopener"`. Open questions: Songs-only, or a per-category opt-in (Movies would benefit too); plain Google vs. YouTube search (to hear it); and keep it from interfering with the 1v1/Podium click-to-pick targets.
 - **Wire up `settings.userName`.** Added in schema v4 alongside `deviceId` but never used in any UI; reserved for human-readable attribution on history entries. [ARCHITECTURE.md "Known gaps in the merge model"](ARCHITECTURE.md)
 
 ## Scale / infra
