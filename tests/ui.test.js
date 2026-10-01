@@ -256,6 +256,22 @@ describe('filter panel', () => {
     assert.deepEqual(libTitles(), ['Paranoid Android']);
   });
 
+  test("a field's filter follows its type when the type changes during a session (2.17.3)", () => {
+    // The page builds filter entries for an empty Movies category, so Year is inferred
+    // as text. Adding items with numeric Years makes it a number field — its min/max
+    // filter must then actually apply. Before 2.17.3 the entry kept type 'string'.
+    app.run(`state.items = {}; fieldTypeCache = {}; filterState = {}; renderLibrary();`);
+    expand();
+    for (const [t, y] of [['Heat', '1995'], ['Thief', '1981'], ['Collateral', '2004']]) {
+      $('#inp-primary').value = t;
+      $('#field-Year').value = y;
+      click(byText('#add-form button', 'Add'));
+    }
+    expand();
+    change($('#lib-filters input[data-field="Year"][data-op="min"]'), '2000');
+    assert.deepEqual(libTitles(), ['Collateral']);
+  });
+
   test('"Has value" calls updateFilter for that field', () => {
     expand();
     const calls = spy('updateFilter');

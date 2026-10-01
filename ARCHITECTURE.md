@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.17.2` |
+| App version | `2.17.3` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -73,6 +73,7 @@ tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombs
 tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
+tests/tier.test.js             Tier session pool size and priority (2.17.3)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -438,7 +439,7 @@ ELO and W/L are hidden while ranking (to avoid anchoring) and shown in the Libra
 
 - **1 vs 1** (`loadPair()`, `vote()`): two items, pick one — one ELO update. Keyboard voting via `handleRankVoteKey()`: `←`/`1` and `→`/`2`, only when the Rank tab is active in 1v1 mode and focus isn't in a text field. `standardSessionVotes` counts votes since the category was last selected (in memory only).
 - **Podium** (`loadPodium()`, `submitPodium()`): 3–5 items; assign 🥇🥈🥉. Each placed item beats every lower-placed and unplaced item; unplaced items aren't compared. Up to 9 updates per round.
-- **Tier** (`loadTier()`, `submitTier()`): 3–30 items (chosen per session) sorted into S/A/B/C/D; every cross-tier pair is an update (up to 45 for 10 items). The pool prioritises items with the fewest comparisons. No skip button.
+- **Tier** (`loadTier()`, `submitTier()`): 3–30 items (chosen per session) sorted into S/A/B/C/D; every cross-tier pair is an update (up to 45 for 10 items). The pool (`startTierSession()`) takes never-ranked items first (up to half the session), fills the rest from ranked items — a random ELO window of them with Smart pairing — and tops up from whatever is left, so a session always has exactly the size asked for (2.17.3). No skip button.
 
 **Smart pairing** (toggle, saved in `settings.smartPairMode`): instead of random selection —
 - 1v1: `smartPair()` picks a random anchor and pairs it with the single closest-ELO item;
@@ -509,7 +510,7 @@ The History tab (`renderHistory()`) shows the last 50 rankings; `undoRanking()` 
 Items are filtered by their extra fields in the Library, Leaderboard, and every rank mode — everything goes through `getFilteredItems(cat, items, filterState)`, so there's one filtering implementation.
 
 - **State:** `filterState[cat][field] = { type, values, min, max, equals, nonBlank }`; `filterCollapsed[cat]` (collapsed by default). Filters aren't persisted, and reset when the category changes.
-- **Types:** `fieldFilterType()` returns `'multi'` for multi fields, else `inferFieldType()`: `'number'` if ≥ 80% of up to 20 sampled values parse as numbers, else `'string'`. Results are cached in `fieldTypeCache`, invalidated per category whenever its items change (`invalidateFieldTypeCache()`).
+- **Types:** `fieldFilterType()` returns `'multi'` for multi fields, else `inferFieldType()`: `'number'` if ≥ 80% of up to 20 sampled values parse as numbers, else `'string'`. Results are cached in `fieldTypeCache`, invalidated per category whenever its items change (`invalidateFieldTypeCache()`). Since a field's type can change within a session, `filterEntry(cat, field)` re-creates a field's `filterState` entry whenever its type no longer matches (2.17.3) — conditions set for the old type are dropped, since a min on a text field or text values on a number field mean nothing.
 - **Matching** (AND across fields): numbers use min/max/equals; strings match selected values exactly; multi fields match if any token is selected; "Has value" (`nonBlank`, any type) excludes blanks. A field with no active condition is ignored. `filterNarrows()` is the single definition of "active", shared by the filter panel's count/Clear button and `activeFilterKey()`.
 - **UI:** `renderFilterUI(cat)` builds the cards once (`buildFilterFieldCards()`, skipping `filterable: false` fields) and renders them into both `#lib-filters` and `#rank-filters` via `buildFilterPanel()`. `updateFilter(el)` handles input changes; `clearAllFilters()`/`resetFilters()` clear. The panel header carries `data-cat`; the Clear button passes the category through `argsAttr()` (see "Event wiring").
 - **Schema flags** set in the Fields editor: `filterable` (🔍), `identity`, `multi` (🏷️).
@@ -557,6 +558,7 @@ One line each; the sections above have the details.
 | `renderLibrary()` / `filteredLibraryList()` / `libGoToPage(p)` / `clearLibSearch()` | Library list, its matching set, paging, search clear |
 | `itemsForCat(cat)` / `libItems()` | Rank/Leaderboard pool (filtered, no hidden) / Library pool |
 | `getFilteredItems(cat, items, filters)` / `filterNarrows(f)` / `activeFilterKey(cat)` | Apply filters / is a filter active / fingerprint of active filters |
+| `filterEntry(cat, field)` | A field's `filterState` entry, re-created when the field's type has changed |
 | `fieldFilterType()` / `inferFieldType()` / `invalidateFieldTypeCache(cat)` | Filter type resolution and its cache |
 | `renderFilterUI(cat)` / `buildFilterFieldCards()` / `buildFilterPanel()` / `updateFilter(el)` / `clearAllFilters(cat)` / `resetFilters(cat)` | Filter UI |
 | `renderLB()` / `appendLBRows(n)` / `lbRowHtml(item, idx)` | Leaderboard with infinite scroll |
