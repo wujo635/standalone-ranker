@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.17.2';
+const APP_VERSION = '2.17.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1107,15 +1107,15 @@ function renderFilterUI(cat) {
     return;
   }
 
-  const catFilters = filterState[cat] || {};
-  const activeCount = Object.values(catFilters).filter(filterNarrows).length;
+  // Field cards are identical for both containers, so build them once. Built before
+  // counting active filters: building refreshes any entry whose field type changed
+  // (filterEntry()), and the count must reflect that.
+  const fieldsHtml = buildFilterFieldCards(cat, fields);
+  const activeCount = Object.values(filterState[cat] || {}).filter(filterNarrows).length;
 
   // Initialize collapse state (default to collapsed)
   if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
   const isCollapsed = filterCollapsed[cat];
-
-  // Field cards are identical for both containers, so build them once.
-  const fieldsHtml = buildFilterFieldCards(cat, fields, catFilters);
 
   // Each container gets its own directly-embedded id — no shared HTML
   // string and no text-replace, so there's no risk of a field value that
@@ -1155,17 +1155,28 @@ function filterCardHeader(cat, field, filter) {
         </div>`;
 }
 
-function buildFilterFieldCards(cat, fields, catFilters) {
+// The filterState entry for one field, created on first use and RE-created whenever
+// the field's current type (fieldFilterType()) differs from the type the entry was
+// built for. Types are inferred from the data, so they can change within a session —
+// e.g. a category empty when the page loaded infers Year as text, then numeric Years
+// get added. Before 2.17.3 the entry kept its first type forever, so a min/max on the
+// now-numeric field was silently ignored. Conditions set for the old type don't carry
+// over: a min on a text field, or text values on a number field, mean nothing.
+function filterEntry(cat, field) {
+  const type = fieldFilterType(cat, field);
+  if (!filterState[cat]) filterState[cat] = {};
+  if (!filterState[cat][field] || filterState[cat][field].type !== type) filterState[cat][field] = { type };
+  return filterState[cat][field];
+}
+
+function buildFilterFieldCards(cat, fields) {
   let html = '';
   for (const field of fields) {
     // Skip fields marked as non-filterable
     if (field.filterable === false) continue;
 
-    const type = fieldFilterType(cat, field.name);
-    const filter = catFilters[field.name] || { type };
-
-    if (!filterState[cat]) filterState[cat] = {};
-    if (!filterState[cat][field.name]) filterState[cat][field.name] = { type };
+    const filter = filterEntry(cat, field.name);
+    const type = filter.type;
 
     if (type === 'number') {
       const minVal = filter.min !== undefined ? filter.min : '';
@@ -1245,9 +1256,7 @@ function buildFilterFieldCards(cat, fields, catFilters) {
 function updateFilter(el) {
   const cat = el.dataset.cat;
   const field = el.dataset.field;
-
-  if (!filterState[cat]) filterState[cat] = {};
-  if (!filterState[cat][field]) filterState[cat][field] = { type: fieldFilterType(cat, field) };
+  filterEntry(cat, field);
 
   if (el.type === 'number') {
     const op = el.dataset.op;
@@ -2230,7 +2239,18 @@ function startTierSession() {
     restItems = ranked.sort(() => Math.random() - 0.5);
   }
   
-  const pool = [...priorityItems, ...restItems].slice(0, n);
+  let pool = [...priorityItems, ...restItems].slice(0, n);
+  // Unranked items are capped at half the session and the rest comes from ranked
+  // items — so a category without enough ranked items (e.g. a fresh one) came up
+  // short: asking for 3 gave 2, asking for 10 of a new 100-item category gave 5.
+  // Top up from whatever's left, unranked first, so a session always has n items
+  // (the start screen never allows more than the category holds).
+  if (pool.length < n) {
+    const inPool = new Set(pool.map(i => i.id));
+    const shuffle = arr => arr.sort(() => Math.random() - 0.5);
+    const leftover = [...shuffle(unranked.filter(i => !inPool.has(i.id))), ...shuffle(ranked.filter(i => !inPool.has(i.id)))];
+    pool = pool.concat(leftover.slice(0, n - pool.length));
+  }
   if (!smartPairMode) pool.sort(() => Math.random() - 0.5);
 
   tierPool = pool;
