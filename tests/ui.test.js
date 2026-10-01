@@ -491,6 +491,47 @@ describe('Leaderboard', () => {
   });
 });
 
+describe('category order', () => {
+  // Categories are listed alphabetically wherever the user picks one — case-insensitive,
+  // with numbers in numeric order — regardless of the order they were created in.
+  const NAMES = ['zines', 'Anime', 'Top 10', 'Top 2', 'board games'];
+  function addCats() {
+    app.run(`${JSON.stringify(NAMES)}.forEach((c, n) => {
+      state.cats.push(c); state.schema[c] = { primary: 'Name', fields: [] };
+      const id = itemKey(c, 'x');
+      state.items[id] = { id, cat: c, title: 'x', fields: {}, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: 1 };
+    }); rebuildCatSelects();`);
+  }
+  const sorted = names => [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+
+  test('the Library and Rank dropdowns are alphabetical', () => {
+    addCats();
+    const cats = app.get('state.cats');
+    for (const id of ['#sel-cat', '#rank-cat']) {
+      const shown = $$(`${id} option`).map(o => o.textContent);
+      assert.deepEqual(shown, sorted(cats), id);
+      assert.deepEqual(shown.slice(0, 2), ['Anime', 'Big'], `${id}: case-insensitive`);
+      assert.ok(shown.indexOf('Top 2') < shown.indexOf('Top 10'), `${id}: numeric`);
+    }
+  });
+
+  test('the Leaderboard category pills are alphabetical', () => {
+    addCats();
+    click(tab('Leaderboard'));
+    const shown = $$('#lb-cats .pill').map(p => p.textContent);
+    assert.deepEqual(shown, sorted(shown));
+    assert.equal(shown.length, new Set(Object.values(app.get('state.items')).map(i => i.cat)).size);
+  });
+
+  test('sorting is display-only: state.cats keeps its order and the selection is kept', () => {
+    change($('#sel-cat'), 'Songs');
+    const before = app.get('state.cats');
+    addCats();
+    assert.deepEqual(app.get('state.cats'), [...before, ...NAMES]);
+    assert.equal($('#sel-cat').value, 'Songs');
+  });
+});
+
 describe('Data tab', () => {
   beforeEach(() => click(tab('Data')));
 
