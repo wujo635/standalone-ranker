@@ -412,6 +412,7 @@ Accepted tradeoffs — none lose items or matches:
 - **Merged rename collisions** can leave slightly different ELO on each device (W/L agree) — see "Item renames".
 - **A match against a since-deleted item** can leave its opponent's W/L off by one between devices — see "Item deletions".
 - **Re-adding a title while the other device's delete of it is unpulled** loses to that delete — see "Item deletions".
+- **Upload only sends this device's own work, so data imported from another device's file never reaches Firestore from here.** Matches are pushed only if their id carries this device's `deviceId` prefix, and items only if their `updatedAt` is newer than this device's upload cursor — imported items keep the originating device's older `updatedAt`. So importing a file from a device that can't sync itself, then clicking Upload, silently pushes none of its matches and possibly none of its items (it all stays in this device's local state). To get it into Firestore, upload from the originating device, or run "Reset shared baseline" from the importing device — the reseed pushes everything, with ratings baked in. Found during the Aug 2026 manual reseed.
 - **`settings.userName`** is reserved (added with `deviceId` in schema v4) but unused and stripped from exports.
 
 ---
