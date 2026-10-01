@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.17.3` |
+| App version | `2.18.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -488,6 +488,8 @@ The History tab (`renderHistory()`) shows the last 50 rankings; `undoRanking()` 
 
 `switchTab(id)` toggles `.active` on the nav buttons and view divs, and renders the entered view. New Category and Schema Editor have no nav tab; they're entered programmatically and return to the Library.
 
+Category pickers — the Library and Rank dropdowns (`rebuildCatSelects()`) and the Leaderboard pills — list categories alphabetically via `sortedCats()` (2.18.0): case-insensitive, numbers in numeric order ("Top 2" before "Top 10"). This is display-only; `state.cats` keeps creation order.
+
 ### Library
 
 - **Search** (`#lib-search`): case-insensitive substring match on the title and every field value; cleared, along with filters, when the category changes. A "✕" button (`#lib-search-clear`, `clearLibSearch()`) shows while there's text. Two CSS details keep that button from moving under the cursor: `html { overflow-y: scroll; }` reserves the scrollbar gutter so the page width never changes, and the button is centred with `margin: auto` rather than `transform` (which `button:active`'s press effect would override).
@@ -557,6 +559,7 @@ One line each; the sections above have the details.
 |---|---|
 | `renderLibrary()` / `filteredLibraryList()` / `libGoToPage(p)` / `clearLibSearch()` | Library list, its matching set, paging, search clear |
 | `itemsForCat(cat)` / `libItems()` | Rank/Leaderboard pool (filtered, no hidden) / Library pool |
+| `sortedCats(cats)` / `rebuildCatSelects()` | Categories in display (alphabetical) order / refill the Library and Rank dropdowns |
 | `getFilteredItems(cat, items, filters)` / `filterNarrows(f)` / `activeFilterKey(cat)` | Apply filters / is a filter active / fingerprint of active filters |
 | `filterEntry(cat, field)` | A field's `filterState` entry, re-created when the field's type has changed |
 | `fieldFilterType()` / `inferFieldType()` / `invalidateFieldTypeCache(cat)` | Filter type resolution and its cache |

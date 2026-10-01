@@ -1,5 +1,7 @@
-.claude/
+.claude/*
+!.claude/skills/
 old/
 log/
 secret/
 node_modules/
+imports/

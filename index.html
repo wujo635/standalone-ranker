@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.17.3';
+const APP_VERSION = '2.18.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1314,11 +1314,17 @@ function clearAllFilters(cat) {
 }
 
 // --- Category selects ---
+// Categories in display order: alphabetical, case-insensitive, numbers in numeric order
+// ("Top 2" before "Top 10"). Display-only — state.cats keeps creation order.
+function sortedCats(cats) {
+  return [...cats].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+}
+
 function rebuildCatSelects() {
   ['sel-cat','rank-cat'].forEach(id => {
     const sel = document.getElementById(id);
     const cur = sel.value;
-    sel.innerHTML = state.cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    sel.innerHTML = sortedCats(state.cats).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
     if (state.cats.includes(cur)) sel.value = cur;
   });
 }
@@ -2471,7 +2477,7 @@ function renderLB() {
   // is hidden that's pure wasted work (thousands of rows for a big category), and
   // switchTab('leaderboard') re-renders on entry anyway — so skip it entirely.
   if (!document.getElementById('view-leaderboard').classList.contains('active')) return;
-  const allCats = [...new Set(Object.values(state.items).map(i => i.cat))];
+  const allCats = sortedCats(new Set(Object.values(state.items).map(i => i.cat)));
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
     `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" data-action="selectLBCat"${argsAttr(c)}>${esc(c)}</button>`).join('');
