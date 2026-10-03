@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.0';
+const APP_VERSION = '2.18.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3029,6 +3029,53 @@ function moveOrMergeItem(fromId, toId) {
   remapItemIds({ [fromId]: toId }, { tombstones: false });
 }
 
+// Works out where each stored rating in a Firestore pull belongs now (2.18.1). A reset
+// stores every item's rating in its item doc (see uploadToFirestore()); ordinary uploads
+// leave it there, even when the item is later deleted or renamed. Every tombstone in
+// Firestore is newer than that rating, since a reset wipes them all, so the item's
+// latest tombstone says what became of it:
+//  - none: the rating stays with the item;
+//  - a plain delete: that item is gone and the rating with it. If the title is live
+//    again it was re-added fresh, as on the device that did it (undeleteItem() never
+//    restores a rating either);
+//  - a rename: the rating follows the renamedTo chain to where the item lives now,
+//    possibly back to the same id. It joins whatever rating is stored there with
+//    moveOrMergeItem()'s rule (rating from the entry with more matches, wins/losses
+//    summed); an entry with no stored rating counts as a fresh 1000, 0-0.
+// Only the latest tombstone per id is kept, so an item renamed away, re-added under its
+// old title, and renamed again sends the first rating after the second rename — see
+// "Known gaps in the merge model". Returns a copy of `items`; only the !cur branch of
+// unionItemsAndSchema() ever reads these ratings.
+function routeStoredRatings(items) {
+  const out = {};
+  Object.values(items || {}).forEach(i => { out[i.id] = { ...i }; });
+  const latest = {};
+  latestPerItemId(state.itemDeletes).forEach(t => { latest[t.itemId] = t; });
+  const tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
+  const resolveId = makeIdResolver();
+  const stored = i => i && i.elo !== undefined;
+  const take = i => { const r = { elo: i.elo, wins: i.wins || 0, losses: i.losses || 0 }; delete i.elo; delete i.wins; delete i.losses; return r; };
+  const moving = [];
+  Object.values(out).forEach(i => {
+    if (!stored(i)) return;
+    const t = latest[i.id];
+    if (!t) return;
+    const dest = t.renamedTo ? resolveId(t.renamedTo) : null;
+    if (dest === i.id) return;
+    const rating = take(i);
+    if (dest && !tombstoned.has(dest) && out[dest]) moving.push([dest, rating]);
+  });
+  moving.forEach(([dest, src]) => {
+    const dst = out[dest];
+    const cur = stored(dst) ? take(dst) : { elo: 1000, wins: 0, losses: 0 };
+    const played = r => r.wins + r.losses;
+    dst.elo = played(src) > played(cur) ? src.elo : cur.elo;
+    dst.wins = cur.wins + src.wins;
+    dst.losses = cur.losses + src.losses;
+  });
+  return out;
+}
+
 // A timestamp guaranteed to beat every undelete already recorded for itemId. A rename
 // or delete in the same millisecond as an undelete of that id would otherwise lose the
 // tie-break (see undeleteItem(), which does the mirror image for undeletes).
@@ -3253,6 +3300,8 @@ function mergeImport(incoming, opts) {
     Object.keys(state.items).forEach(id => { if (state.items[id].cat === c) delete state.items[id]; });
   });
 
+  // A reset's stored ratings follow renames and are dropped by deletes (2.18.1).
+  if (cloudOrigin) incoming = { ...incoming, items: routeStoredRatings(incoming.items) };
   const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats);
 
   // Only matches this device hasn't already counted get applied — see the comment on
@@ -3558,7 +3607,12 @@ async function uploadToFirestore(opts) {
       // the baked-in rating directly, with no matches left to replay.
       ...(full ? { elo: i.elo, wins: i.wins, losses: i.losses } : {}),
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }]));
+    // An ordinary push writes only these fields and leaves the rest of the doc alone
+    // (2.18.1). A plain set() replaces the whole doc, so editing an item after a reset
+    // used to erase its stored rating, and a device adopting the baseline afterwards
+    // started that item from 1000. Stored ratings that no longer apply (the item was
+    // deleted or renamed since) are sorted out on pull — see routeStoredRatings().
+    }, full ? undefined : { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] }]));
     matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
       cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -3591,7 +3645,7 @@ async function uploadToFirestore(opts) {
     const BATCH_LIMIT = 500;
     for (let i = 0; i < writes.length; i += BATCH_LIMIT) {
       const batch = cloudDb.batch();
-      writes.slice(i, i + BATCH_LIMIT).forEach(([ref, data]) => batch.set(ref, data));
+      writes.slice(i, i + BATCH_LIMIT).forEach(([ref, data, setOpts]) => setOpts ? batch.set(ref, data, setOpts) : batch.set(ref, data));
       await batch.commit();
     }
 

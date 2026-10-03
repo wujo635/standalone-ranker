@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.0` |
+| App version | `2.18.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -68,12 +68,14 @@ Development-only files alongside it (never loaded by the app):
 package.json                   devDependency (jsdom) + `npm test` script
 tests/helpers/app.js           loads the real index.html into jsdom for tests
 tests/helpers/sync.js          two-device helpers: simulated Firestore pull and file import
+tests/helpers/firestore.js     in-memory Firestore for running the real upload/pull/reset/adopt code
 tests/migrate.test.js          migrateData() version chain + load()
 tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
 tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
+tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -88,11 +90,12 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Everything crosses the boundary as JSON.** Objects created inside jsdom belong to another JS realm, which makes `assert.deepStrictEqual` fail on otherwise-identical values; JSON also mirrors how real data reaches the app.
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
+- **Real Firestore code (2.18.1):** `tests/helpers/firestore.js` is an in-memory stand-in for the slice of the Firestore SDK the app uses; `connect(app, db)` points a page at it, signed in, with `confirm()` and `downloadJson()` stubbed. Several pages can share one `db`, so the real `uploadToFirestore()`, `pullFromFirestore()`, `resetSharedBaseline()`, and `adoptFreshBaseline()` run end to end (`await app.window.eval('uploadToFirestore()')`). It models what the app depends on: a plain `set()` replaces the whole doc, `{ merge }` deep-merges, `{ mergeFields }` replaces only the listed fields, server timestamps increase per commit (so `where('syncedAt', '>', …)` works), and `undefined` values are rejected.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
 - **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
 - **Regression-first:** sync/merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). CLAUDE.md requires a test that fails without the fix for any such bug.
 
-Not covered yet: Firestore upload/pull themselves (would need a fake Firestore) and the CSV parser.
+Not covered yet: the CSV parser, and Firestore upload/pull beyond the reset/adopt scenarios in `tests/reset-baseline.test.js`.
 
 ---
 
@@ -240,6 +243,7 @@ Both sync transports — file export/import and Firestore — end in the same fu
    - an id this device doesn't have is added, with `elo`/`wins`/`losses` defaulting to 1000/0/0 when the payload carries none (Firestore item docs never do), `hidden: false`, and skipped if tombstoned (itself or its category);
    - an id both sides have takes the incoming `title` and `fields` if its `updatedAt` is newer (last-write-wins on the whole edit). Ratings are never taken from the incoming side for an existing item.
    - Items created here *with* a rating in the payload are returned as `freshlySeeded`.
+   - On a Firestore pull, `routeStoredRatings()` first decides where each reset-stored rating belongs now (2.18.1) — see "Resetting the shared baseline".
 4. **Matches.** Incoming matches not already in the local `matchLog` have their ids resolved through renames, then `applyNewMatches()` sorts them by `(ts, seq)` and applies each onto the live ratings with the same `eloUpdate()` a real vote uses. All of them are recorded in `matchLog`.
 
 **Never re-applying what a payload already includes (`freshlySeeded`).** A file export's items and its `matchLog` are two views of the same moment, so a freshly-seeded item's rating already includes every match in that file touching it. For a **file** merge, `applyNewMatches(newMatches, freshlySeeded)` therefore:
@@ -319,7 +323,7 @@ An optional second transport next to file export/import — both feed `mergeImpo
 ### Layout: one document per fact
 
 - `rankers/shared` — root doc: `{ cats, schema, updatedAt, updatedBy, baselineId? }`
-- `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Exception: a baseline reseed bakes ratings in — see below.)
+- `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Exception: a baseline reseed bakes ratings in — see below. Ordinary uploads write with `mergeFields`, so a baked rating stays on the doc through later edits, 2.18.1.)
 - `rankers/shared/matches/{matchId}` — `{ cat, wid, lid, ts, seq, syncedAt }`
 - `rankers/shared/itemDeletes/{itemId}` — `{ itemId, ts, deviceId, title, cat, renamedTo, syncedAt }`, mapped both ways by `tombstoneDoc()`/`tombstoneFromDoc()`. `title`/`cat`/`renamedTo` are written as `null` when absent — Firestore rejects `undefined` field values.
 - `rankers/shared/itemUndeletes/{itemId}` — same shape, without `renamedTo`
@@ -329,7 +333,7 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 
 ### Upload and pull
 
-- **`uploadToFirestore()`** pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt`, this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema; cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
+- **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. It pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt`, this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema; cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
 - **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled), builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
 
 ### Auth, hosting, and setup
@@ -356,6 +360,12 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 
    Every step after the confirm is safely re-runnable if interrupted.
 2. **On every other device: "↓ Adopt fresh baseline"** (`adoptFreshBaseline()`). It clears local state (`clearAllDataCore()`) and pulls the reseed, so every item takes the baked rating (the "no local copy" path) and any match ranked after the reset applies normally on top. It preserves this device's own hidden-item markings (2.13.0) by re-applying them to ids that still exist. A plain Pull is *not* equivalent: an item the device already has never adopts an incoming rating.
+
+**Working after a reset (2.18.1).** The stored ratings must survive whatever happens before another device adopts:
+- **Edits** (Library edit form, CSV bulk add): ordinary uploads write only `cat`/`title`/`fields`/`updatedAt`/`syncedAt` (`mergeFields`), leaving the stored rating on the doc. Before 2.18.1 they replaced the whole doc, so an edited item reached a later-adopting device at 1000 plus its post-reset votes, its pre-reset history gone.
+- **Renames and deletes:** the stored rating stays on the old id's doc, so on a pull `routeStoredRatings()` uses each item's latest tombstone (all of them are newer than the reset): no tombstone keeps it; a plain delete drops it, so a re-added title or a CSV Replace starts fresh, as on the device that did it; a rename sends it along the `renamedTo` chain (possibly back to the same id), joining any rating already stored there by `moveOrMergeItem()`'s rule.
+
+Pinned end to end by `tests/reset-baseline.test.js`.
 
 **Baseline-id guard (2.12.0).** An ordinary Upload first reads the root doc; if it has a `baselineId` this device hasn't seen (`settings.knownBaselineId`), the upload is refused with a toast pointing at Adopt — so a device that missed a reset can't push stale data onto the new baseline. A root doc with no `baselineId` (never reset) skips the check entirely; a `full` reseed is exempt.
 
@@ -414,6 +424,7 @@ Accepted tradeoffs — none lose items or matches:
 - **A match against a since-deleted item** can leave its opponent's W/L off by one between devices — see "Item deletions".
 - **Re-adding a title while the other device's delete of it is unpulled** loses to that delete — see "Item deletions".
 - **Upload only sends this device's own work, so data imported from another device's file never reaches Firestore from here.** Matches are pushed only if their id carries this device's `deviceId` prefix, and items only if their `updatedAt` is newer than this device's upload cursor — imported items keep the originating device's older `updatedAt`. So importing a file from a device that can't sync itself, then clicking Upload, silently pushes none of its matches and possibly none of its items (it all stays in this device's local state). To get it into Firestore, upload from the originating device, or run "Reset shared baseline" from the importing device — the reseed pushes everything, with ratings baked in. Found during the Aug 2026 manual reseed.
+- **A stored rating can follow the wrong rename in one rare sequence.** After a reset, renaming an item away, re-adding a new item under its old title, then renaming *that* one too: Firestore keeps only the latest tombstone per id, so a device adopting afterwards sends the original stored rating along the second rename instead of the first. Needs all three steps between a reset and the adopt.
 - **`settings.userName`** is reserved (added with `deviceId` in schema v4) but unused and stripped from exports.
 
 ---
@@ -588,6 +599,7 @@ One line each; the sections above have the details.
 | `unionItemsAndSchema()` / `adoptIncomingFields(cat, fields)` | Merge step 3: schema then items; field/identity adoption |
 | `applyNewMatches(matches, seededIds)` | Apply new matches as deltas; one-sided for seeded items; skips self-matches |
 | `makeIdResolver()` / `moveOrMergeItem(from, to)` | Follow renames / move or merge a renamed local copy |
+| `routeStoredRatings(items)` | On a Firestore pull, move reset-stored ratings along renames and drop them after deletes |
 | `latestByKey()` / `latestPerItemId()` / `latestPerCat()` | Latest tombstone per key |
 | `currentlyTombstonedIds()` / `currentlyTombstonedCats()` | Delete-vs-undelete resolution (ties → deleted) |
 | `undeleteItem(id)` / `renderDeletedItems()` / `tsAfterUndeletes(id)` | Manual undelete / Deleted Items view / tie-safe timestamp |
