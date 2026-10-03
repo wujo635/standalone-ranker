@@ -15,7 +15,15 @@ import { dirname } from 'node:path';
 
 const UA = 'standalone-ranker-populate-songs/1.0 ( https://github.com/wujo635/standalone-ranker )';
 const MB = 'https://musicbrainz.org/ws/2/';
-const FIELDS = ['Artist', 'Album', 'Year', 'Language', 'Genre']; // Songs schema, after primary 'Title'
+// Songs schema after primary 'Title' — must match the user's Songs schema editor exactly,
+// since Bulk add ignores the CSV's #field rows and keys values by column name.
+const FIELDS = [
+  { name: 'Artist', required: true },
+  { name: 'Album', required: false },
+  { name: 'Year Released', required: false },
+  { name: 'Language', required: false },
+  { name: 'Genre', required: false },
+];
 const LANGS = { eng: 'English', jpn: 'Japanese', kor: 'Korean', zho: 'Chinese', spa: 'Spanish',
   fra: 'French', deu: 'German', ita: 'Italian', por: 'Portuguese', rus: 'Russian', hin: 'Hindi',
   tha: 'Thai', vie: 'Vietnamese', tgl: 'Tagalog', ind: 'Indonesian', swe: 'Swedish', nld: 'Dutch',
@@ -109,16 +117,24 @@ const commands = {
     };
     const missing = rows.filter(r => !r.Title || !r.Artist);
     if (missing.length) throw new Error(`${missing.length} row(s) missing Title or Artist`);
+    const names = ['Title', ...FIELDS.map(f => f.name)];
+    const unknown = [...new Set(rows.flatMap(Object.keys))].filter(k => !names.includes(k));
+    if (unknown.length) throw new Error(`Unknown column(s): ${unknown.join(', ')} — expected ${names.join(', ')}`);
     const lines = [
       '#category,Songs',
       '#primary,Title',
-      ...FIELDS.map(f => `#field,${f},${f === 'Artist' ? 'required' : 'optional'}`),
-      ['Title', ...FIELDS].join(','),
-      ...rows.map(r => ['Title', ...FIELDS].map(f => cell(r[f])).join(','))
+      ...FIELDS.map(f => `#field,${f.name},${f.required ? 'required' : 'optional'}`),
+      names.join(','),
+      ...rows.map(r => names.map(f => cell(r[f])).join(','))
     ];
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, lines.join('\n') + '\n', 'utf8');
-    return `Wrote ${rows.length} songs to ${outPath}`;
+    // Other required fields (Genre) may legitimately be blank when no source was found —
+    // warn rather than fail, so the user can fill them in after import.
+    const blanks = FIELDS.filter(f => f.required && f.name !== 'Artist')
+      .map(f => [f.name, rows.filter(r => !String(r[f.name] ?? '').trim()).length]).filter(([, n]) => n);
+    return `Wrote ${rows.length} songs to ${outPath}` +
+      blanks.map(([n, c]) => `\nWarning: ${c} row(s) have a blank required ${n}`).join('');
   }
 };
 
