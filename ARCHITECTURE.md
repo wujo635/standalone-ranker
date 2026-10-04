@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.1` |
+| App version | `2.18.2` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -76,6 +76,7 @@ tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
+tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -300,7 +301,7 @@ Firestore doc ids for category tombstones are `catKey(cat)` (same hash as `itemK
 - `identitySuffixForFields(idFields, fields)` builds a suffix from the identity fields, sorted by name, values normalized like titles (`trim().toLowerCase()`); `identitySuffixFor(cat, fields)` reads the saved schema. `itemKey(cat, title, suffix)` folds it into the hash; with no identity fields the suffix is `''` and ids are unchanged.
 - Every id-computing call site goes through these helpers — there is no second notion of "same item" (a separate title-only lookup is exactly what once let a CSV import overwrite the wrong "Dune").
 - **Editing an identity value is a rename**, handled exactly like a title rename (see "Item renames").
-- **Toggling identity on an existing category** is a bulk rekey in `saveSchema()` via `rekeyItemsForIdentityFields(cat, pendingIdFields)`: it computes every item's new id and, if no two *different* items (compared by original id, not title) collide, applies it with `remapItemIds()` — items, `matchLog`, `itemDeletes`, `history` — gives moved items a fresh `updatedAt`, and tombstones each old id so other devices retire stale copies. On a collision (only possible when *removing* a disambiguating flag) the save is blocked with a toast naming both items.
+- **Toggling identity on an existing category** is a bulk rekey in `saveSchema()` via `rekeyItemsForIdentityFields(cat, pendingIdFields)`: it computes every item's new id and, if no two *different* items (compared by original id, not title) collide, applies it with `remapItemIds(idMap, { tombstones: false })` — items, `matchLog`, `history` — and gives moved items a fresh `updatedAt`. Each moved item is then recorded as a **rename**, exactly like `saveItem()`'s: a tombstone on the old id with `renamedTo` the new id, and an undelete of the new id if it's tombstoned (2.18.2). Other devices move their own copies (keeping their ratings), old matches resolve to the new ids, a reset's stored ratings follow, and the items stay off Deleted Items. Before 2.18.2 the old ids got plain deletes, so every other device deleted its copies and re-created them from the pulled docs at 1000/0-0, and a device joining later couldn't replay any earlier match; and existing tombstones were rewritten onto the new ids without their undeletes, so an item that had been deleted and re-added was deleted by the next merge. On a collision (only possible when *removing* a disambiguating flag) the save is blocked with a toast naming both items.
 - **Sync:** for a category both sides know, `adoptIncomingFields()` adopts any field this device has never heard of, and any `identity: true` it doesn't have yet — monotonic, never turning identity off. An identity adoption goes through the same `rekeyItemsForIdentityFields()` and is skipped (with a `console.warn`) on a collision rather than half-applied. `required`/`filterable` on an already-shared field stay local-only.
 - Because schema is adopted before items are unioned (merge step 3), a device whose identity flags were behind rekeys its items onto the same scheme before comparing, so nothing duplicates.
 
@@ -425,6 +426,7 @@ Accepted tradeoffs — none lose items or matches:
 - **Re-adding a title while the other device's delete of it is unpulled** loses to that delete — see "Item deletions".
 - **Upload only sends this device's own work, so data imported from another device's file never reaches Firestore from here.** Matches are pushed only if their id carries this device's `deviceId` prefix, and items only if their `updatedAt` is newer than this device's upload cursor — imported items keep the originating device's older `updatedAt`. So importing a file from a device that can't sync itself, then clicking Upload, silently pushes none of its matches and possibly none of its items (it all stays in this device's local state). To get it into Firestore, upload from the originating device, or run "Reset shared baseline" from the importing device — the reseed pushes everything, with ratings baked in. Found during the Aug 2026 manual reseed.
 - **A stored rating can follow the wrong rename in one rare sequence.** After a reset, renaming an item away, re-adding a new item under its old title, then renaming *that* one too: Firestore keeps only the latest tombstone per id, so a device adopting afterwards sends the original stored rating along the second rename instead of the first. Needs all three steps between a reset and the adopt.
+- **Turning an identity field *off* doesn't sync the flag, but does sync the moves.** Other devices never adopt identity being turned off (see "Item identity fields"), yet since 2.18.2 the rekey's rename tombstones still move their copies to the shorter ids. Ratings are kept, but those devices' ids no longer match their own schema until they turn the flag off too; an edit there recomputes the id and is treated as a rename.
 - **`settings.userName`** is reserved (added with `deviceId` in schema v4) but unused and stripped from exports.
 
 ---
