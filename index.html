@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.1';
+const APP_VERSION = '2.18.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1519,21 +1519,27 @@ function rekeyItemsForIdentityFields(cat, pendingIdFields) {
 
   if (collision) return { collision };
 
-  remapItemIds(idMap);
+  // Tombstones stay where they are (2.18.2): the old ids get rename tombstones below,
+  // and rewriting an existing tombstone onto a new id — without its undelete, which
+  // stays on the old id — tombstoned any item that had been deleted and re-added, so
+  // this device deleted it on its next merge.
+  remapItemIds(idMap, { tombstones: false });
   const now = Date.now();
-  // Tombstone every old id this rekey actually moved away from — without this, an old
-  // id's Firestore doc sits there orphaned forever (never deleted, never updated), so
-  // any device that still has a copy at that old id (or re-uploads it, e.g. via the
-  // itemsToPush updatedAt-cascade) hands it back to everyone else as a "new" item at
-  // elo 1000 on their next pull, duplicating the item right alongside its renamed
-  // copy. Same tombstone treatment saveItem()'s single-item rekey already does — see
-  // "Item identity fields" / "Known gaps in the merge model" in ARCHITECTURE.md.
+  // Every item that moved is a rename, recorded exactly like saveItem()'s (2.18.2):
+  // a tombstone on the old id WITH renamedTo, and an undelete of the new id if it's
+  // tombstoned (e.g. it was renamed away when identity was last turned off). Other
+  // devices then move their own copies, keeping their ratings, and old matches resolve
+  // to the new ids (makeIdResolver()). Before 2.18.2 these were plain deletes: every
+  // other device deleted its copies and re-created them from the pulled docs at 1000,
+  // 0-0, and a device joining later couldn't replay any earlier match. Without any
+  // tombstone (before 2.7.3) the old ids came back as duplicates.
   catItems.forEach(item => {
     const newId = idMap[item.id];
     const moved = state.items[newId];
     if (moved) moved.updatedAt = now;
     if (newId !== item.id) {
-      state.itemDeletes.push({ itemId: item.id, ts: now, deviceId: state.settings.deviceId, title: item.title, cat });
+      undeleteIfTombstoned(newId, item.title, cat);
+      state.itemDeletes.push({ itemId: item.id, ts: tsAfterUndeletes(item.id), deviceId: state.settings.deviceId, title: item.title, cat, renamedTo: newId });
     }
   });
   return { collision: null };
