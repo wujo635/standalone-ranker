@@ -20,7 +20,7 @@ node .claude/skills/populate-songs/songs.mjs <command> ...
 | Command | Returns |
 |---|---|
 | `artist "<name>"` | candidate artists: id, name, country, disambiguation |
-| `albums <artistId>` | Albums, then EPs, then Singles, by date (live/compilation/remix/demo already excluded) |
+| `albums <artistId> [--all]` | Albums, then EPs, then Singles, by date, with MusicBrainz's `note` when it has one. Live/compilation/remix/demo releases are excluded unless `--all` is passed; those then carry a `secondary` type. |
 | `editions <releaseGroupId>` | official releases of one album: date, country, edition name, track count |
 | `tracks <releaseId>` | album title, first-release year, language, and the track list |
 | `genre "<Wikipedia page title>"` | genres from the infobox (follow `redirect` if returned) |
@@ -36,7 +36,19 @@ same-name artists), ask the user to choose, showing country and disambiguation.
 `albums <artistId>`.
 
 - **A single album or EP was named:** match it by title and continue. If more than one release
-  group matches, ask.
+  group matches, ask, showing each one's year and `note`.
+- **A regional version, a compilation, or a release that isn't among the results.** Examples:
+  "the 1997 US version", "the American debut", "Greatest Hits", or a named album that
+  `albums` doesn't list. Re-run with `albums <artistId> --all` and match on the title, year,
+  and `note`. MusicBrainz often files regional repackages as compilations; the 1997 US
+  *Backstreet Boys* is one. Before going further, check where the songs first appeared:
+  - A song from an original album may already be in the library, credited to that album.
+    Importing it again overwrites its Album and Year Released.
+  - Ask whether to credit each song to the requested release, or to the original album it
+    first appeared on. For the second option, take Album, Year Released and Genre from that
+    original album.
+  - Only take the second option if you can actually find the song on an original album with
+    `albums` and `tracks`. Don't guess. If you can't, credit the requested release.
 - **A discography was requested:** show a numbered list in chat — studio albums first, then
   EPs — each with its year, and ask which numbers to include (accept "all", "1-4", "all but 6",
   etc.). Don't use AskUserQuestion here: it only shows 4 options. Then ask whether to also add

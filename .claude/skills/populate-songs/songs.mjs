@@ -4,7 +4,8 @@
 // so the skill doesn't have to wade through raw API responses.
 //
 //   node songs.mjs artist "<name>"            candidate artists (id, name, country, disambiguation)
-//   node songs.mjs albums <artistId>          release groups: albums, EPs, singles (no live/compilation/remix)
+//   node songs.mjs albums <artistId> [--all]  release groups: albums, EPs, singles (no live/compilation/remix;
+//                                             --all keeps them, tagged with their secondary types)
 //   node songs.mjs editions <releaseGroupId>  official releases of one album, with track counts
 //   node songs.mjs tracks <releaseId>         track list (+ language, date) of one release
 //   node songs.mjs genre "<Wikipedia title>"  genres from the page's infobox
@@ -48,14 +49,19 @@ const commands = {
       disambiguation: a.disambiguation || '', score: a.score }));
   },
 
-  async albums(artistId) {
+  async albums(artistId, flag) {
+    const all = flag === '--all';
     const out = [];
     for (let offset = 0; ; offset += 100) {
       const j = await mb(`release-group?artist=${artistId}&type=album|ep|single&limit=100&offset=${offset}`);
       for (const g of j['release-groups']) {
         // secondary types = Live, Compilation, Remix, Demo, Soundtrack... — not original releases
-        if ((g['secondary-types'] || []).length) continue;
-        out.push({ type: g['primary-type'], date: g['first-release-date'], title: g.title, id: g.id });
+        const secondary = g['secondary-types'] || [];
+        if (secondary.length && !all) continue;
+        out.push({ type: g['primary-type'], date: g['first-release-date'], title: g.title, id: g.id,
+          // e.g. "1997 US debut album compiling ..." — tells same-titled releases apart
+          ...(g.disambiguation && { note: g.disambiguation }),
+          ...(secondary.length && { secondary: secondary.join('+') }) });
       }
       if (offset + 100 >= j['release-group-count']) break;
     }
