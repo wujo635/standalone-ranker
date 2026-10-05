@@ -75,17 +75,32 @@ For every selected album or EP:
 
 | Field | Rule |
 |---|---|
-| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. |
+| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. MusicBrainz often lists non-Latin titles in two scripts, like "피카부 (Peek-a-Boo)". When it does, ask whether to use English only or the bilingual form, and apply the answer to the whole run. The title is part of the id, so it must match how the user would type it. |
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests ("feat. X") out of Artist, so the Artist filter stays clean. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. |
 | Album | The release-group title (the original album name). Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
-| Language | `language` from `tracks`. If it's missing, use the artist's main language. If a track is known to be in a different language, override it for that track only. |
+| Language | `language` from `tracks`, but sanity-check it. MusicBrainz's value describes the script the track list is *written* in, not what's sung. K-pop releases with romanized titles come back as "English" or "Multiple". If it's missing or clearly wrong, use the artist's main language, and flag the override in the preview. If a track is known to be in a different language, override it for that track only. |
 | Genre | The album's genres: `genre "<Album> (album)"`, falling back to `"<Album>"` or `"<Album> (<Artist> album)"`. Take the first 1–3, comma-separated (Genre is a multi-value field). The same value goes on every track of that album. For a non-album single, try the song's own page, then the artist's. If nothing is found, leave it blank. Don't guess. |
 
 **Deduplicate within the run.** If the same song shows up on two selected releases (a single
 and its album, or an EP and a later album), keep **one** row, using the earliest *album*
 appearance. To match, compare titles case-insensitively with punctuation and
 feat./version suffixes ignored.
+
+**Language versions of the same song collide.** Examples: a Japanese "Dumb Dumb" on a
+Japanese EP, or an English "Bad Boy" on a later EP.
+- A song's id is its title (plus any identity fields). Language isn't part of it, so a
+  same-titled version **replaces** the original in the app. Bulk add would overwrite
+  "Dumb Dumb"'s Album, Year Released and Language with the Japanese release's.
+- **Default:** keep the original-language version and skip the others. List the skipped
+  versions in the preview.
+- **If the user wants a version as well,** add it as its own row with a distinguishing title,
+  `"<Title> (<Language> Version)"`. Give it that release's Album, Year Released and
+  Language. Example: `Bad Boy (English Version)`, Summer Magic, 2018, English.
+- **Songs first released in that language** keep their plain title, for example
+  #Cookie Jar's "Aitai-tai".
+- Before writing, check that no two rows share a title (case-insensitive). Two rows with the
+  same title would land on the same item.
 
 ### 5. Check against the existing library (if available)
 If `imports/songs-library.csv` exists, it's the user's own "Export category as CSV" of Songs.
