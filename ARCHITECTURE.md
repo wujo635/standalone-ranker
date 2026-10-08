@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.2` |
+| App version | `2.18.3` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -77,6 +77,7 @@ tests/ui.test.js               click-level tests: every interactive control, via
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
 tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2)
+tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -91,7 +92,7 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Everything crosses the boundary as JSON.** Objects created inside jsdom belong to another JS realm, which makes `assert.deepStrictEqual` fail on otherwise-identical values; JSON also mirrors how real data reaches the app.
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
-- **Real Firestore code (2.18.1):** `tests/helpers/firestore.js` is an in-memory stand-in for the slice of the Firestore SDK the app uses; `connect(app, db)` points a page at it, signed in, with `confirm()` and `downloadJson()` stubbed. Several pages can share one `db`, so the real `uploadToFirestore()`, `pullFromFirestore()`, `resetSharedBaseline()`, and `adoptFreshBaseline()` run end to end (`await app.window.eval('uploadToFirestore()')`). It models what the app depends on: a plain `set()` replaces the whole doc, `{ merge }` deep-merges, `{ mergeFields }` replaces only the listed fields, server timestamps increase per commit (so `where('syncedAt', '>', …)` works), and `undefined` values are rejected.
+- **Real Firestore code (2.18.1):** `tests/helpers/firestore.js` is an in-memory stand-in for the slice of the Firestore SDK the app uses; `connect(app, db)` points a page at it, signed in, with `confirm()` and `downloadJson()` stubbed. Several pages can share one `db`, so the real `uploadToFirestore()`, `pullFromFirestore()`, `resetSharedBaseline()`, and `adoptFreshBaseline()` run end to end (`await app.window.eval('uploadToFirestore()')`). It models what the app depends on: a plain `set()` replaces the whole doc, `{ merge }` deep-merges, `{ mergeFields }` replaces only the listed fields, server timestamps increase per commit (so `where('syncedAt', '>', …)` works), and `undefined` values are rejected. `db.written` lists every path written, so a test can assert exactly what an Upload sent.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
 - **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
 - **Regression-first:** sync/merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). CLAUDE.md requires a test that fails without the fix for any such bug.
@@ -335,7 +336,7 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 ### Upload and pull
 
 - **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. It pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt`, this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema; cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
-- **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled), builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
+- **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled), builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. **Pulling into an empty library** (no items, matches, or tombstones — after Adopt's clear, or on a brand-new device) also moves the `lastUploaded*` cursors past everything it pulled (2.18.3): it's all already in the cloud, and with every cursor at 0 the next Upload used to re-send every item and tombstone (identical rewrites, but one write each, and a re-read on every other device's next pull). These are the values that redundant Upload used to leave them at. A non-empty device's cursors are never touched, since it may have unsent work. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
 
 ### Auth, hosting, and setup
 
@@ -380,7 +381,7 @@ Pinned end to end by `tests/reset-baseline.test.js`.
 | `cats`/`schema` | Kept; reseeded | Wiped, then pulled back |
 | Undo history (`state.history`) | Kept | **Lost** (never synced) |
 | Hidden markings | Kept | Restored for ids that still exist |
-| Upload/pull cursors | Reset, then advanced by the reseed | Reset, then set by the pull |
+| Upload/pull cursors | Reset, then advanced by the reseed | Reset, then set by the pull — upload cursors included, so the next Upload sends nothing (2.18.3) |
 | Local work never uploaded | **Lost** — the pre-reset pull can't see it | **Lost** — the clear runs before the pull |
 
 **Dropping tombstones is deliberate.** A reset means starting clean, past deletions included. The cost: a device that was offline through a delete, never adopted the reset, and uploads its stale copy would resurrect that item as new. The baseline-id guard blocks the ordinary Upload that would cause this, so it now requires bypassing the guard; it also means a reset clears any tombstone that was blocking a re-sync.
@@ -425,6 +426,7 @@ Accepted tradeoffs — none lose items or matches:
 - **A match against a since-deleted item** can leave its opponent's W/L off by one between devices — see "Item deletions".
 - **Re-adding a title while the other device's delete of it is unpulled** loses to that delete — see "Item deletions".
 - **Upload only sends this device's own work, so data imported from another device's file never reaches Firestore from here.** Matches are pushed only if their id carries this device's `deviceId` prefix, and items only if their `updatedAt` is newer than this device's upload cursor — imported items keep the originating device's older `updatedAt`. So importing a file from a device that can't sync itself, then clicking Upload, silently pushes none of its matches and possibly none of its items (it all stays in this device's local state). To get it into Firestore, upload from the originating device, or run "Reset shared baseline" from the importing device — the reseed pushes everything, with ratings baked in. Found during the Aug 2026 manual reseed.
+- **Pulled changes echo back on the next Upload.** Upload sends whatever is newer than this device's cursors, so an edit or tombstone pulled from another device is re-sent by this device's next Upload — an identical rewrite (one write, and a re-read on the other device). Only pulls into an empty library avoid it (2.18.3); avoiding it everywhere would mean tracking which changes were made locally, per item. Harmless, and small at this app's scale.
 - **A stored rating can follow the wrong rename in one rare sequence.** After a reset, renaming an item away, re-adding a new item under its old title, then renaming *that* one too: Firestore keeps only the latest tombstone per id, so a device adopting afterwards sends the original stored rating along the second rename instead of the first. Needs all three steps between a reset and the adopt.
 - **Turning an identity field *off* doesn't sync the flag, but does sync the moves.** Other devices never adopt identity being turned off (see "Item identity fields"), yet since 2.18.2 the rekey's rename tombstones still move their copies to the shorter ids. Ratings are kept, but those devices' ids no longer match their own schema until they turn the flag off too; an edit there recomputes the id and is treated as a rename.
 - **`settings.userName`** is reserved (added with `deviceId` in schema v4) but unused and stripped from exports.
