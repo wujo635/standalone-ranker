@@ -44,10 +44,12 @@ const copy = v => (isMap(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) 
 
 function createFirestore() {
   const docs = new Map(); // full path -> data
+  const written = []; // every path set(), in order — see db.written
   let clock = 1_000_000;
 
   function write(path, data, opts, now) {
     const resolved = resolve(data, now);
+    written.push(path);
     const existing = docs.get(path);
     if (opts && opts.mergeFields) {
       const out = { ...(existing || {}) };
@@ -105,6 +107,9 @@ function createFirestore() {
       };
     },
     // Test-side inspection: the stored data of one document, or undefined.
+    // Paths written so far (one entry per set(), repeats included). Tests clear it with
+    // db.written.length = 0 before the step they want to measure.
+    written,
     peek: path => (docs.has(path) ? copy(docs.get(path)) : undefined),
   };
 }

@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.2';
+const APP_VERSION = '2.18.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3777,7 +3777,25 @@ async function pullFromFirestore(opts) {
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
 
+    // Pulling into an empty library — "Adopt fresh baseline" (which clears first) or a
+    // brand-new device — leaves every upload cursor at 0, so the next Upload re-sent
+    // every item and tombstone just pulled: identical rewrites, one write each, and every
+    // other device then re-read them all. With nothing local to send, everything this
+    // device now has is already in the cloud, so the cursors move past it (2.18.3). The
+    // values are the same ones that redundant Upload used to leave them at. matchSeq/
+    // lastUploadedSeq need nothing: only this device's own matches are ever sent.
+    const wasEmpty = !Object.keys(state.items).length && !state.matchLog.length &&
+      !state.itemDeletes.length && !state.itemUndeletes.length && !state.catDeletes.length && !state.catUndeletes.length;
     mergeImport(incoming, { cloudOrigin: true });
+    if (wasEmpty) {
+      const s = state.settings;
+      const newest = (list, key) => list.reduce((max, x) => Math.max(max, x[key] || 0), 0);
+      s.lastUploadedItemsAt = Math.max(s.lastUploadedItemsAt || 0, newest(Object.values(state.items), 'updatedAt'));
+      s.lastUploadedDeletesAt = Math.max(s.lastUploadedDeletesAt || 0, newest(state.itemDeletes, 'ts'));
+      s.lastUploadedUndeletesAt = Math.max(s.lastUploadedUndeletesAt || 0, newest(state.itemUndeletes, 'ts'));
+      s.lastUploadedCatDeletesAt = Math.max(s.lastUploadedCatDeletesAt || 0, newest(state.catDeletes, 'ts'));
+      s.lastUploadedCatUndeletesAt = Math.max(s.lastUploadedCatUndeletesAt || 0, newest(state.catUndeletes, 'ts'));
+    }
     // A full re-pull only ever advances the cursor, never rewinds it — a full pull
     // triggered while this device is already partway ahead (e.g. it uploaded locally-made
     // matches after its last pull) must not reset lastSyncedServerTs backward, which
