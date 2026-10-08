@@ -121,6 +121,18 @@ Park's.
 - The fix on the app side is to turn on the identity toggle for Artist in the Songs schema
   editor, so title + artist decides identity.
 
+**With Artist as an identity field, the risk flips: a different spelling creates a duplicate.**
+The id includes the Artist value exactly, so "The Backstreet Boys" vs "Backstreet Boys", or
+"Red Velvet × aespa" vs "Red Velvet & aespa", gives a *new* item instead of updating the
+existing one.
+- Compare each Artist value in the CSV with the library's Artist values. Normalize first:
+  case-insensitive, ignore a leading "The", and treat `×`, `x`, `&`, `and` and `,` as the same
+  separator.
+- A normalized match that isn't an exact match is a spelling difference. Use the library's
+  spelling in the CSV, and list each substitution in the preview.
+- Also flag any CSV row whose normalized Title + Artist matches a library row while the exact
+  values differ. That row would be added as a near-duplicate.
+
 If the file doesn't exist, say in the final message that this check was skipped, and that
 exporting Songs to that path enables it. Do this on **every** run, because without it a
 same-titled song is overwritten silently.
