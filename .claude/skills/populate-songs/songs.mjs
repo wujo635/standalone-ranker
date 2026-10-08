@@ -119,7 +119,9 @@ const commands = {
     // matches what a user would type — the title is part of the item id.
     const cell = v => {
       const s = String(v ?? '').replace(/[‘’]/g, "'").replace(/[‐‑]/g, '-').replace(/"/g, '”').replace(/[\r\n]+/g, ' ').trim();
-      return /,/.test(s) ? `"${s}"` : s;
+      // parsePreloadCSV() treats any line starting with `#` as a directive, so a leading-`#`
+      // title ("#Cookie Jar") must be quoted or the row is silently dropped.
+      return /,/.test(s) || s.startsWith('#') ? `"${s}"` : s;
     };
     const missing = rows.filter(r => !r.Title || !r.Artist);
     if (missing.length) throw new Error(`${missing.length} row(s) missing Title or Artist`);
