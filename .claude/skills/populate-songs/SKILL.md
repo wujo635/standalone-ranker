@@ -75,7 +75,7 @@ For every selected album or EP:
 
 | Field | Rule |
 |---|---|
-| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. MusicBrainz often lists non-Latin titles in two scripts, like "피카부 (Peek-a-Boo)". When it does, ask whether to use English only or the bilingual form, and apply the answer to the whole run. The title is part of the id, so it must match how the user would type it. |
+| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. **Non-Latin titles use the bilingual form `<original title> (<English title>)`**, as MusicBrainz usually lists them: `피카부 (Peek-a-Boo)`, `빨간 맛 (Red Flavor)`. This is the user's settled preference, so don't ask. If MusicBrainz gives only the English title (e.g. Red Velvet's "Ice Cream Cake", "Bad Boy"), keep that unchanged. Don't add an original-script title MusicBrainz doesn't list. The title is part of the id, so a song already in the library under a different title form isn't matched: it's added as a new item. Flag any such song in the preview (see step 5). |
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests ("feat. X") out of Artist, so the Artist filter stays clean. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. |
 | Album | The release-group title (the original album name). Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
@@ -132,6 +132,12 @@ existing one.
   spelling in the CSV, and list each substitution in the preview.
 - Also flag any CSV row whose normalized Title + Artist matches a library row while the exact
   values differ. That row would be added as a near-duplicate.
+- **The same song with a different title form is a near-duplicate too.** For example, the
+  library has `Peek-a-Boo` and the CSV has `피카부 (Peek-a-Boo)`. Treat the English part in
+  parentheses as the title when comparing. Leave such rows out of the CSV and list them.
+  - To move an existing song to the new form, the user should **edit its title in the app**.
+    That's a rename: it keeps the rating and syncs.
+  - Re-importing instead would add a second copy.
 
 If the file doesn't exist, say in the final message that this check was skipped, and that
 exporting Songs to that path enables it. Do this on **every** run, because without it a
