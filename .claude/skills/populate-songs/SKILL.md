@@ -108,9 +108,22 @@ Leave out songs already in it, matching on the normalized Title + Artist, and li
 "already in library".
 
 This matters because Bulk add **overwrites** the fields of matching items, blank values
-included, so re-importing a song would wipe a Genre or Album the user edited by hand. If the
-file doesn't exist, say once in the final message that exporting Songs to that path enables
-this check.
+included, so re-importing a song would wipe a Genre or Album the user edited by hand.
+
+**Same title, different artist: this is a collision, not a duplicate.** Match on Title alone
+too. A library row with the same title but a different Artist means the import would turn
+that song into the new one: it keeps the old song's rating and match history but takes on
+the new artist and album. This happened for real: Red Velvet's "With You" overwrote Linkin
+Park's.
+- Unless the user says Artist is an identity field in their Songs schema, list each collision
+  at the **top** of the preview.
+- Leave colliding rows out of the CSV until the user decides.
+- The fix on the app side is to turn on the identity toggle for Artist in the Songs schema
+  editor, so title + artist decides identity.
+
+If the file doesn't exist, say in the final message that this check was skipped, and that
+exporting Songs to that path enables it. Do this on **every** run, because without it a
+same-titled song is overwritten silently.
 
 ### 6. Preview, then write
 Show a compact preview: one table per release (#, Title, Year Released, Genre), plus a short list of
@@ -137,4 +150,5 @@ Tell the user the file path, the row count, and the import steps:
 Remind them, briefly, that a song's id is its title plus any identity fields. Unless **Artist**
 is flagged as an identity field in the Songs schema editor, a new song with the same title as
 an existing one (another artist's "Numb", say) overwrites that item instead of being added.
-Mention this once per conversation, not on every run.
+Repeat this on every run until the user confirms Artist is an identity field. A
+once-per-conversation reminder wasn't enough to prevent the "With You" collision.
