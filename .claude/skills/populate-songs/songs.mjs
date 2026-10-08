@@ -7,7 +7,7 @@
 //   node songs.mjs albums <artistId> [--all]  release groups: albums, EPs, singles (no live/compilation/remix;
 //                                             --all keeps them, tagged with their secondary types)
 //   node songs.mjs editions <releaseGroupId>  official releases of one album, with track counts
-//   node songs.mjs tracks <releaseId>         track list (+ language, date) of one release
+//   node songs.mjs tracks <releaseId>         track list (+ language, date; per-track sung `lyrics` language) of one release
 //   node songs.mjs genre "<Wikipedia title>"  genres from the page's infobox
 //   node songs.mjs csv <rows.json> <out.csv>  write a preload CSV from [{Title, Artist, ...}]
 
@@ -28,7 +28,8 @@ const FIELDS = [
 const LANGS = { eng: 'English', jpn: 'Japanese', kor: 'Korean', zho: 'Chinese', spa: 'Spanish',
   fra: 'French', deu: 'German', ita: 'Italian', por: 'Portuguese', rus: 'Russian', hin: 'Hindi',
   tha: 'Thai', vie: 'Vietnamese', tgl: 'Tagalog', ind: 'Indonesian', swe: 'Swedish', nld: 'Dutch',
-  ara: 'Arabic', tur: 'Turkish', pol: 'Polish', heb: 'Hebrew', mul: 'Multiple' };
+  ara: 'Arabic', tur: 'Turkish', pol: 'Polish', heb: 'Hebrew', mul: 'Multiple',
+  zxx: 'Instrumental' }; // ISO 639 "no linguistic content": MusicBrainz's language for lyric-less works
 
 let lastCall = 0;
 async function mb(path) {
@@ -79,9 +80,19 @@ const commands = {
   },
 
   async tracks(releaseId) {
-    const r = await mb(`release/${releaseId}?inc=recordings+artist-credits+release-groups`);
+    const r = await mb(`release/${releaseId}?inc=recordings+artist-credits+release-groups+work-rels+recording-level-rels`);
     const lang = r['text-representation']?.language;
     const credit = ac => (ac || []).map(c => c.name + (c.joinphrase || '')).join('');
+    // The recording's linked work carries the *sung* language (zxx = no lyrics), unlike the
+    // release's text-representation, which is only the script the track list is written in.
+    // A performance tagged "instrumental" is an instrumental version of a vocal work.
+    const work = t => {
+      const rel = (t.recording?.relations || []).find(x => x.type === 'performance' && x.work);
+      if (!rel) return {};
+      const langs = rel.work.languages?.length ? rel.work.languages : [rel.work.language].filter(Boolean);
+      return { ...(langs.length && { lyrics: langs.map(l => LANGS[l] || l).join('+') }),
+        ...(rel.attributes?.includes('instrumental') && { instrumentalVersion: true }) };
+    };
     return {
       album: r['release-group']?.title || r.title,
       edition: r.disambiguation || '',
@@ -91,7 +102,7 @@ const commands = {
       tracks: r.media.flatMap((m, d) => m.tracks.map(t => ({
         disc: d + 1, n: t.position, title: t.title,
         artist: credit(t['artist-credit']), length: t.length ? Math.round(t.length / 1000) : null,
-        recording: t.recording?.disambiguation || ''
+        recording: t.recording?.disambiguation || '', ...work(t)
       })))
     };
   },

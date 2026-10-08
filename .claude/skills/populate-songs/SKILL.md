@@ -22,7 +22,7 @@ node .claude/skills/populate-songs/songs.mjs <command> ...
 | `artist "<name>"` | candidate artists: id, name, country, disambiguation |
 | `albums <artistId> [--all]` | Albums, then EPs, then Singles, by date, with MusicBrainz's `note` when it has one. Live/compilation/remix/demo releases are excluded unless `--all` is passed; those then carry a `secondary` type. |
 | `editions <releaseGroupId>` | official releases of one album: date, country, edition name, track count |
-| `tracks <releaseId>` | album title, first-release year, language, and the track list |
+| `tracks <releaseId>` | album title, first-release year, language, and the track list. Each track has `lyrics` (the sung language from its linked work; `Instrumental` when it has no lyrics) when MusicBrainz knows it, and `instrumentalVersion: true` for an instrumental version of a vocal song |
 | `genre "<Wikipedia page title>"` | genres from the infobox (follow `redirect` if returned) |
 | `csv <rows.json> <out.csv>` | writes the preload CSV (handles quoting, curly quotes, header/directives) |
 
@@ -64,12 +64,16 @@ For every selected album or EP:
    with more tracks, fetch the most complete one and add tracks that are **distinct songs** not
    already on the list.
    - Skip versions of songs already listed: live, remix, demo, instrumental, acoustic,
-     a cappella, radio/single edit, remaster.
+     a cappella, radio/single edit, remaster. A track with `instrumentalVersion: true` is one
+     of these, even without "Instrumental" in its title.
    - A track that is a previously unreleased song is a distinct song, so keep it.
    - A bonus track still gets the original album's name in Album, not "Meteora (Deluxe)".
 3. **Skip non-song tracks:** intros, interludes, skits, spoken outros. Clues are the length
    (usually under ~60s) or a title like "Intro", "Foreword", "Interlude". List what you skipped
    in the preview so the user can add any back.
+   - **A full-length instrumental is a song, so keep it.** Examples: Linkin Park's "Session",
+     a post-rock track. Having no lyrics doesn't make a track an interlude; length and
+     title do. A 13-second `Instrumental` "Foreword" is still skipped as an intro.
 
 ### 4. Fill the fields
 
@@ -79,8 +83,19 @@ For every selected album or EP:
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests ("feat. X") out of Artist, so the Artist filter stays clean. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. |
 | Album | The release-group title (the original album name). Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
-| Language | `language` from `tracks`, but sanity-check it. MusicBrainz's value describes the script the track list is *written* in, not what's sung. K-pop releases with romanized titles come back as "English" or "Multiple". If it's missing or clearly wrong, use the artist's main language, and flag the override in the preview. If a track is known to be in a different language, override it for that track only. |
+| Language | The track's `lyrics` from `tracks` when present: it's the language actually sung. A `+`-joined value (two sung languages) becomes `Multiple`. Otherwise use the release's `language`, but sanity-check it. That value describes the script the track list is *written* in, not what's sung. K-pop releases with romanized titles come back as "English" or "Multiple". If it's missing or clearly wrong, use the artist's main language, and flag the override in the preview. If a track is known to be in a different language, override it for that track only. **A song with no lyrics gets `Instrumental`**, not the artist's language (see below). |
 | Genre | The album's genres: `genre "<Album> (album)"`, falling back to `"<Album>"` or `"<Album> (<Artist> album)"`. Take the first 1–3, comma-separated (Genre is a multi-value field). The same value goes on every track of that album. For a non-album single, try the song's own page, then the artist's. If nothing is found, leave it blank. Don't guess. |
+
+**Instrumentals go in Language, not Genre.** Language describes the vocals, so a song with
+no lyrics gets `Language: Instrumental`. That way a Language filter for Japanese doesn't show it.
+- Don't add "Instrumental" to Genre. Genre stays the album's genre list, the same on every track.
+- Use it only for songs with **no lyrics at all**: `lyrics` is `Instrumental`, or a source
+  (Wikipedia, the album's liner notes) says the track is instrumental. A short spoken sample or
+  wordless vocals (chants, "oohs") count as instrumental. A sung or rapped verse does not.
+- If MusicBrainz has no `lyrics` for a track, don't guess from the title or the genre. Only
+  mark it Instrumental with a source, and list it in the preview as a judgment call.
+- This is only for songs that are instrumental in their original form. An instrumental
+  *version* of a vocal song is still skipped (step 3).
 
 **Deduplicate within the run.** If the same song shows up on two selected releases (a single
 and its album, or an EP and a later album), keep **one** row, using the earliest *album*
@@ -151,6 +166,7 @@ anything skipped or uncertain:
 - songs already in the library
 - missing genres
 - language overrides
+- instrumentals (songs set to `Language: Instrumental`), marking any that weren't from MusicBrainz's `lyrics`
 
 Ask "Write the CSV?" (allow edits first). Then:
 
