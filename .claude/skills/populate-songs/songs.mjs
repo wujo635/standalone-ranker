@@ -25,7 +25,10 @@ const FIELDS = [
   { name: 'Language', required: false },
   { name: 'Genre', required: false },
 ];
+// Chinese varieties stay distinct (the user filters Mandarin apart from Cantonese); `zho`
+// alone says nothing about which, so it stays "Chinese" and SKILL.md has it resolved.
 const LANGS = { eng: 'English', jpn: 'Japanese', kor: 'Korean', zho: 'Chinese', spa: 'Spanish',
+  cmn: 'Mandarin', yue: 'Cantonese', nan: 'Hokkien', hak: 'Hakka',
   fra: 'French', deu: 'German', ita: 'Italian', por: 'Portuguese', rus: 'Russian', hin: 'Hindi',
   tha: 'Thai', vie: 'Vietnamese', tgl: 'Tagalog', ind: 'Indonesian', swe: 'Swedish', nld: 'Dutch',
   ara: 'Arabic', tur: 'Turkish', pol: 'Polish', heb: 'Hebrew', mul: 'Multiple',
