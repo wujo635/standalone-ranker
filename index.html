@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.3';
+const APP_VERSION = '2.18.4';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3153,9 +3153,17 @@ function currentlyTombstonedCats(deletes, undeletes) { return currentlyTombstone
 // added as a "new" duplicate, right alongside the original, instead of recognized as the
 // same item. Doing schema adoption first means local items are already rekeyed onto the
 // same scheme incoming ids use by the time they're compared, so they correctly line up.
+//
+// Incoming items are also moved onto this device's id scheme (see localIdFor()) — real
+// bug, found live: a device that cleared its Movies, imported a file and turned an
+// identity field on, then ran Reset, pulled every cloud doc still keyed by title alone
+// and reseeded them that way, alongside the correctly keyed copies of the same movies.
+// Returns idMap (incoming id -> local id) so the caller can move the payload's matches
+// too.
 function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
   let added = 0;
   const freshlySeeded = new Set();
+  const idMap = {};
 
   (incoming.cats || []).forEach(c => { if (!tombstonedCats.has(c) && !state.cats.includes(c)) state.cats.push(c); });
   Object.keys(incoming.schema || {}).forEach(c => {
@@ -3165,7 +3173,9 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
   });
 
   Object.values(incoming.items || {}).forEach(inc => {
-    if (tombstoneIds.has(inc.id) || tombstonedCats.has(inc.cat)) return;
+    const localId = localIdFor(inc);
+    if (tombstoneIds.has(inc.id) || tombstoneIds.has(localId) || tombstonedCats.has(inc.cat)) return;
+    if (localId !== inc.id) { idMap[inc.id] = localId; inc = { ...inc, id: localId }; }
     const cur = state.items[inc.id];
     if (!cur) {
       state.items[inc.id] = {
@@ -3199,7 +3209,26 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats) {
       cur.updatedAt = inc.updatedAt;
     }
   });
-  return { added, freshlySeeded };
+  return { added, freshlySeeded, idMap };
+}
+
+// The id an incoming item should have on this device. An item keyed under a coarser
+// identity scheme than this device's — a subset of the category's identity fields, e.g.
+// title alone from before Year was flagged — moves to its full id: refining a key can
+// only split items apart, never merge two different ones. Anything else keeps its id,
+// including an item keyed under MORE identity fields than this device has (an identity
+// adoption skipped over a collision — see adoptIncomingFields()), where mapping it down
+// could merge two different items.
+function localIdFor(item) {
+  const idFields = (state.schema[item.cat]?.fields || []).filter(f => f.identity);
+  if (!idFields.length) return item.id;
+  const id = itemKey(item.cat, item.title, identitySuffixForFields(idFields, item.fields));
+  if (id === item.id) return id;
+  for (let mask = 0; mask < (1 << idFields.length) - 1; mask++) {
+    const subset = idFields.filter((_, i) => mask & (1 << i));
+    if (itemKey(item.cat, item.title, identitySuffixForFields(subset, item.fields)) === item.id) return id;
+  }
+  return item.id;
 }
 
 // For a category this device already knows about, adopts field DEFINITIONS the
@@ -3308,7 +3337,7 @@ function mergeImport(incoming, opts) {
 
   // A reset's stored ratings follow renames and are dropped by deletes (2.18.1).
   if (cloudOrigin) incoming = { ...incoming, items: routeStoredRatings(incoming.items) };
-  const { added, freshlySeeded } = unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats);
+  const { added, freshlySeeded, idMap } = unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats);
 
   // Only matches this device hasn't already counted get applied — see the comment on
   // applyNewMatches() for why this must not be a from-scratch replay. Every new match is
@@ -3344,9 +3373,11 @@ function mergeImport(incoming, opts) {
   // treat those post-reset matches as "already seen" without ever having applied them.
   const localIds = new Set(state.matchLog.map(m => m.id));
   // Resolved through renames: a device that voted before hearing of a rename recorded
-  // the old id, and that vote belongs to the renamed item.
+  // the old id, and that vote belongs to the renamed item. Likewise a vote on an item
+  // just moved onto this device's id scheme (idMap — see localIdFor()).
+  const toLocal = id => resolveId(idMap[id] || id);
   const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id))
-    .map(m => ({ ...m, wid: resolveId(m.wid), lid: resolveId(m.lid) }));
+    .map(m => ({ ...m, wid: toLocal(m.wid), lid: toLocal(m.lid) }));
   applyNewMatches(newMatches, cloudOrigin ? new Set() : freshlySeeded);
   state.matchLog = dedupeById([...state.matchLog, ...newMatches]);
 

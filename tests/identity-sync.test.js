@@ -169,6 +169,54 @@ describe('turning on an identity field on a synced category', () => {
   });
 });
 
+describe('pulling items keyed before an identity field was turned on', () => {
+  // Found live with Movies: clear the device, import a file without the category's items,
+  // turn the identity field on, run Reset. Reset's first pull brought back every cloud doc
+  // still keyed by title alone, and the reseed kept them that way.
+  async function clearImportFlagAndReset(app) {
+    const file = A.get('buildExportPayload()');
+    Object.keys(file.items).forEach(id => { if (file.items[id].cat === 'Movies') delete file.items[id]; });
+    file.matchLog = [];
+    app.run('clearAllDataCore()');
+    app.run(`mergeImport(migrateData(${JSON.stringify(file)}))`);
+    flagYearAsIdentity(app);
+    await cloud(app, 'resetSharedBaseline()');
+  }
+  const ids = app => Object.keys(app.get('state.items')).sort();
+  const fullIds = app => MOVIES.map(([t]) => idOf(app, t)).sort();
+
+  test('a reset pull moves them to their full ids, with their matches', async () => {
+    const heatBefore = heat(A);
+    await clearImportFlagAndReset(B);
+    assert.deepEqual(ids(B), fullIds(B), 'Movies came back under title-only ids');
+    assert.deepEqual([heat(B).elo, heat(B).wins], [heatBefore.elo, 3], "Heat's matches followed it");
+    await cloud(A, 'adoptFreshBaseline()');
+    assert.deepEqual(rankings(A), rankings(B));
+  });
+
+  test('the same, when the cloud holds a previous reset\'s stored ratings', async () => {
+    await cloud(A, 'resetSharedBaseline()');
+    await cloud(B, 'adoptFreshBaseline()');
+    const before = heat(A);
+    await clearImportFlagAndReset(B);
+    assert.deepEqual(ids(B), fullIds(B));
+    assert.deepEqual([heat(B).elo, heat(B).wins], [before.elo, 3]);
+  });
+
+  test('an item already here under its full id is not duplicated by its old copy', async () => {
+    flagYearAsIdentity(B);
+    await cloud(B, 'pullFromFirestore({ full: true })');
+    assert.deepEqual(ids(B), fullIds(B));
+  });
+
+  test('an item keyed under more identity fields than this device has keeps its id', () => {
+    flagYearAsIdentity(B);
+    const item = { cat: 'Movies', title: 'Heat', fields: { Year: '1995', Director: 'Michael Mann' } };
+    item.id = B.get(`itemKey('Movies', 'Heat', 'Director=michael mann|Year=1995')`);
+    assert.equal(B.call('localIdFor', item), item.id, 'mapping it down could merge two different items');
+  });
+});
+
 describe('turning on an identity field after a baseline reset', () => {
   test('a device adopting afterwards gets the stored ratings under the new ids', async () => {
     await cloud(A, 'resetSharedBaseline()');
