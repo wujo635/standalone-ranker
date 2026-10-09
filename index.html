@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.4';
+const APP_VERSION = '2.18.5';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3231,6 +3231,29 @@ function localIdFor(item) {
   return item.id;
 }
 
+// Moves this device's items that are keyed under a coarser identity scheme than their
+// category's — e.g. title alone while Artist is flagged — onto their full ids (2.18.5),
+// by localIdFor()'s rule. Found live with Songs: a Reset under 2.18.3 left a device with
+// Artist flagged but every Song keyed by title alone, and 2.18.4's pull, which moves only
+// incoming items, added each pulled song a second time under its full id. Each move is a
+// rename, recorded like rekeyItemsForIdentityFields()'s, so other devices move their
+// copies too; a copy already under the full id is merged with moveOrMergeItem() (the
+// duplicates 2.18.4 left behind). Returns how many items moved.
+function rekeyOffSchemaItems() {
+  const now = Date.now();
+  let moved = 0;
+  Object.values(state.items).forEach(item => {
+    const toId = localIdFor(item);
+    if (toId === item.id) return;
+    moveOrMergeItem(item.id, toId);
+    state.items[toId].updatedAt = now;
+    undeleteIfTombstoned(toId, item.title, item.cat);
+    state.itemDeletes.push({ itemId: item.id, ts: tsAfterUndeletes(item.id), deviceId: state.settings.deviceId, title: item.title, cat: item.cat, renamedTo: toId });
+    moved++;
+  });
+  return moved;
+}
+
 // For a category this device already knows about, adopts field DEFINITIONS the
 // incoming side has that this device doesn't (2.5.1 — previously this only ever
 // adopted `identity: true` flags; an entirely new, non-identity field never
@@ -3311,7 +3334,7 @@ function mergeImport(incoming, opts) {
   // A tombstone that is really a rename (renamedTo, 2.17.0) moves the local copy to where
   // the item lives now, rating and matches included, merging into an entry already there
   // (see moveOrMergeItem()). Only a chain ending at a plain delete removes the item.
-  const resolveId = makeIdResolver();
+  let resolveId = makeIdResolver();
   tombstoneIds.forEach(id => {
     if (!state.items[id]) return;
     const target = resolveId(id);
@@ -3334,6 +3357,10 @@ function mergeImport(incoming, opts) {
     delete state.schema[c];
     Object.keys(state.items).forEach(id => { if (state.items[id].cat === c) delete state.items[id]; });
   });
+
+  // This device's own items still keyed under a coarser identity scheme move onto their
+  // full ids first (2.18.5), so the incoming copies localIdFor() maps there land on them.
+  if (rekeyOffSchemaItems()) resolveId = makeIdResolver();
 
   // A reset's stored ratings follow renames and are dropped by deletes (2.18.1).
   if (cloudOrigin) incoming = { ...incoming, items: routeStoredRatings(incoming.items) };

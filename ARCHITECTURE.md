@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.4` |
+| App version | `2.18.5` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -76,7 +76,7 @@ tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
-tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2); pulling items keyed before it (2.18.4)
+tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5)
 tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
@@ -241,13 +241,14 @@ Both sync transports — file export/import and Firestore — end in the same fu
 
 1. **Item tombstones.** Union `itemDeletes`/`itemUndeletes` (one entry per id, latest `ts` wins — `latestPerItemId()`). For each currently-tombstoned id this device still holds: if the tombstone is a rename, move the local copy to the id it resolves to (`makeIdResolver()` → `moveOrMergeItem()`); otherwise delete it. Local `matchLog` ids are resolved through renames too. See "Item deletions" and "Item renames".
 2. **Category tombstones.** Union `catDeletes`/`catUndeletes`; purge any tombstoned category's name, schema, and remaining items. See "Category deletions".
-3. **Schema, then items** (`unionItemsAndSchema()`). Schema is adopted *first* — a newly-synced identity flag rekeys local items (see "Item identity fields"), and doing that before comparing items is what lets incoming ids line up with local ones. Then items:
+3. **Local items onto this device's id scheme** (`rekeyOffSchemaItems()`, 2.18.5). Any item this device holds under an id computed from a *subset* of its category's identity fields moves to its full id by `localIdFor()`'s rule, recorded as a rename (a `renamedTo` tombstone, like a toggle's rekey) and merged with `moveOrMergeItem()` if a copy is already there. Without this, step 4 moved only the incoming copy and the item ended up twice.
+4. **Schema, then items** (`unionItemsAndSchema()`). Schema is adopted *first* — a newly-synced identity flag rekeys local items (see "Item identity fields"), and doing that before comparing items is what lets incoming ids line up with local ones. Then items:
    - each incoming item is first moved onto this device's id scheme (`localIdFor()`, 2.18.4): an id computed from a *subset* of the category's identity fields (e.g. title alone, from before Year was flagged) becomes the item's full id, and the payload's matches follow it. Refining a key can only split items apart, so this never merges two different items; an id computed from *more* identity fields than this device has (an adoption skipped over a collision) is left alone. An item is skipped if either its incoming or its local id is tombstoned;
    - an id this device doesn't have is added, with `elo`/`wins`/`losses` defaulting to 1000/0/0 when the payload carries none (Firestore item docs never do), `hidden: false`, and skipped if tombstoned (itself or its category);
    - an id both sides have takes the incoming `title` and `fields` if its `updatedAt` is newer (last-write-wins on the whole edit). Ratings are never taken from the incoming side for an existing item.
    - Items created here *with* a rating in the payload are returned as `freshlySeeded`.
    - On a Firestore pull, `routeStoredRatings()` first decides where each reset-stored rating belongs now (2.18.1) — see "Resetting the shared baseline".
-4. **Matches.** Incoming matches not already in the local `matchLog` have their ids moved with step 3's items and resolved through renames, then `applyNewMatches()` sorts them by `(ts, seq)` and applies each onto the live ratings with the same `eloUpdate()` a real vote uses. All of them are recorded in `matchLog`.
+5. **Matches.** Incoming matches not already in the local `matchLog` have their ids moved with step 4's items and resolved through renames, then `applyNewMatches()` sorts them by `(ts, seq)` and applies each onto the live ratings with the same `eloUpdate()` a real vote uses. All of them are recorded in `matchLog`.
 
 **Never re-applying what a payload already includes (`freshlySeeded`).** A file export's items and its `matchLog` are two views of the same moment, so a freshly-seeded item's rating already includes every match in that file touching it. For a **file** merge, `applyNewMatches(newMatches, freshlySeeded)` therefore:
 - skips a match whose sides are both freshly seeded (recorded, not applied);
@@ -305,8 +306,9 @@ Firestore doc ids for category tombstones are `catKey(cat)` (same hash as `itemK
 - **Editing an identity value is a rename**, handled exactly like a title rename (see "Item renames").
 - **Toggling identity on an existing category** is a bulk rekey in `saveSchema()` via `rekeyItemsForIdentityFields(cat, pendingIdFields)`: it computes every item's new id and, if no two *different* items (compared by original id, not title) collide, applies it with `remapItemIds(idMap, { tombstones: false })` — items, `matchLog`, `history` — and gives moved items a fresh `updatedAt`. Each moved item is then recorded as a **rename**, exactly like `saveItem()`'s: a tombstone on the old id with `renamedTo` the new id, and an undelete of the new id if it's tombstoned (2.18.2). Other devices move their own copies (keeping their ratings), old matches resolve to the new ids, a reset's stored ratings follow, and the items stay off Deleted Items. Before 2.18.2 the old ids got plain deletes, so every other device deleted its copies and re-created them from the pulled docs at 1000/0-0, and a device joining later couldn't replay any earlier match; and existing tombstones were rewritten onto the new ids without their undeletes, so an item that had been deleted and re-added was deleted by the next merge. On a collision (only possible when *removing* a disambiguating flag) the save is blocked with a toast naming both items.
 - **Sync:** for a category both sides know, `adoptIncomingFields()` adopts any field this device has never heard of, and any `identity: true` it doesn't have yet — monotonic, never turning identity off. An identity adoption goes through the same `rekeyItemsForIdentityFields()` and is skipped (with a `console.warn`) on a collision rather than half-applied. `required`/`filterable` on an already-shared field stay local-only.
-- Because schema is adopted before items are unioned (merge step 3), a device whose identity flags were behind rekeys its items onto the same scheme before comparing, so nothing duplicates.
+- Because schema is adopted before items are unioned (merge step 4), a device whose identity flags were behind rekeys its items onto the same scheme before comparing, so nothing duplicates.
 - The other direction: a device whose flags are *ahead* moves each incoming item keyed under the older scheme onto its full id (`localIdFor()`, 2.18.4). This matters when the device has no copy to match against — e.g. it cleared its items, turned a flag on, then ran Reset, whose first pull returns every cloud doc under its old id.
+- The same applies to this device's *own* items (`rekeyOffSchemaItems()`, 2.18.5): any merge first moves local items keyed under the older scheme onto their full ids, as renames, so a device left off-schema (flag on, items under old ids — e.g. by a Reset under 2.18.3) repairs itself on its next pull, merging any duplicates the 2.18.4 pull created.
 
 ### Multi-value fields
 
@@ -604,6 +606,7 @@ One line each; the sections above have the details.
 | `mergeImport(incoming, { cloudOrigin })` | The union merge — see "Merging rankings between devices" |
 | `unionItemsAndSchema()` / `adoptIncomingFields(cat, fields)` | Merge step 3: schema then items; field/identity adoption |
 | `localIdFor(item)` | Moves an incoming item keyed under a coarser identity scheme onto its full id (2.18.4) |
+| `rekeyOffSchemaItems()` | Moves this device's own items keyed under a coarser identity scheme onto their full ids, as renames, merging duplicates (2.18.5) |
 | `applyNewMatches(matches, seededIds)` | Apply new matches as deltas; one-sided for seeded items; skips self-matches |
 | `makeIdResolver()` / `moveOrMergeItem(from, to)` | Follow renames / move or merge a renamed local copy |
 | `routeStoredRatings(items)` | On a Firestore pull, move reset-stored ratings along renames and drop them after deletes |

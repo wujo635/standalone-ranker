@@ -217,6 +217,53 @@ describe('pulling items keyed before an identity field was turned on', () => {
   });
 });
 
+describe('items on this device still keyed from before an identity field was turned on', () => {
+  // Found live with Songs (2.18.5): after a Reset under 2.18.3, a device had Artist flagged
+  // as identity but every Song on it keyed by title alone. 2.18.4's pull moved each
+  // incoming copy onto its full id while the local copy stayed put, so all 101 songs the
+  // pull delivered were added a second time. Here B is left in that state: Year flagged,
+  // items still under their title-only ids.
+  function leaveOffSchema(app) {
+    app.run(`const f = state.schema.Movies.fields.find(f => f.name === 'Year'); f.identity = true; f.required = true;`);
+    const titleOnly = MOVIES.map(([t]) => app.call('itemKey', 'Movies', t)).sort();
+    assert.deepEqual(Object.keys(app.get('state.items')).sort(), titleOnly, 'setup: items still keyed by title alone');
+  }
+  const ids = app => Object.keys(app.get('state.items')).sort();
+  const fullIds = app => MOVIES.map(([t]) => idOf(app, t)).sort();
+
+  test('a pull moves them to their full ids instead of adding the pulled copies again', async () => {
+    const heatBefore = heat(B);
+    leaveOffSchema(B);
+    await cloud(B, 'pullFromFirestore({ full: true })');
+    assert.deepEqual(ids(B), fullIds(B), 'each movie is here twice: old id and full id');
+    assert.deepEqual([heat(B).elo, heat(B).wins], [heatBefore.elo, 3], "Heat's rating moved with it");
+  });
+
+  test('copies already duplicated here are merged, keeping their ratings', async () => {
+    const heatBefore = heat(B);
+    leaveOffSchema(B);
+    // What 2.18.4's pull left behind: a 1000, 0-0 copy of each item under its full id.
+    B.run(`${JSON.stringify(MOVIES)}.forEach(([title, Year]) => {
+      const id = itemKey('Movies', title, identitySuffixFor('Movies', { Year }));
+      state.items[id] = { id, cat: 'Movies', title, fields: { Year, Director: '' }, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: 2 };
+    });`);
+    await cloud(B, 'pullFromFirestore()');
+    assert.deepEqual(ids(B), fullIds(B));
+    assert.deepEqual([heat(B).elo, heat(B).wins, heat(B).losses], [heatBefore.elo, 3, 0]);
+  });
+
+  test('the move reaches other devices as a rename', async () => {
+    leaveOffSchema(B);
+    await cloud(B, 'pullFromFirestore({ full: true })');
+    await cloud(B, 'uploadToFirestore()');
+    await cloud(A, 'pullFromFirestore()');
+    assert.deepEqual(rankings(A), rankings(B), "A still has the title-only copies");
+    const C = newDevice();
+    await cloud(C, 'pullFromFirestore()');
+    assert.deepEqual(rankings(C), rankings(B), 'a new device got both the old and the new ids');
+  });
+});
+
 describe('turning on an identity field after a baseline reset', () => {
   test('a device adopting afterwards gets the stored ratings under the new ids', async () => {
     await cloud(A, 'resetSharedBaseline()');
