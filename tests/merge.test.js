@@ -209,7 +209,9 @@ describe('matches', () => {
     const afterImport = state();
     const doc = i => ({ id: i.id, cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt });
     pullCloud({ items: byId([doc(heat), doc(ronin)]), cats: ['Movies'], schema: {}, matchLog: [m3], itemDeletes: [], itemUndeletes: [], catDeletes: [], catUndeletes: [] });
-    assert.deepEqual(state().items, afterImport.items);
+    // The pull also records the cloud's version of each item (cloudUpdatedAt, 2.18.7).
+    const withoutCloudVersion = items => Object.fromEntries(Object.entries(items).map(([id, { cloudUpdatedAt, ...i }]) => [id, i]));
+    assert.deepEqual(withoutCloudVersion(state().items), afterImport.items);
   });
 
   test('one-sided updates are applied in (ts, seq) order alongside ordinary matches', () => {
