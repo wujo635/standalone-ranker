@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.6` |
+| App version | `2.18.7` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -77,7 +77,7 @@ tests/ui.test.js               click-level tests: every interactive control, via
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
 tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6)
-tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3)
+tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3); only what the cloud lacks, after pulling (2.18.7)
 tests/simulation/engine.js     randomized multi-device simulation: random user actions + sync steps, invariants, shrinking
 tests/simulation/explore.js    `npm run simulate`: sweeps many seeds (one process each), shrinks and groups failures
 tests/simulation.test.js       fixed passing seeds + each simulation finding as a minimal reproduction (`todo` until fixed)
@@ -145,7 +145,9 @@ state = {
       wins:      number,
       losses:    number,
       hidden:    boolean,  // per-device preference: excluded from ranking/leaderboard, never synced
-      updatedAt: number    // last title/field edit; drives last-write-wins on merge
+      updatedAt: number,   // last title/field edit; drives last-write-wins on merge
+      cloudUpdatedAt?: number  // per-device: the updatedAt the cloud has (set by a pull or an upload);
+                           // Upload skips items whose updatedAt equals it (2.18.7). Never synced or exported.
     }
   },
 
@@ -203,7 +205,7 @@ state = {
 }
 ```
 
-Per-device bookkeeping is stripped: `settings.deviceId`, `settings.userName`, `lastSyncedServerTs`, and every item's `hidden` flag (`itemsWithoutHidden()`). A recovery baseline file (see "Resetting the shared baseline") additionally has an empty `matchLog`, empty tombstone logs, and `_meta.matchLogCompacted: true`.
+Per-device bookkeeping is stripped: `settings.deviceId`, `settings.userName`, `lastSyncedServerTs`, and every item's `hidden` flag and `cloudUpdatedAt` (`itemsWithoutHidden()`). A recovery baseline file (see "Resetting the shared baseline") additionally has an empty `matchLog`, empty tombstone logs, and `_meta.matchLogCompacted: true`.
 
 ### CSV preload format
 
@@ -343,7 +345,7 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 
 ### Upload and pull
 
-- **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. It pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt`, this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema — the union of the cloud's and this device's (`cloudSchemaUnion()`, 2.18.6: every category and field either side has, an identity flag set in the cloud stays set, categories this device knows were deleted dropped; before 2.18.6 the last device to upload replaced every category's field list, so a device without an identity flag erased it for everyone joining later); cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
+- **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. An ordinary Upload first pulls (2.18.7, after the baseline-id guard below), like fetching before a push, so an edit another device already uploaded wins by last-write-wins here instead of being overwritten by this device's older one. It then pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt` whose version isn't the cloud's (`cloudUpdatedAt`, 2.18.7 — so an item it only pulled is never sent back; before, a device that was behind re-sent its older copy over a newer one), this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema — the union of the cloud's and this device's (`cloudSchemaUnion()`, 2.18.6: every category and field either side has, an identity flag set in the cloud stays set, categories this device knows were deleted dropped; before 2.18.6 the last device to upload replaced every category's field list, so a device without an identity flag erased it for everyone joining later); cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
 - **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled), builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. **Pulling into an empty library** (no items, matches, or tombstones — after Adopt's clear, or on a brand-new device) also moves the `lastUploaded*` cursors past everything it pulled (2.18.3): it's all already in the cloud, and with every cursor at 0 the next Upload used to re-send every item and tombstone (identical rewrites, but one write each, and a re-read on every other device's next pull). These are the values that redundant Upload used to leave them at. A non-empty device's cursors are never touched, since it may have unsent work. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
 
 ### Auth, hosting, and setup
@@ -434,7 +436,7 @@ Accepted tradeoffs — none lose items or matches:
 - **A match against a since-deleted item** can leave its opponent's W/L off by one between devices — see "Item deletions".
 - **Re-adding a title while the other device's delete of it is unpulled** loses to that delete — see "Item deletions".
 - **Upload only sends this device's own work, so data imported from another device's file never reaches Firestore from here.** Matches are pushed only if their id carries this device's `deviceId` prefix, and items only if their `updatedAt` is newer than this device's upload cursor — imported items keep the originating device's older `updatedAt`. So importing a file from a device that can't sync itself, then clicking Upload, silently pushes none of its matches and possibly none of its items (it all stays in this device's local state). To get it into Firestore, upload from the originating device, or run "Reset shared baseline" from the importing device — the reseed pushes everything, with ratings baked in. Found during the Aug 2026 manual reseed.
-- **Pulled changes echo back on the next Upload.** Upload sends whatever is newer than this device's cursors, so an edit or tombstone pulled from another device is re-sent by this device's next Upload — an identical rewrite (one write, and a re-read on the other device). Only pulls into an empty library avoid it (2.18.3); avoiding it everywhere would mean tracking which changes were made locally, per item. Harmless, and small at this app's scale.
+- **Pulled tombstones echo back on the next Upload.** Upload sends tombstones newer than this device's cursors, so a delete or rename pulled from another device is re-sent by this device's next Upload — an identical rewrite (one write, and a re-read on the other device). Tombstones are immutable facts keyed by item id, so the rewrite can't regress anything. Items no longer echo (2.18.7, `cloudUpdatedAt`); only pulls into an empty library avoid tombstone echo (2.18.3).
 - **A stored rating can follow the wrong rename in one rare sequence.** After a reset, renaming an item away, re-adding a new item under its old title, then renaming *that* one too: Firestore keeps only the latest tombstone per id, so a device adopting afterwards sends the original stored rating along the second rename instead of the first. Needs all three steps between a reset and the adopt.
 - **Turning an identity field *off* doesn't sync, and doesn't stick on a synced device.** Other devices never adopt identity being turned off (see "Item identity fields"), the cloud keeps the flag (`cloudSchemaUnion()`, 2.18.6), and the device's own next pull turns it back on, moving its items back to their full ids as renames. Until then, the rekey's rename tombstones still move other devices' copies to the shorter ids (since 2.18.2), and those come back on their next merge (2.18.5). Ratings are kept throughout. Turning a flag off for good would need its own synced action, which doesn't exist.
 - **`settings.userName`** is reserved (added with `deviceId` in schema v4) but unused and stripped from exports.

@@ -130,3 +130,64 @@ describe('Upload after filling an empty library from the cloud', () => {
     assert.ok(sent.includes(`items/${id(B, 'Let Down')}`), 'its own new song was sent');
   });
 });
+
+describe('Upload sends only what the cloud does not have (2.18.7)', () => {
+  // Upload used to send every item newer than its cursor, including items it had only
+  // pulled. Usually an identical rewrite — but a device that was behind sent its older
+  // copy over a newer one, and devices never agreed again. It also pushed an older edit
+  // over a newer one uploaded in between. Upload now pulls first and skips items whose
+  // version is the cloud's (cloudUpdatedAt).
+  let B, now = 1_900_000_000_000;
+  const clock = app => { app.window.Date.now = () => now; };
+  beforeEach(async () => {
+    B = newDevice();
+    [A, B].forEach(clock);
+    await cloud(B, 'pullFromFirestore()');
+  });
+  const album = (app, title) => app.get(`state.items[${JSON.stringify(id(app, title))}].fields.Album`);
+  function editAlbum(app, title, value) {
+    now += 1000;
+    const itemId = id(app, title);
+    app.run(`document.getElementById('sel-cat').value = 'Songs'; renderLibrary(); editItem(${JSON.stringify(itemId)});`);
+    app.window.document.getElementById(`edit-field-${itemId}-Album`).value = value;
+    app.run(`saveItem(${JSON.stringify(itemId)})`);
+  }
+  const cloudAlbum = title => db.peek('rankers/shared/items/' + id(A, title))?.fields?.Album;
+
+  test('items this device only pulled are not sent back', async () => {
+    editAlbum(A, 'Creep', 'Pablo Honey');
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'pullFromFirestore()');
+    assert.deepEqual(await uploaded(B), []);
+  });
+
+  test("a device that is behind doesn't overwrite a newer copy with the one it pulled", async () => {
+    // B pulls one edit (into a library that isn't empty, so its cursors stay put)...
+    editAlbum(A, 'Creep', 'Pablo Honey (first edit)');
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'pullFromFirestore()');
+    // ...misses the next one, and uploads.
+    editAlbum(A, 'Creep', 'Pablo Honey');
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'uploadToFirestore()');
+    assert.equal(cloudAlbum('Creep'), 'Pablo Honey', 'B sent back the copy it pulled');
+    const C = newDevice();
+    await cloud(C, 'pullFromFirestore()');
+    assert.equal(album(C, 'Creep'), 'Pablo Honey');
+  });
+
+  test('of two edits to the same item, the newer wins everywhere, whichever uploads last', async () => {
+    editAlbum(B, 'Creep', 'Old edit');
+    editAlbum(A, 'Creep', 'New edit');
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'uploadToFirestore()');
+    assert.equal(cloudAlbum('Creep'), 'New edit', "B's older edit replaced the newer one in the cloud");
+    await cloud(A, 'pullFromFirestore()');
+    assert.deepEqual([album(A, 'Creep'), album(B, 'Creep')], ['New edit', 'New edit']);
+  });
+
+  test("this device's own edits still upload after the pull", async () => {
+    editAlbum(B, 'Lucky', 'OK Computer');
+    assert.deepEqual(await uploaded(B), [`items/${id(B, 'Lucky')}`]);
+  });
+});
