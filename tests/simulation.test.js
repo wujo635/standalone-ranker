@@ -42,8 +42,7 @@ describe('simulation findings (minimal reproductions)', () => {
     "the identity re-key's rename tombstone is newer than the delete, so the item lives on under its new id",
     [{ type: 'delete', dev: 2, eid: 0 }, { type: 'identityOn', dev: 1 }]);
 
-  finding('an Upload from a device without an identity flag keeps the flag in the cloud',
-    'the root doc schema is written wholesale on every upload; Firestore replaces the fields array',
+  finding('an Upload from a device without an identity flag keeps the flag in the cloud (2.18.6)', false,
     [{ type: 'identityOn', dev: 2 }, { type: 'upload', dev: 2 }, { type: 'upload', dev: 0 }, { type: 'pull', dev: 1 }]);
 
   finding("an Upload doesn't overwrite a newer cloud copy with an older pulled one",
