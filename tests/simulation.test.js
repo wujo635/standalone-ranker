@@ -45,8 +45,7 @@ describe('simulation findings (minimal reproductions)', () => {
   finding('an Upload from a device without an identity flag keeps the flag in the cloud (2.18.6)', false,
     [{ type: 'identityOn', dev: 2 }, { type: 'upload', dev: 2 }, { type: 'upload', dev: 0 }, { type: 'pull', dev: 1 }]);
 
-  finding("an Upload doesn't overwrite a newer cloud copy with an older pulled one",
-    'upload re-sends pulled items (echo); a device that is behind overwrites the newer doc, and devices never agree again',
+  finding("an Upload doesn't overwrite a newer cloud copy with an older pulled one (2.18.7)", false,
     [{ type: 'add', dev: 1, eid: 6 }, { type: 'upload', dev: 1 }, { type: 'delete', dev: 1, eid: 6 }, { type: 'pull', dev: 2 },
       { type: 'add', dev: 1, eid: 5 }, { type: 'upload', dev: 1 }, { type: 'upload', dev: 2 }]);
 
