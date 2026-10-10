@@ -133,3 +133,67 @@ describe('CSV imports onto deleted titles', () => {
     assert.deepEqual(titles(B, 'Books'), ['Dune']);
   });
 });
+
+describe('votes cast before a title was deleted and re-added (2.18.8)', () => {
+  // The re-added item lands on the deleted item's id, so a vote cast on the old item
+  // pointed at the new one too: every other device applied it there, while the device
+  // that re-added it started it at 0-0. Each step here is a second apart, as real ones are.
+  let now;
+  beforeEach(() => { now = 1_900_000_000_000; [A, B].forEach(app => { app.window.Date.now = () => (now += 1000); }); });
+  function vote(app, winner, loser) {
+    const w = JSON.stringify(key(winner)), l = JSON.stringify(key(loser));
+    app.run(`eloUpdate(state.items[${w}], state.items[${l}]); recordMatch('Movies', ${w}, ${l});`);
+  }
+  const record = (app, title) => { const i = app.get(`state.items[${JSON.stringify(key(title))}]`); return i && [i.wins, i.losses]; };
+  function rename(app, from, to) {
+    const itemId = key(from);
+    app.run(`document.getElementById('sel-cat').value = 'Movies'; renderLibrary(); editItem(${JSON.stringify(itemId)});`);
+    app.window.document.getElementById('edit-primary-' + itemId).value = to;
+    app.run(`saveItem(${JSON.stringify(itemId)})`);
+  }
+
+  test('after a delete, the re-added item starts fresh everywhere; the opponent keeps the vote', () => {
+    vote(A, 'Heat', 'Ronin');
+    deleteViaUI(A, 'Heat');
+    addViaUI(A, 'Heat');
+    assert.deepEqual([record(A, 'Heat'), record(A, 'Ronin')], [[0, 0], [0, 4]], 'setup');
+    pull(B, A);
+    assert.deepEqual([record(B, 'Heat'), record(B, 'Ronin')], [[0, 0], [0, 4]], "B applied the old item's vote to the new one");
+  });
+
+  test('after a rename away, the vote follows the renamed item, not the re-added title', () => {
+    vote(A, 'Heat', 'Ronin');
+    rename(A, 'Heat', 'Heat (1995)');
+    addViaUI(A, 'Heat');
+    pull(B, A);
+    assert.deepEqual([record(B, 'Heat (1995)'), record(B, 'Heat')], [record(A, 'Heat (1995)'), [0, 0]]);
+    assert.deepEqual(record(B, 'Heat (1995)'), [4, 0]);
+  });
+
+  test("a vote by a device that hadn't heard of the delete belongs to the old item", () => {
+    deleteViaUI(A, 'Heat');
+    vote(B, 'Heat', 'Ronin'); // B still has the old Heat
+    addViaUI(A, 'Heat');
+    pull(A, B);
+    pull(B, A);
+    assert.deepEqual([record(A, 'Heat'), record(B, 'Heat')], [[0, 0], [0, 0]]);
+    assert.deepEqual([record(A, 'Ronin'), record(B, 'Ronin')], [[0, 4], [0, 4]], 'the opponent counts it on both');
+  });
+
+  test("the Undelete button still lets another device's copy come back with its rating", () => {
+    // Undelete (not a re-add) is how a copy kept elsewhere is let back in: A deletes Heat
+    // and undoes it; B, which never pulled the delete, keeps its Heat and its 3-0.
+    deleteViaUI(A, 'Heat');
+    A.run(`undeleteItem(${JSON.stringify(key('Heat'))})`);
+    pull(B, A);
+    assert.deepEqual(record(B, 'Heat'), [3, 0]);
+  });
+
+  test('a vote cast after the re-add still counts for the new item', () => {
+    deleteViaUI(A, 'Heat');
+    addViaUI(A, 'Heat');
+    vote(A, 'Heat', 'Ronin');
+    pull(B, A);
+    assert.deepEqual(record(B, 'Heat'), [1, 0]);
+  });
+});

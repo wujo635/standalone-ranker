@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.7';
+const APP_VERSION = '2.18.8';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2950,7 +2950,9 @@ function applyNewMatches(newMatches, seededIds = new Set()) {
     // wid === lid only when two entries that played each other were merged into one
     // by a synced rename (see moveOrMergeItem()) — nothing meaningful to apply.
     if (!w || !l || m.wid === m.lid) return;
-    const wSeeded = seededIds.has(m.wid), lSeeded = seededIds.has(m.lid);
+    // A side is left alone if its rating already reflects the match (freshly seeded), or
+    // if it is a re-created item the match predates (wStale/lStale — see mergeImport()).
+    const wSeeded = seededIds.has(m.wid) || !!m.wStale, lSeeded = seededIds.has(m.lid) || !!m.lStale;
     if (wSeeded && lSeeded) return;
     if (!wSeeded && !lSeeded) { eloUpdate(w, l); return; }
     const wCopy = { ...w }, lCopy = { ...l };
@@ -3104,7 +3106,10 @@ function tsAfterUndeletes(itemId) {
 function undeleteIfTombstoned(itemId, title, cat, tombstoned = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes)) {
   if (!tombstoned.has(itemId)) return;
   const prior = latestPerItemId(state.itemDeletes.filter(d => d.itemId === itemId))[0];
-  state.itemUndeletes.push({ itemId, ts: Math.max(Date.now(), prior.ts + 1), deviceId: state.settings.deviceId, title, cat });
+  // recreated (2.18.8): this undelete starts a new item on the id (an add, CSV row, rename
+  // or move landing on it), unlike undeleteItem()'s, which lets a copy elsewhere come back.
+  // Matches played before it belong to the old item — see mergeImport().
+  state.itemUndeletes.push({ itemId, ts: Math.max(Date.now(), prior.ts + 1), deviceId: state.settings.deviceId, title, cat, recreated: true });
   tombstoned.delete(itemId);
 }
 
@@ -3334,6 +3339,8 @@ function ensureSchemaWellFormed() {
 // consistent with today's local delete.
 function mergeImport(incoming, opts) {
   const cloudOrigin = !!(opts && opts.cloudOrigin);
+  const knownTombstoneTs = {};
+  state.itemDeletes.forEach(t => { knownTombstoneTs[t.itemId] = Math.max(knownTombstoneTs[t.itemId] || 0, t.ts); });
   state.itemDeletes = latestPerItemId([...state.itemDeletes, ...(incoming.itemDeletes || [])]);
   state.itemUndeletes = latestPerItemId([...state.itemUndeletes, ...(incoming.itemUndeletes || [])]);
   const tombstoneIds = currentlyTombstonedIds(state.itemDeletes, state.itemUndeletes);
@@ -3348,6 +3355,23 @@ function mergeImport(incoming, opts) {
     const target = resolveId(id);
     if (target !== id && !tombstoneIds.has(target)) moveOrMergeItem(id, target);
     else delete state.items[id];
+  });
+  // The same for a tombstone this device is only now learning of on an id that has since
+  // been re-created (an undelete newer than the tombstone, 2.18.8). The copy here predates
+  // the tombstone, so it is the old item: a rename moves it to where that item went, a
+  // delete removes it, and the re-created item arrives fresh from the payload below — as
+  // it is on the device that re-created it. Before 2.18.8 the undelete hid the tombstone
+  // and this device kept the old item's rating under the new one.
+  const latestUndelete = {};
+  state.itemUndeletes.forEach(u => { latestUndelete[u.itemId] = u; });
+  state.itemDeletes.forEach(t => {
+    if (tombstoneIds.has(t.itemId) || !state.items[t.itemId] || t.ts <= (knownTombstoneTs[t.itemId] || 0)) return;
+    // undeleteItem() (no `recreated`) is the opposite: it lets this very copy come back.
+    if (!latestUndelete[t.itemId]?.recreated) return;
+    if (!t.renamedTo) { delete state.items[t.itemId]; return; }
+    // A chain that leads back here is a rename back: the same item, nothing to move.
+    const target = resolveId(t.renamedTo);
+    if (target !== t.itemId && !tombstoneIds.has(target)) moveOrMergeItem(t.itemId, target);
   });
   // Local matches recorded against an id that has since been renamed follow it too
   // (a no-op for ids moved just above, which remapItemIds() already rewrote).
@@ -3411,9 +3435,27 @@ function mergeImport(incoming, opts) {
   // the old id, and that vote belongs to the renamed item. Likewise a vote on an item
   // just moved onto this device's id scheme (idMap — see localIdFor()).
   const toLocal = id => resolveId(idMap[id] || id);
-  const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id))
-    .map(m => ({ ...m, wid: toLocal(m.wid), lid: toLocal(m.lid) }));
+  // A match played before its id was re-created (a `recreated` undelete newer than the
+  // match, 2.18.8) was played by the old item. A rename sends it on to where that item
+  // went; after a delete, only the opponent counts it — the re-created item starts fresh,
+  // as on the device that re-created it. Before 2.18.8 every other device applied the
+  // old item's matches to the new one, including votes cast by a device that hadn't
+  // heard of the delete yet.
+  // Only a side recorded on the id itself: one that got here by a rename or an identity
+  // move (toLocal) is the moved item's own match.
+  const latestTombstone = {};
+  state.itemDeletes.forEach(t => { latestTombstone[t.itemId] = t; });
+  const side = (raw, ts) => {
+    const id = toLocal(raw), u = latestUndelete[id], t = latestTombstone[id];
+    if (id !== raw || !u?.recreated || u.ts <= ts || !t || !state.items[id]) return { id };
+    return t.renamedTo ? { id: resolveId(t.renamedTo) } : { id, stale: true };
+  };
+  const newMatches = (incoming.matchLog || []).filter(m => !localIds.has(m.id)).map(m => {
+    const w = side(m.wid, m.ts), l = side(m.lid, m.ts);
+    return { ...m, wid: w.id, lid: l.id, ...(w.stale && { wStale: true }), ...(l.stale && { lStale: true }) };
+  });
   applyNewMatches(newMatches, cloudOrigin ? new Set() : freshlySeeded);
+  newMatches.forEach(m => { delete m.wStale; delete m.lStale; });
   state.matchLog = dedupeById([...state.matchLog, ...newMatches]);
 
   // A merge can touch any number of categories' fields at once (unlike the single-cat
@@ -3740,7 +3782,7 @@ async function uploadToFirestore(opts) {
     // Keyed by itemId, same as itemDeletes — a later undelete of the same item just
     // overwrites this doc with a newer ts, which is all currentlyTombstonedIds() needs.
     undeletesToPush.forEach(t => writes.push([sharedRef.collection('itemUndeletes').doc(t.itemId), {
-      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null,
+      itemId: t.itemId, ts: t.ts, deviceId: t.deviceId, title: t.title ?? null, cat: t.cat ?? null, recreated: !!t.recreated,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     // Doc id is catKey(t.cat), not the raw name — see catKey() for why. Same
@@ -3870,7 +3912,7 @@ async function pullFromFirestore(opts) {
     });
     undeletesSnap.forEach(doc => {
       const d = doc.data();
-      incoming.itemUndeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat });
+      incoming.itemUndeletes.push({ itemId: d.itemId, ts: d.ts, deviceId: d.deviceId, title: d.title, cat: d.cat, ...(d.recreated && { recreated: true }) });
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
     catDeletesSnap.forEach(doc => {

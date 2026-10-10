@@ -49,8 +49,7 @@ describe('simulation findings (minimal reproductions)', () => {
     [{ type: 'add', dev: 1, eid: 6 }, { type: 'upload', dev: 1 }, { type: 'delete', dev: 1, eid: 6 }, { type: 'pull', dev: 2 },
       { type: 'add', dev: 1, eid: 5 }, { type: 'upload', dev: 1 }, { type: 'upload', dev: 2 }]);
 
-  finding('votes on a deleted item are not replayed onto a re-added item with the same id',
-    'other devices apply the old matches to the re-added item; the device that re-added it starts it at 0-0',
+  finding('votes on a deleted item are not replayed onto a re-added item with the same id (2.18.8)', false,
     [{ type: 'add', dev: 0, eid: 3 }, { type: 'vote', dev: 0, a: 65, b: 72 }, { type: 'delete', dev: 0, eid: 3 },
       { type: 'csvAdd', dev: 0, eid: 4, director: 'Villeneuve' }]);
 
