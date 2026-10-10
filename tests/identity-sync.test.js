@@ -264,6 +264,46 @@ describe('items on this device still keyed from before an identity field was tur
   });
 });
 
+describe('the identity flag in the cloud (2.18.6)', () => {
+  // Every Upload used to write this device's whole schema to the root doc, and Firestore
+  // replaces arrays wholesale — so whichever device uploaded last decided each category's
+  // fields, and a device without the flag erased it for everyone joining later.
+  const cloudYear = () => db.peek('rankers/shared')?.schema?.Movies?.fields?.find(f => f.name === 'Year');
+  const flagged = app => !!app.get("state.schema.Movies.fields.find(f => f.name === 'Year').identity");
+
+  test('an Upload from a device that has not heard of the flag keeps it', async () => {
+    flagYearAsIdentity(A);
+    await cloud(A, 'uploadToFirestore()');
+    voteOn(B, 'Heat', 'Thief');
+    await cloud(B, 'uploadToFirestore()');
+    assert.equal(cloudYear()?.identity, true, "B's upload removed the flag from the cloud");
+    const C = newDevice();
+    await cloud(C, 'pullFromFirestore()');
+    assert.equal(flagged(C), true, 'a device joining later never gets the flag');
+    assert.deepEqual(Object.keys(rankings(C)).sort(), MOVIES.map(([t]) => idOf(C, t)).sort());
+  });
+
+  test("categories and fields only another device has are kept", async () => {
+    A.run(`state.cats.push('Games'); state.schema.Games = { primary: 'Name', fields: [{ name: 'Studio', required: false }] }; state.schema.Movies.fields.push({ name: 'Rating', required: false });`);
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'uploadToFirestore()');
+    const root = db.peek('rankers/shared');
+    assert.ok(root.cats.includes('Games'), "B's upload dropped A's category");
+    assert.ok(root.schema.Movies.fields.some(f => f.name === 'Rating'), "B's upload dropped A's field");
+  });
+
+  test('a flag turned off on one device stays on in the cloud, and comes back on that device', async () => {
+    flagYearAsIdentity(A);
+    await cloud(A, 'uploadToFirestore()');
+    flagYearAsIdentity(A, false);
+    await cloud(A, 'uploadToFirestore()');
+    assert.equal(cloudYear()?.identity, true);
+    await cloud(A, 'pullFromFirestore()');
+    assert.equal(flagged(A), true, 'turning a flag off does not sync (see "Known gaps")');
+    assert.equal(Object.keys(rankings(A)).length, 3);
+  });
+});
+
 describe('turning on an identity field after a baseline reset', () => {
   test('a device adopting afterwards gets the stored ratings under the new ids', async () => {
     await cloud(A, 'resetSharedBaseline()');

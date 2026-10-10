@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.5';
+const APP_VERSION = '2.18.6';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3614,6 +3614,34 @@ function tombstoneFromDoc(d) {
 // would just make it grow right back to its pre-reset size for no benefit — the whole
 // point of a reset is to actually bound that growth. Returns true/false so callers can
 // tell whether it actually completed.
+// The cats and schema an Upload writes to the root doc (2.18.6): the cloud's, plus this
+// device's. Firestore's merge-write replaces arrays wholesale, so writing state.cats and
+// state.schema as-is let whichever device uploaded last decide every category's field
+// list — a device without an identity flag erased it from the cloud, and a device that
+// adopted later (or started fresh) never got it, keeping items under title-only ids.
+// Found by the sync simulation. Now: every category either side has is kept (except
+// ones this device knows were deleted — catDeletes carry that), every field either side
+// has is kept, and an identity flag set in the cloud stays set. That matches how a pull
+// adopts schema (adoptIncomingFields(): fields added, identity only ever turned on), so
+// turning a flag off on one device doesn't reach the cloud either, and that device's
+// next pull turns it back on.
+function cloudSchemaUnion(remoteRoot) {
+  const deletedCats = currentlyTombstonedCats(state.catDeletes, state.catUndeletes);
+  const cats = [...state.cats];
+  (remoteRoot.cats || []).forEach(c => { if (!cats.includes(c) && !deletedCats.has(c)) cats.push(c); });
+  const schema = JSON.parse(JSON.stringify(state.schema));
+  Object.entries(remoteRoot.schema || {}).forEach(([c, remote]) => {
+    if (deletedCats.has(c)) return;
+    if (!schema[c]) { schema[c] = remote; return; }
+    (remote.fields || []).forEach(rf => {
+      const lf = schema[c].fields.find(f => f.name === rf.name);
+      if (!lf) schema[c].fields.push(rf);
+      else if (rf.identity && !lf.identity) { lf.identity = true; lf.required = true; }
+    });
+  });
+  return { cats, schema };
+}
+
 async function uploadToFirestore(opts) {
   const full = !!(opts && opts.full);
   if (!cloudAvailable || !cloudUser) return false;
@@ -3630,9 +3658,10 @@ async function uploadToFirestore(opts) {
     // Firestore that's never been reset — the check only ever activates once a real
     // reset has actually happened, so day-to-day sync for an app that's never used
     // this feature is completely unaffected.
+    const preCheckDoc = await sharedRef.get();
+    const remoteRoot = preCheckDoc.exists ? preCheckDoc.data() : {};
     if (!full) {
-      const preCheckDoc = await sharedRef.get();
-      const remoteBaselineId = preCheckDoc.exists ? preCheckDoc.data().baselineId : undefined;
+      const remoteBaselineId = remoteRoot.baselineId;
       if (remoteBaselineId && remoteBaselineId !== state.settings.knownBaselineId) {
         toast('The shared baseline was reset since this device last synced — run "Adopt fresh baseline" (Data tab) first, or you risk pushing stale or already-deleted data back in.');
         return false;
@@ -3722,7 +3751,7 @@ async function uploadToFirestore(opts) {
     // leaves whatever baselineId is already there untouched.
     const newBaselineId = full ? uid() : undefined;
     const rootWrite = {
-      cats: state.cats, schema: state.schema,
+      ...cloudSchemaUnion(remoteRoot),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: cloudUser.email || cloudUser.uid
     };
