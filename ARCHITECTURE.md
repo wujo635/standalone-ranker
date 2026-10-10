@@ -65,7 +65,7 @@ index.html
 Development-only files alongside it (never loaded by the app):
 
 ```
-package.json                   devDependency (jsdom) + `npm test` script
+package.json                   devDependency (jsdom) + `npm test` and `npm run simulate` scripts
 tests/helpers/app.js           loads the real index.html into jsdom for tests
 tests/helpers/sync.js          two-device helpers: simulated Firestore pull and file import
 tests/helpers/firestore.js     in-memory Firestore for running the real upload/pull/reset/adopt code
@@ -78,6 +78,9 @@ tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
 tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5)
 tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3)
+tests/simulation/engine.js     randomized multi-device simulation: random user actions + sync steps, invariants, shrinking
+tests/simulation/explore.js    `npm run simulate`: sweeps many seeds (one process each), shrinks and groups failures
+tests/simulation.test.js       fixed passing seeds + each simulation finding as a minimal reproduction (`todo` until fixed)
 .github/workflows/tests.yml    runs `npm test` on every PR and push to main
 .github/workflows/docs-sync-check.yml   version table vs. code check
 ```
@@ -95,6 +98,7 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Real Firestore code (2.18.1):** `tests/helpers/firestore.js` is an in-memory stand-in for the slice of the Firestore SDK the app uses; `connect(app, db)` points a page at it, signed in, with `confirm()` and `downloadJson()` stubbed. Several pages can share one `db`, so the real `uploadToFirestore()`, `pullFromFirestore()`, `resetSharedBaseline()`, and `adoptFreshBaseline()` run end to end (`await app.window.eval('uploadToFirestore()')`). It models what the app depends on: a plain `set()` replaces the whole doc, `{ merge }` deep-merges, `{ mergeFields }` replaces only the listed fields, server timestamps increase per commit (so `where('syncedAt', '>', …)` works), and `undefined` values are rejected. `db.written` lists every path written, so a test can assert exactly what an Upload sent.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
 - **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
+- **Randomized simulation (`tests/simulation/`).** `Sim` drives three real pages against one in-memory Firestore through the same functions the UI calls (add/edit forms, Schema Editor, `deleteItem()`, CSV bulk add, votes, Upload/Pull/Reset/Adopt), with a shared clock that advances one second per step. It keeps its own model of what should exist — every film's current title/year, which votes should count, and what an Adopt legitimately erases — and checks after every step that every item is on its identity id and each device's W/L balance, and after a full sync that all devices agree, every live film exists exactly once, nothing deleted came back, and each film's W/L equals its counted votes. Documented tradeoffs ("Known gaps in the merge model") are tolerated, not reported. Steps are plain data, so a failure replays deterministically and `shrink()` reduces it to a minimal sequence. Wide sweeps run outside `npm test` (`npm run simulate -- --seeds 200`, optionally `--types`, `--steps`, `--concurrent`); `tests/simulation.test.js` keeps a few passing seeds plus each finding as a `todo` reproduction until it's fixed.
 - **Regression-first:** sync/merge/migration tests are named after the CHANGELOG version whose bug they pin (e.g. "2.0.2", "2.5.2 / 2.7.3"). CLAUDE.md requires a test that fails without the fix for any such bug.
 
 Not covered yet: the CSV parser, and Firestore upload/pull beyond the reset/adopt scenarios in `tests/reset-baseline.test.js`.
