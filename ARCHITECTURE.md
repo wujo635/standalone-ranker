@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.7` |
+| App version | `2.18.8` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -171,7 +171,7 @@ state = {
   // Permanent tombstones, resolved per key by latest ts (see "Item deletions").
   // renamedTo marks a rename rather than a delete (see "Item renames").
   itemDeletes:   [ { itemId, ts, deviceId, title, cat, renamedTo? } ],
-  itemUndeletes: [ { itemId, ts, deviceId, title, cat } ],
+  itemUndeletes: [ { itemId, ts, deviceId, title, cat, recreated? } ],  // recreated: a new item on the id (2.18.8)
   catDeletes:    [ { cat, ts, deviceId } ],
   catUndeletes:  [ { cat, ts, deviceId } ],
 
@@ -245,7 +245,7 @@ Both sync transports — file export/import and Firestore — end in the same fu
 
 `mergeImport()` does, in order:
 
-1. **Item tombstones.** Union `itemDeletes`/`itemUndeletes` (one entry per id, latest `ts` wins — `latestPerItemId()`). For each currently-tombstoned id this device still holds: if the tombstone is a rename, move the local copy to the id it resolves to (`makeIdResolver()` → `moveOrMergeItem()`); otherwise delete it. Local `matchLog` ids are resolved through renames too. See "Item deletions" and "Item renames".
+1. **Item tombstones.** Union `itemDeletes`/`itemUndeletes` (one entry per id, latest `ts` wins — `latestPerItemId()`). For each currently-tombstoned id this device still holds: if the tombstone is a rename, move the local copy to the id it resolves to (`makeIdResolver()` → `moveOrMergeItem()`); otherwise delete it. A tombstone this device is only now learning of, on an id since **re-created** (a `recreated` undelete newer than it, 2.18.8), is applied the same way to the copy here, which is the old item; the re-created item then arrives fresh in step 4. Local `matchLog` ids are resolved through renames too. See "Item deletions" and "Item renames".
 2. **Category tombstones.** Union `catDeletes`/`catUndeletes`; purge any tombstoned category's name, schema, and remaining items. See "Category deletions".
 3. **Local items onto this device's id scheme** (`rekeyOffSchemaItems()`, 2.18.5). Any item this device holds under an id computed from a *subset* of its category's identity fields moves to its full id by `localIdFor()`'s rule, recorded as a rename (a `renamedTo` tombstone, like a toggle's rekey) and merged with `moveOrMergeItem()` if a copy is already there. Without this, step 4 moved only the incoming copy and the item ended up twice.
 4. **Schema, then items** (`unionItemsAndSchema()`). Schema is adopted *first* — a newly-synced identity flag rekeys local items (see "Item identity fields"), and doing that before comparing items is what lets incoming ids line up with local ones. Then items:
@@ -279,6 +279,7 @@ Deleting an item is a synced fact, not a local mutation. `deleteItem(id)` and `d
 - `currentlyTombstonedIds(deletes, undeletes)`: an id is tombstoned iff its latest delete is newer than its latest undelete. **Ties favor deleted.** Every undelete is therefore timestamped strictly after the delete it answers (`Math.max(Date.now(), tombstone.ts + 1)`).
 - **Manual:** Data tab → Deleted items → Undelete (`undeleteItem()`). It only clears the sync block; it does **not** restore the old item's data or rating (the UI says so).
 - **Automatic (2.17.1):** every path that creates an item — `addItem()`, `bulkAddCSVImport()`, `applyCSVImport()` (CSV create/replace), and a rename back in `saveItem()` — calls `undeleteIfTombstoned(id, title, cat)`, which records an undelete only if this device currently has that id tombstoned. It deliberately doesn't record one on every add (that would mean a record plus a Firestore write for every item ever created); the cost is that re-adding a title while the other device's delete of it hasn't been pulled yet still loses to that delete.
+- **Re-creation starts a new item everywhere (2.18.8).** These undeletes carry `recreated: true` (the manual Undelete button's don't — it lets a copy kept elsewhere come back, rating and all). On another device, a copy of the id that predates the re-creation is the *old* item: a newly learned delete removes it and a newly learned rename moves it, so the re-created item arrives fresh, as on the device that re-created it. An incoming match recorded on the id before the re-creation was played by the old item: after a rename it follows the rename; after a delete only the opponent counts it (`applyNewMatches()`' one-sided path), including a vote by a device that hadn't heard of the delete. Before 2.18.8 other devices kept the old item's rating under the new one and applied its matches there.
 - **Deleted Items view:** `renderDeletedItems()` lists currently-tombstoned items (excluding renames), capped to the latest `DELETED_ITEMS_PAGE_SIZE` (50) with a Show all toggle. The tombstone log itself is never capped — a tombstone must persist for "deletion wins" to hold.
 
 **Known limitation:** a delete never undoes the ELO an item already applied to its opponents. If a delete and a match against that item reach a third device in the same merge, the match is skipped there (the item is gone), so that opponent's W/L can differ by one between devices.
@@ -338,7 +339,7 @@ An optional second transport next to file export/import — both feed `mergeImpo
 - `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Exception: a baseline reseed bakes ratings in — see below. Ordinary uploads write with `mergeFields`, so a baked rating stays on the doc through later edits, 2.18.1.)
 - `rankers/shared/matches/{matchId}` — `{ cat, wid, lid, ts, seq, syncedAt }`
 - `rankers/shared/itemDeletes/{itemId}` — `{ itemId, ts, deviceId, title, cat, renamedTo, syncedAt }`, mapped both ways by `tombstoneDoc()`/`tombstoneFromDoc()`. `title`/`cat`/`renamedTo` are written as `null` when absent — Firestore rejects `undefined` field values.
-- `rankers/shared/itemUndeletes/{itemId}` — same shape, without `renamedTo`
+- `rankers/shared/itemUndeletes/{itemId}` — same shape, without `renamedTo`, plus `recreated` (2.18.8)
 - `rankers/shared/catDeletes/{catKey(cat)}`, `rankers/shared/catUndeletes/{catKey(cat)}` — `{ cat, ts, deviceId, syncedAt }`
 
 Every doc id is the fact's own id, so writing a fact twice is an idempotent overwrite — which is why push and pull can happen in any order, from either device. A later delete of the same item overwrites its tombstone doc, matching the latest-ts-per-id model. `syncedAt` is a server timestamp used only as the pull cursor; `updatedAt`/`ts` are client timestamps used for the data itself.
@@ -571,7 +572,7 @@ One line each; the sections above have the details.
 | `addItem()` / `saveItem(id)` / `deleteItem(id)` | Add / edit (rename-aware) / delete with tombstone |
 | `fieldsEqual(a, b)` | Value comparison that skips no-op `updatedAt` bumps |
 | `normalizeFieldValue(f, raw)` | Multi-field token cleanup |
-| `undeleteIfTombstoned(id, title, cat, tombstoned?)` | Auto-undelete when an item is (re)created on a tombstoned id |
+| `undeleteIfTombstoned(id, title, cat, tombstoned?)` | Auto-undelete when an item is (re)created on a tombstoned id; marked `recreated` (2.18.8) |
 | `saveNewCat()` / `undeleteCategory(name)` | Create a category / record its undelete |
 | `saveSchema()` / `rekeyItemsForIdentityFields(cat, idFields)` | Save schema / bulk identity rekey with collision check |
 | `confirmDeleteCat()` / `deleteItemsInCat(cat)` | Delete a category (with its tombstone) / tombstone all its items |
