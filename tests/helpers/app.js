@@ -13,14 +13,16 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'utf8');
 
-function loadApp({ saved } = {}) {
+// `html` runs a different build of the page instead (tests/cross-version.test.js loads
+// past releases this way).
+function loadApp({ saved, html = INDEX_HTML } = {}) {
   const scriptErrors = [];
   const virtualConsole = new VirtualConsole();
   // Uncaught errors thrown by the page's own script arrive as "jsdomError". The app's
   // console.log/console.error output (toasts, deliberate [load]/[save] logs) is dropped.
   virtualConsole.on('jsdomError', e => scriptErrors.push(e));
 
-  const dom = new JSDOM(INDEX_HTML, {
+  const dom = new JSDOM(html, {
     url: 'http://localhost/',
     runScripts: 'dangerously',
     virtualConsole,
