@@ -19,7 +19,9 @@
 // merge model") is not reported: ELO may drift between devices (W/L may not), field
 // edits are last-write-wins per item, and a match against a since-deleted item can leave
 // its opponent's W/L off by one. Concurrent edits of the same film on two devices are
-// only generated when opts.concurrent is set.
+// only generated when opts.concurrent is set. In that mode, a Reset or Adopt that meets
+// such edits can be reported falsely: the model keeps one current version per film and
+// can't tell whose version the reset published (the devices themselves still agree).
 const { loadApp } = require('../helpers/app');
 const { createFirestore, connect } = require('../helpers/firestore');
 
@@ -27,7 +29,7 @@ const CAT = 'Movies';
 // Two pairs share a title (Superman, Dune): they can only coexist with Year as identity.
 const POOL = [['Heat', '1995'], ['Ronin', '1998'], ['Thief', '1981'], ['Superman', '1978'], ['Superman', '2025'], ['Dune', '1984'], ['Dune', '2021']];
 const DEFAULT_TYPES = ['add', 'add', 'rename', 'editYear', 'editDirector', 'csvAdd', 'delete', 'vote', 'vote', 'vote',
-  'upload', 'upload', 'pull', 'pull', 'identityOn', 'reset', 'adopt', 'stalePull'];
+  'upload', 'upload', 'pull', 'pull', 'identityOn', 'identityOff', 'reset', 'adopt', 'stalePull'];
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -113,6 +115,12 @@ class Sim {
         return !!e.cur && this.canMutate(s.dev, e) && !!this.itemOf(s.dev, e) && !this.entities.some(o => o !== e && o.cur && o.cur.title === e.cur.title);
       case 'vote': return this.items(s.dev).length >= 2;
       case 'reset': return this.fresh(s.dev);
+      // Since 2.20.0 an identity change on a category with items is a reset (on a device
+      // that has synced), so it has a reset's precondition. A category this device has no
+      // items in changes instantly and syncs as before — not generated, see ARCHITECTURE.md.
+      case 'identityOn': case 'identityOff':
+        return this.fresh(s.dev) && this.items(s.dev).length > 0 && this.devs[s.dev].app.get('hasSyncedWithCloud()') &&
+          this.identityOn(s.dev) !== (s.type === 'identityOn');
       case 'adopt': return this.resetCount > 0;
       case 'stalePull': return !this.devs[s.dev].adoptedSinceReset;
       default: return true;
@@ -200,8 +208,9 @@ class Sim {
         app.run(`document.getElementById('sel-cat').value = ${JSON.stringify(CAT)}; openSchemaEditor();`);
         const row = [...doc.querySelectorAll('#schema-fields .field-row')].find(r => r.querySelector('.field-name').textContent === 'Year');
         row.querySelector('[data-action="toggleIdentity"]').click();
-        [...doc.querySelectorAll('#view-schema button')].find(b => b.textContent.trim().startsWith('Save')).click();
+        await app.window.eval('saveSchema()');
         if (this.identityOn(d) !== want) return this.note(s, 'rejected by app');
+        this.resetModel(d);
         break;
       }
       case 'upload': {
@@ -235,16 +244,7 @@ class Sim {
       }
       case 'reset': {
         if (!(await this.cloud(d, 'resetSharedBaseline()'))) return this.note(s, 'failed');
-        this.resetCount++;
-        // The reseed is this device's view: everything published, plus its own pending work.
-        this.entities.forEach(x => {
-          if ([...x.pending].some(p => p !== d)) return; // others' unsent work is lost when they adopt
-          x.pub = x.cur ? { ...x.cur } : null; x.pending.delete(d);
-        });
-        this.votes.forEach(v => { if (v.dev === d && !v.dropped) v.uploaded = true; });
-        this.cloudVersion++;
-        this.devs.forEach((o, i) => { o.adoptedSinceReset = i === d; });
-        dv.seen = this.cloudVersion;
+        this.resetModel(d);
         break;
       }
       default: throw new Error('unknown step ' + s.type);
@@ -254,6 +254,19 @@ class Sim {
   }
 
   note(s, why) { s.skipped = why; return false; }
+  // Device d reset the shared baseline (or changed an identity field, which resets it).
+  resetModel(d) {
+    this.resetCount++;
+    // The reseed is this device's view: everything published, plus its own pending work.
+    this.entities.forEach(x => {
+      if ([...x.pending].some(p => p !== d)) return; // others' unsent work is lost when they adopt
+      x.pub = x.cur ? { ...x.cur } : null; x.pending.delete(d);
+    });
+    this.votes.forEach(v => { if (v.dev === d && !v.dropped) v.uploaded = true; });
+    this.cloudVersion++;
+    this.devs.forEach((o, i) => { o.adoptedSinceReset = i === d; });
+    this.devs[d].seen = this.cloudVersion;
+  }
   created(e, d, cur) { e.cur = cur; e.gen++; e.pending.add(d); }
   mutated(e, d, cur) { e.cur = cur; e.pending.add(d); }
   uploaded(d) {

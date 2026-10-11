@@ -1,8 +1,11 @@
-// Turning on an identity field for a category that's already synced. Every item in the
-// category moves to a new id (the identity value is part of the id — see itemKey()), so
-// the change has to reach other devices as a rename of each item, not a delete: a device
-// that already has the items must keep their ratings, and a device joining later must
-// still be able to replay every comparison. Runs the real upload/pull/reset/adopt code
+// Turning an identity field on or off for a category that's already synced. Every item in
+// the category moves to a new id (the identity value is part of the id — see itemKey()).
+// Since 2.20.0 a synced device makes that change through a reset of the shared baseline
+// (last describe block). Before that, the change was made in place and reached other
+// devices as a rename of each item — a pre-2.20 device, or one that has never synced,
+// still does that, and every device must still handle receiving it: a device that
+// already has the items must keep their ratings, and a device joining later must still
+// be able to replay every comparison. Runs the real upload/pull/reset/adopt code
 // against the in-memory Firestore (tests/helpers/firestore.js).
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -61,14 +64,27 @@ function voteOn(app, winner, loser) {
   const w = ref(winner), l = ref(loser);
   app.run(`eloUpdate(state.items[${w}], state.items[${l}]); recordMatch('Movies', ${w}, ${l});`);
 }
-// Library -> "Fields" -> 🔑 on Year -> Save, through the real Schema Editor controls.
+const yearFlag = app => !!app.get("state.schema.Movies.fields.find(f => f.name === 'Year').identity");
+// The in-place change: what saving the Schema Editor did before 2.20.0, and still does on
+// a device that has never synced — every item re-keyed here, each move recorded as a rename.
 function flagYearAsIdentity(app, on = true) {
+  app.run(`(() => {
+    const fields = state.schema.Movies.fields.map(f => ({ ...f }));
+    const y = fields.find(f => f.name === 'Year');
+    y.identity = ${on}; if (${on}) y.required = true;
+    if (!rekeyItemsForIdentityFields('Movies', fields.filter(f => f.identity)).collision) state.schema.Movies.fields = fields;
+    save();
+  })()`);
+  assert.equal(yearFlag(app), on, `setup: Year identity is ${on ? 'on' : 'off'}`);
+}
+// Library -> "Fields" -> 🔑 on Year -> Save, through the real Schema Editor controls.
+// Resolves once the save, and the reset it may start, is done.
+async function toggleYearInEditor(app) {
   const doc = app.window.document;
   app.run(`document.getElementById('sel-cat').value = 'Movies'; openSchemaEditor();`);
   const row = [...doc.querySelectorAll('#schema-fields .field-row')].find(r => r.querySelector('.field-name').textContent === 'Year');
   row.querySelector('[data-action="toggleIdentity"]').click();
-  [...doc.querySelectorAll('#view-schema button')].find(b => b.textContent.trim().startsWith('Save')).click();
-  assert.equal(!!app.get("state.schema.Movies.fields.find(f => f.name === 'Year').identity"), on, `setup: Year identity is ${on ? 'on' : 'off'}`);
+  await app.window.eval('saveSchema()');
 }
 function addMovie(app, title, Year) {
   app.run(`document.getElementById('sel-cat').value = 'Movies'; onLibCatChange();`);
@@ -311,5 +327,130 @@ describe('turning on an identity field after a baseline reset', () => {
     await cloud(A, 'uploadToFirestore()');
     await cloud(B, 'adoptFreshBaseline()');
     assert.deepEqual(rankings(B), rankings(A), 'every Movie on B started from 1000');
+  });
+});
+
+describe('turning an identity field on or off resets the shared baseline (2.20.0)', () => {
+  // Re-keying in place and syncing the moves as renames raced with edits on other devices
+  // (sync simulation findings 1-4), and the cloud could never turn a flag off. Now the
+  // device making the change runs a reset with it applied; the rest adopt on their next Pull.
+  const baselineId = () => db.peek('rankers/shared')?.baselineId;
+  const cloudYear = () => db.peek('rankers/shared')?.schema?.Movies?.fields?.find(f => f.name === 'Year');
+  const toasts = () => A.get('window.__toasts').join('\n');
+  beforeEach(() => A.run('window.__toasts = []; const __toast = toast; toast = m => { window.__toasts.push(m); __toast(m); };'));
+  const titles = app => Object.values(app.get('state.items')).map(i => i.title).sort();
+
+  test('turning it on: other devices adopt the new ids on their next Pull, ratings kept', async () => {
+    const heatBefore = heat(A);
+    await toggleYearInEditor(A);
+    assert.equal(yearFlag(A), true);
+    assert.ok(baselineId(), 'no reset ran');
+    assert.deepEqual(Object.keys(rankings(A)).sort(), MOVIES.map(([t]) => idOf(A, t)).sort());
+    assert.deepEqual([heat(A).elo, heat(A).wins], [heatBefore.elo, 3]);
+    assert.deepEqual(A.get('state.itemDeletes'), [], 'a reset leaves no tombstones');
+    await cloud(B, 'pullFromFirestore()');
+    assert.equal(yearFlag(B), true);
+    assert.deepEqual(rankings(B), rankings(A));
+    const C = newDevice();
+    await cloud(C, 'pullFromFirestore()');
+    assert.deepEqual(rankings(C), rankings(A));
+  });
+
+  test('turning it off reaches the cloud and every device, and stays off', async () => {
+    await toggleYearInEditor(A);
+    await cloud(A, 'uploadToFirestore()');
+    await cloud(B, 'pullFromFirestore()');
+    await toggleYearInEditor(A);
+    await cloud(A, 'uploadToFirestore()');
+    assert.equal(yearFlag(A), false);
+    assert.equal(!!cloudYear()?.identity, false, 'the cloud kept the flag');
+    await cloud(B, 'pullFromFirestore()');
+    assert.equal(yearFlag(B), false, 'B kept the flag');
+    assert.deepEqual(rankings(B), rankings(A));
+    await cloud(A, 'pullFromFirestore()');
+    await cloud(A, 'uploadToFirestore()');
+    assert.equal(yearFlag(A), false, 'the flag came back on A');
+    assert.deepEqual(Object.keys(rankings(A)).sort(), MOVIES.map(([t]) => A.call('itemKey', 'Movies', t)).sort());
+  });
+
+  test("another device's uploaded rename and delete survive it", async () => {
+    const heatId = JSON.stringify(idOf(B, 'Heat'));
+    B.run(`document.getElementById('sel-cat').value = 'Movies'; onLibCatChange(); renderLibrary(); editItem(${heatId});`);
+    B.window.document.getElementById('edit-primary-' + idOf(B, 'Heat')).value = 'Heat II';
+    B.run(`saveItem(${heatId})`);
+    B.run(`deleteItem(${JSON.stringify(idOf(B, 'Thief'))})`);
+    await cloud(B, 'uploadToFirestore()');
+    await toggleYearInEditor(A);
+    await cloud(B, 'pullFromFirestore()');
+    assert.deepEqual(titles(A), ['Heat II', 'Ronin']);
+    assert.deepEqual(rankings(B), rankings(A));
+  });
+
+  test('blocked while offline: nothing changes', async () => {
+    const before = baselineId();
+    Object.defineProperty(A.window.navigator, 'onLine', { get: () => false, configurable: true });
+    await toggleYearInEditor(A);
+    assert.equal(yearFlag(A), false);
+    assert.equal(baselineId(), before);
+    assert.match(toasts(), /offline/);
+  });
+
+  test('blocked when signed out on a device that has synced', async () => {
+    A.run('cloudUser = null');
+    await toggleYearInEditor(A);
+    assert.equal(yearFlag(A), false);
+    assert.match(toasts(), /Sign in/);
+  });
+
+  test('cancelling the warning changes nothing', async () => {
+    const before = baselineId();
+    A.run('window.__asked = ""; window.confirm = m => { window.__asked = m; return false; };');
+    await toggleYearInEditor(A);
+    assert.match(A.get('window.__asked'), /other devices should Upload/);
+    assert.equal(yearFlag(A), false);
+    assert.equal(baselineId(), before);
+  });
+
+  test('a category without items changes instantly, without a reset', async () => {
+    A.run(`state.cats.push('Games'); state.schema.Games = { primary: 'Name', fields: [{ name: 'Studio', required: false }] }; rebuildCatSelects();`);
+    const before = baselineId();
+    A.run(`document.getElementById('sel-cat').value = 'Games'; openSchemaEditor(); toggleIdentity(0);`);
+    await A.window.eval('saveSchema()');
+    assert.equal(A.get('state.schema.Games.fields[0].identity'), true);
+    assert.equal(baselineId(), before);
+  });
+
+  test('a device that has never synced changes it in place', async () => {
+    const L = loadApp(); others.push(L);
+    seed(L, 'dL');
+    await toggleYearInEditor(L);
+    assert.equal(yearFlag(L), true);
+    assert.deepEqual(Object.keys(L.get('state.items')).sort(), MOVIES.map(([t]) => idOf(L, t)).sort());
+  });
+
+  test('if another device changed the fields meanwhile, nothing is reset', async () => {
+    const before = baselineId();
+    const doc = A.window.document;
+    A.run(`document.getElementById('sel-cat').value = 'Movies'; openSchemaEditor();`);
+    [...doc.querySelectorAll('#schema-fields .field-row')].find(r => r.querySelector('.field-name').textContent === 'Year')
+      .querySelector('[data-action="toggleIdentity"]').click();
+    B.run(`state.schema.Movies.fields.push({ name: 'Rating', required: false })`);
+    await cloud(B, 'uploadToFirestore()');
+    await A.window.eval('saveSchema()');
+    assert.equal(yearFlag(A), false);
+    assert.equal(baselineId(), before);
+    assert.match(toasts(), /another device changed the fields/);
+    assert.ok(A.get("state.schema.Movies.fields.some(f => f.name === 'Rating')"), "the pull still brought B's field");
+  });
+
+  test('turning it off is refused when two items would become one', async () => {
+    await toggleYearInEditor(A);
+    addMovie(A, 'Heat', '1986');
+    await cloud(A, 'uploadToFirestore()');
+    const before = baselineId();
+    await toggleYearInEditor(A);
+    assert.equal(yearFlag(A), true);
+    assert.equal(baselineId(), before);
+    assert.match(toasts(), /would become the same item/);
   });
 });

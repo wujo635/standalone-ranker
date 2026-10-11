@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.19.0';
+const APP_VERSION = '2.20.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1499,24 +1499,7 @@ function remapItemIds(idMap, opts = {}) {
 // (their titles were already necessarily distinct beforehand, since itemKey() without
 // a suffix already prevented same-titled duplicates from ever coexisting locally).
 function rekeyItemsForIdentityFields(cat, pendingIdFields) {
-  const catItems = Object.values(state.items).filter(i => i.cat === cat);
-  const idMap = {};
-  const newIdOwner = {}; // newId -> the original item that claimed it, to detect collisions
-  let collision = null;
-  catItems.forEach(item => {
-    const suffix = identitySuffixForFields(pendingIdFields, item.fields);
-    const newId = itemKey(cat, item.title, suffix);
-    idMap[item.id] = newId;
-    // Two DIFFERENT original items landing on the same new id is a real collision —
-    // comparing old item ids here, not titles, since colliding items necessarily
-    // share a title already (that's what makes them ambiguous without the identity
-    // field). Comparing titles would never actually catch this.
-    if (newIdOwner[newId] && newIdOwner[newId].id !== item.id) {
-      collision = { a: newIdOwner[newId].title, b: item.title };
-    }
-    newIdOwner[newId] = item;
-  });
-
+  const { catItems, idMap, collision } = identityRekeyPlan(cat, pendingIdFields);
   if (collision) return { collision };
 
   // Tombstones stay where they are (2.18.2): the old ids get rename tombstones below,
@@ -1545,26 +1528,100 @@ function rekeyItemsForIdentityFields(cat, pendingIdFields) {
   return { collision: null };
 }
 
-function saveSchema() {
-  const primary = document.getElementById('schema-primary').value.trim() || 'Name';
-
-  // If which fields are flagged `identity` changed for this category, every existing
-  // item's id may need to change too (see identitySuffixFor()/itemKey()) — items not
-  // in this category are never affected.
-  const oldIdentityNames = (state.schema[editingCat]?.fields || []).filter(f => f.identity).map(f => f.name).sort().join('|');
-  const newIdentityNames = editingFields.filter(f => f.identity).map(f => f.name).sort().join('|');
-
-  if (oldIdentityNames !== newIdentityNames) {
-    const pendingIdFields = editingFields.filter(f => f.identity);
-    const { collision } = rekeyItemsForIdentityFields(editingCat, pendingIdFields);
-    if (collision) {
-      toast('Can\'t save — "' + collision.a + '" and "' + collision.b + '" would become the same item. Rename or remove one first.');
-      return;
+// The id every item in `cat` would get under `pendingIdFields`, and the first two items
+// that would land on the same id, if any. Changes nothing — saveSchema() checks for a
+// collision before starting a reset with it (2.20.0).
+function identityRekeyPlan(cat, pendingIdFields) {
+  const catItems = Object.values(state.items).filter(i => i.cat === cat);
+  const idMap = {};
+  const newIdOwner = {}; // newId -> the original item that claimed it, to detect collisions
+  let collision = null;
+  catItems.forEach(item => {
+    const suffix = identitySuffixForFields(pendingIdFields, item.fields);
+    const newId = itemKey(cat, item.title, suffix);
+    idMap[item.id] = newId;
+    // Two DIFFERENT original items landing on the same new id is a real collision —
+    // comparing old item ids here, not titles, since colliding items necessarily
+    // share a title already (that's what makes them ambiguous without the identity
+    // field). Comparing titles would never actually catch this.
+    if (newIdOwner[newId] && newIdOwner[newId].id !== item.id) {
+      collision = { a: newIdOwner[newId].title, b: item.title };
     }
+    newIdOwner[newId] = item;
+  });
+
+  return { catItems, idMap, collision };
+}
+
+const identityNamesOf = fields => (fields || []).filter(f => f.identity).map(f => f.name).sort().join('|');
+let schemaSaving = false; // a save that resets the shared baseline is in progress
+
+// Changing which fields are identity fields changes the id of items in the category
+// (see identitySuffixFor()/itemKey()). On a device that syncs, that now goes through a
+// reset of the shared baseline (2.20.0): this device pulls everything, the cloud is
+// wiped, the items are re-keyed here, and the result is reseeded; other devices adopt it
+// on their next Pull. Re-keying in place and syncing the moves as renames (2.18.2) raced
+// with every concurrent edit on another device — a rename, a Year edit or a delete there
+// left duplicates or brought a deleted item back (sync simulation findings 1–4) — and
+// the cloud could never turn a flag off (cloudSchemaUnion()). A category with no items
+// has no ids to change, and a device that has never synced has no one to race, so both
+// still save directly.
+async function saveSchema() {
+  if (schemaSaving) return;
+  const primary = document.getElementById('schema-primary').value.trim() || 'Name';
+  const cat = editingCat;
+  const fields = editingFields.map(f => ({ ...f }));
+  const commit = () => { state.schema[cat] = { primary, fields }; };
+  const done = () => { save(); renderLibrary(); switchTab('library'); toast('Fields saved'); };
+  const collisionMessage = c => 'Can\'t save — "' + c.a + '" and "' + c.b + '" would become the same item. Rename or remove one first.';
+
+  const oldIdentityNames = identityNamesOf(state.schema[cat]?.fields);
+  const pendingIdFields = fields.filter(f => f.identity);
+  const itemCount = Object.values(state.items).filter(i => i.cat === cat).length;
+  if (oldIdentityNames === identityNamesOf(fields) || !itemCount) { commit(); done(); return; }
+
+  if (!cloudUser && !hasSyncedWithCloud()) {
+    const { collision } = rekeyItemsForIdentityFields(cat, pendingIdFields);
+    if (collision) { toast(collisionMessage(collision)); return; }
+    commit(); done(); return;
   }
 
-  state.schema[editingCat] = { primary, fields: [...editingFields] };
-  save(); renderLibrary(); switchTab('library'); toast('Fields saved');
+  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first — changing an identity field resets the shared baseline'); return; }
+  if (navigator.onLine === false) { toast("You're offline — changing an identity field resets the shared baseline, which needs the cloud. Try again once you're connected."); return; }
+  const early = identityRekeyPlan(cat, pendingIdFields).collision;
+  if (early) { toast(collisionMessage(early)); return; }
+  if (!confirm(
+    'Changing an identity field changes how every ' + cat + ' item is identified, so it resets the ' +
+    'shared baseline: this device pulls everything from the cloud, the cloud is wiped and ' +
+    're-filled from this device with the change applied, and past deletions are forgotten.\n\n' +
+    "Before you continue, other devices should Upload anything they haven't yet. They pick up " +
+    'the change on their next Pull, which replaces their data — anything not uploaded by then is lost.\n\nContinue?'
+  )) return;
+
+  // Compared after the reset's pull: a change to this category's fields made on another
+  // device would otherwise be silently overwritten by what this editor holds.
+  const before = JSON.stringify(state.schema[cat] || null);
+  schemaSaving = true;
+  let ok = false;
+  try {
+    ok = await runBaselineReset({
+      check: () => {
+        if (JSON.stringify(state.schema[cat] || null) !== before) return 'Nothing was reset — another device changed the fields for ' + cat + '. Open Fields again and redo your change.';
+        const c = identityRekeyPlan(cat, pendingIdFields).collision;
+        return c ? collisionMessage(c) : null;
+      },
+      apply: () => {
+        rekeyItemsForIdentityFields(cat, pendingIdFields);
+        commit();
+        // The re-key records its moves as rename tombstones for other devices to follow;
+        // after a reset they adopt the new ids wholesale, so there's nothing to follow.
+        clearLocalTombstones();
+      }
+    });
+  } finally { schemaSaving = false; }
+  if (!ok) return;
+  done();
+  toast('Fields saved and the shared baseline reset — other devices pick it up on their next Pull');
 }
 
 function confirmDeleteCat() {
@@ -3875,6 +3932,15 @@ async function uploadToFirestore(opts) {
   }
 }
 
+// Whether this device has ever synced with the cloud: pulled, uploaded, or seen a
+// baseline. Used by pullFromFirestore() (only such a device can have missed a reset) and
+// saveSchema() (such a device must change identity fields through a reset, 2.20.0).
+function hasSyncedWithCloud() {
+  const st = state.settings;
+  return state.lastSyncedServerTs != null || !!st.knownBaselineId ||
+    [st.lastUploadedItemsAt, st.lastUploadedSeq, st.lastUploadedDeletesAt, st.lastUploadedUndeletesAt, st.lastUploadedCatDeletesAt, st.lastUploadedCatUndeletesAt].some(v => v > 0);
+}
+
 // Fetches only what's new since state.lastSyncedServerTs (a local cursor, null on a
 // fresh device so the first pull fetches everything) and unions it in via the same
 // mergeImport() the file-import path uses — a fact is a fact regardless of transport.
@@ -3902,10 +3968,7 @@ async function pullFromFirestore(opts) {
     // changed since — including a first-ever reset, which leaves every other device with
     // knownBaselineId null. A device that has never synced (a local library being
     // connected for the first time) merges as before, so its data isn't cleared.
-    const st = state.settings;
-    const syncedBefore = state.lastSyncedServerTs != null || !!st.knownBaselineId ||
-      [st.lastUploadedItemsAt, st.lastUploadedSeq, st.lastUploadedDeletesAt, st.lastUploadedUndeletesAt, st.lastUploadedCatDeletesAt, st.lastUploadedCatUndeletesAt].some(v => v > 0);
-    const adopting = !full && !!rootData.baselineId && syncedBefore && rootData.baselineId !== state.settings.knownBaselineId;
+    const adopting = !full && !!rootData.baselineId && hasSyncedWithCloud() && rootData.baselineId !== state.settings.knownBaselineId;
     const hiddenIds = adopting ? Object.values(state.items).filter(i => i.hidden).map(i => i.id) : [];
     if (adopting) clearAllDataCore();
     // Record whatever baseline this device has now actually seen — this is how the
@@ -4106,42 +4169,47 @@ async function wipeFirestoreCollections() {
 // interrupted partway (network drop mid-wipe or mid-reseed), calling this again from
 // the same device picks up wherever it left off rather than corrupting anything further.
 async function resetSharedBaseline() {
-  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first'); return; }
+  if (!cloudAvailable || !cloudUser) { toast('Sign in to cloud sync first'); return false; }
   if (!confirm(
     "This permanently deletes ALL shared ranking data in the cloud and replaces it with " +
     "this device's current rankings (after pulling in anything else the cloud still has). " +
     "Past deletions are forgotten too — if a stale device that never picked up a deletion " +
     "uploads that item again after this, it comes back as a normal item, not blocked. If " +
     "something matters, re-add it manually afterward rather than relying on this.\n\n" +
-    'Every OTHER device must then use "Adopt fresh baseline" (Data tab) to pick up the ' +
-    "reset — until they do, their next Upload/Pull will be working against cloud history " +
-    "that no longer matches what they last saw.\n\n" +
+    "Every OTHER device picks up the reset on its next Pull, which replaces its data with " +
+    "the new baseline — anything it hasn't uploaded by then is lost, so have them Upload first.\n\n" +
     "Only run this on the device whose data you trust most right now.\n\nContinue?"
-  )) return;
+  )) return false;
 
-  toast('Pulling everything from the cloud first…');
-  if (!(await pullFromFirestore({ full: true }))) { toast('Reset aborted — pull failed, nothing was touched'); return; }
+  const ok = await runBaselineReset();
+  if (ok) toast('Baseline reset complete — other devices pick it up on their next Pull');
+  return ok;
+}
 
-  // A reset means starting over completely, deletions included — a deleted item and its
-  // tombstone are no longer relevant once this device's current state becomes the new
-  // baseline (deliberate design choice: if it still matters, it gets manually re-added,
-  // not resurrected via lingering tombstone bookkeeping). Cleared on the live local
-  // state too, not just what gets pushed below, so this device's own future uploads
-  // don't carry the old tombstones back in either. Tombstones don't block anything
-  // already absent from state.items — items were removed at delete time, independent of
-  // the tombstone list — so clearing this can't resurrect anything on THIS device.
+// Clears every tombstone on this device — a reset forgets past deletions (see
+// runBaselineReset()).
+function clearLocalTombstones() {
   state.itemDeletes = [];
   state.itemUndeletes = [];
   state.catDeletes = [];
   state.catUndeletes = [];
+}
 
-  // Offline safety net in case a step below fails partway — same compacted shape as
-  // exportRecoveryBaseline(), just saved here rather than being the thing other devices
-  // actually adopt.
-  const backup = buildExportPayload();
-  backup.matchLog = [];
-  backup._meta.matchLogCompacted = true;
-  downloadJson(backup, 'ranker-pre-reset-backup.json');
+// The steps of a reset after its confirmation, shared by resetSharedBaseline() and
+// saveSchema() when an identity field changes (2.20.0). Two hooks:
+// - opts.check(), after the full pull: returns a message to abort with, before anything
+//   is deleted (the pull itself only merged).
+// - opts.apply(), after the wipe and before the reseed: changes this device's state,
+//   which the reseed then publishes as the new baseline. Running it only after the
+//   cloud is empty means a wipe that fails partway leaves this device as it was, and a
+//   retry's pull can't merge the old state back over the change.
+// Returns true once the reseed is done.
+async function runBaselineReset(opts = {}) {
+  toast('Pulling everything from the cloud first…');
+  if (!(await pullFromFirestore({ full: true }))) { toast('Reset aborted — pull failed, nothing was touched'); return false; }
+
+  const problem = opts.check && opts.check();
+  if (problem) { toast(problem); return false; }
 
   // The reseed writes the baseline collection (2.19.0), which needs its own security rule
   // (see ARCHITECTURE.md). Check it's writable before wiping anything, so a missing rule
@@ -4152,16 +4220,36 @@ async function resetSharedBaseline() {
     await probe.delete();
   } catch (e) {
     toast('Reset aborted, nothing was deleted: can\'t write the cloud baseline (' + cloudErrorMessage(e) + '). Add the "baseline" rule from ARCHITECTURE.md in the Firebase console.');
-    return;
+    return false;
   }
+
+  // A reset means starting over completely, deletions included — a deleted item and its
+  // tombstone are no longer relevant once this device's current state becomes the new
+  // baseline (deliberate design choice: if it still matters, it gets manually re-added,
+  // not resurrected via lingering tombstone bookkeeping). Cleared on the live local
+  // state too, not just what gets pushed below, so this device's own future uploads
+  // don't carry the old tombstones back in either. Tombstones don't block anything
+  // already absent from state.items — items were removed at delete time, independent of
+  // the tombstone list — so clearing this can't resurrect anything on THIS device.
+  clearLocalTombstones();
+
+  // Offline safety net in case a step below fails partway — same compacted shape as
+  // exportRecoveryBaseline(), just saved here rather than being the thing other devices
+  // actually adopt.
+  const backup = buildExportPayload();
+  backup.matchLog = [];
+  backup._meta.matchLogCompacted = true;
+  downloadJson(backup, 'ranker-pre-reset-backup.json');
 
   toast('Wiping cloud data…');
   try {
     await wipeFirestoreCollections();
   } catch (e) {
     toast('Reset aborted while wiping (' + cloudErrorMessage(e) + ') — a backup was downloaded; run "Reset shared baseline" again to retry');
-    return;
+    return false;
   }
+
+  if (opts.apply) { opts.apply(); save(); }
 
   // Firestore is now empty — this device's own upload cursors have to be reset too, or
   // the reseed below would think some of this data was already pushed (against the
@@ -4179,10 +4267,10 @@ async function resetSharedBaseline() {
   toast('Reseeding cloud from this device…');
   if (!(await uploadToFirestore({ full: true }))) {
     toast('Cloud was wiped but reseeding failed — run "Reset shared baseline" again to retry (safe to repeat)');
-    return;
+    return false;
   }
 
-  toast('Baseline reset complete — have every other device run "Adopt fresh baseline" now');
+  return true;
 }
 
 // The "pick up a reset baseline" counterpart to resetSharedBaseline(), for every device

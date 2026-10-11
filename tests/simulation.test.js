@@ -3,11 +3,11 @@
 //  1. A fixed set of seeds over everyday actions that currently pass, so a change that
 //     breaks sync consistency fails here. Wider random sweeps run outside `npm test`:
 //     `npm run simulate -- --seeds 200` (see tests/simulation/explore.js).
-//  2. Each finding of the simulation, shrunk to its minimal sequence of steps, marked
-//     `todo` until it's fixed. Every scenario starts from the same baseline (device 0
-//     adds Heat, Ronin and Thief and uploads; devices 1 and 2 pull) and ends with every
-//     device fully synced before the invariants are checked. When a fix lands, drop its
-//     `todo` so the scenario guards against regressions.
+//  2. Each finding of the simulation, shrunk to its minimal sequence of steps. A new
+//     finding goes in marked `todo`; when its fix lands, drop the `todo` so the scenario
+//     guards against regressions (all fixed as of 2.20.0). Every scenario starts from the
+//     same baseline (device 0 adds Heat, Ronin and Thief and uploads; devices 1 and 2
+//     pull) and ends with every device fully synced before the invariants are checked.
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const { run } = require('./simulation/engine');
@@ -26,21 +26,24 @@ describe('simulation: everyday actions across three devices', () => {
 describe('simulation findings (minimal reproductions)', () => {
   const finding = (name, todo, steps) => test(name, { todo }, async () => ok(await replay(steps)));
 
-  finding('a rename followed by turning identity on, on the same device, survives other devices adopting the flag',
-    'adoption re-keys a pulled item from its title before the incoming title is applied, and mints a newer rename that reverts it',
+  // Findings 1-4 came from re-keying in place and syncing the moves as renames, racing
+  // edits on other devices. Since 2.20.0 an identity change is a reset: an edit another
+  // device already uploaded is in the reseed, and one it hadn't uploaded is dropped when it
+  // adopts (the warning tells users to upload first) — never a fork or a resurrection.
+  finding('a rename followed by turning identity on, on the same device, survives other devices adopting the flag (2.20.0)', false,
     [{ type: 'rename', dev: 0, eid: 2 }, { type: 'identityOn', dev: 0 }]);
 
-  finding('a rename on one device while another turns identity on leaves one copy',
-    'two renames of the same old id fork; only one rename tombstone per id survives, so the other target is orphaned',
-    [{ type: 'vote', dev: 2, a: 96, b: 28 }, { type: 'upload', dev: 2 }, { type: 'identityOn', dev: 0 }, { type: 'rename', dev: 2, eid: 1 }]);
+  finding('a rename on one device while another turns identity on leaves one copy (2.20.0)', false,
+    [{ type: 'vote', dev: 2, a: 96, b: 28 }, { type: 'upload', dev: 2 }, { type: 'pull', dev: 0 }, { type: 'rename', dev: 2, eid: 1 }, { type: 'identityOn', dev: 0 }]);
 
-  finding('a year edit while another device turns identity on leaves one copy',
-    'same fork as above, through an identity value edit',
-    [{ type: 'editYear', dev: 0, eid: 1 }, { type: 'identityOn', dev: 0 }, { type: 'identityOn', dev: 1 }]);
+  finding('a year edit while another device turns identity on leaves one copy (2.20.0)', false,
+    [{ type: 'editYear', dev: 0, eid: 1 }, { type: 'identityOn', dev: 1 }]);
 
-  finding('a delete on one device while another turns identity on stays deleted',
-    "the identity re-key's rename tombstone is newer than the delete, so the item lives on under its new id",
-    [{ type: 'delete', dev: 2, eid: 0 }, { type: 'identityOn', dev: 1 }]);
+  finding('a delete on one device while another turns identity on stays deleted (2.20.0)', false,
+    [{ type: 'delete', dev: 2, eid: 0 }, { type: 'upload', dev: 2 }, { type: 'pull', dev: 1 }, { type: 'identityOn', dev: 1 }]);
+
+  finding('turning identity off while another device has an unsent edit leaves one copy (2.20.0)', false,
+    [{ type: 'identityOn', dev: 0 }, { type: 'adopt', dev: 1 }, { type: 'editYear', dev: 1, eid: 2 }, { type: 'identityOff', dev: 0 }]);
 
   finding('an Upload from a device without an identity flag keeps the flag in the cloud (2.18.6)', false,
     [{ type: 'identityOn', dev: 2 }, { type: 'upload', dev: 2 }, { type: 'upload', dev: 0 }, { type: 'pull', dev: 1 }]);
