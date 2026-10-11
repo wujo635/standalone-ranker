@@ -142,4 +142,27 @@ function connect(app, db, { email = 'user@example.com' } = {}) {
   app.run(`cloudDb = window.__fakeDb; cloudAvailable = true; cloudUser = { uid: ${JSON.stringify(email)}, email: ${JSON.stringify(email)} }; downloadJson = () => {};`);
 }
 
-module.exports = { createFirestore, connect };
+// A stand-in for the global `firebase` the CDN scripts define, so the app's own startup
+// runs: initializeApp(), firebase.firestore() (returning `db`) and onAuthStateChanged().
+// Install it before the script runs — loadApp({ beforeScript: fb.install }) — then
+// fb.signIn(email) fires the auth callback the way a restored session does after load.
+function fakeFirebase(db) {
+  let authCallback = null, win = null;
+  return {
+    install(window) {
+      win = window;
+      window.firebase = {
+        initializeApp() {},
+        auth: () => ({ onAuthStateChanged: cb => { authCallback = cb; } }),
+        firestore: Object.assign(() => db, { FieldValue: { serverTimestamp: () => SERVER_TIMESTAMP }, Timestamp }),
+      };
+      window.confirm = () => true;
+    },
+    signIn(email = 'user@example.com') {
+      win.eval('downloadJson = () => {}');
+      authCallback({ uid: email, email });
+    },
+  };
+}
+
+module.exports = { createFirestore, connect, fakeFirebase };

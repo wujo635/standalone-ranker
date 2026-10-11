@@ -13,7 +13,9 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'utf8');
 
-function loadApp({ saved } = {}) {
+// `beforeScript(window)` runs before the app's script, e.g. to install a fake `firebase`
+// global (see fakeFirebase() in ./firestore.js) so the app's own cloud startup runs.
+function loadApp({ saved, beforeScript } = {}) {
   const scriptErrors = [];
   const virtualConsole = new VirtualConsole();
   // Uncaught errors thrown by the page's own script arrive as "jsdomError". The app's
@@ -35,6 +37,7 @@ function loadApp({ saved } = {}) {
       if (saved !== undefined) {
         window.localStorage.setItem('ranker-v1', typeof saved === 'string' ? saved : JSON.stringify(saved));
       }
+      if (beforeScript) beforeScript(window);
     },
   });
   const { window } = dom;
