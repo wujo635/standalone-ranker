@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.20.0` |
+| App version | `2.21.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -68,7 +68,7 @@ Development-only files alongside it (never loaded by the app):
 package.json                   devDependency (jsdom) + `npm test` and `npm run simulate` scripts
 tests/helpers/app.js           loads the real index.html into jsdom for tests
 tests/helpers/sync.js          two-device helpers: simulated Firestore pull and file import
-tests/helpers/firestore.js     in-memory Firestore for running the real upload/pull/reset/adopt code
+tests/helpers/firestore.js     in-memory Firestore for running the real upload/pull/reset/adopt code; fakeFirebase() for the app's own cloud startup
 tests/migrate.test.js          migrateData() version chain + load()
 tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
 tests/rename.test.js           renames across two devices (2.17.0)
@@ -78,6 +78,7 @@ tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1); packed baseline and auto-adopt (2.19.0)
 tests/identity-sync.test.js    an in-place identity change reaching a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6); identity on/off resets the shared baseline (2.20.0)
 tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3); only what the cloud lacks, after pulling (2.18.7)
+tests/sync-on-load.test.js     the Pull when the app opens: when it runs, its toast, and a missed reset with unsent changes (2.21.0)
 tests/simulation/engine.js     randomized multi-device simulation: random user actions + sync steps, invariants, shrinking
 tests/simulation/explore.js    `npm run simulate`: sweeps many seeds (one process each), shrinks and groups failures
 tests/simulation.test.js       fixed passing seeds + each simulation finding as a minimal reproduction (`todo` until fixed)
@@ -95,6 +96,7 @@ Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/j
 - **Everything crosses the boundary as JSON.** Objects created inside jsdom belong to another JS realm, which makes `assert.deepStrictEqual` fail on otherwise-identical values; JSON also mirrors how real data reaches the app.
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
+- **The app's own cloud startup (2.21.0):** `fakeFirebase(db)` stands in for the CDN's `firebase` global. Installed with `loadApp({ beforeScript: fb.install })`, the page runs its real `initializeApp()`/`onAuthStateChanged()` startup against the in-memory Firestore, and `fb.signIn(email)` fires the auth callback the way a restored session does.
 - **Real Firestore code (2.18.1):** `tests/helpers/firestore.js` is an in-memory stand-in for the slice of the Firestore SDK the app uses; `connect(app, db)` points a page at it, signed in, with `confirm()` and `downloadJson()` stubbed. Several pages can share one `db`, so the real `uploadToFirestore()`, `pullFromFirestore()`, `resetSharedBaseline()`, and `adoptFreshBaseline()` run end to end (`await app.window.eval('uploadToFirestore()')`). It models what the app depends on: a plain `set()` replaces the whole doc, `{ merge }` deep-merges, `{ mergeFields }` replaces only the listed fields, server timestamps increase per commit (so `where('syncedAt', '>', …)` works), and `undefined` values are rejected. `db.written` lists every path written, so a test can assert exactly what an Upload sent.
 - **UI paths:** where it matters, tests drive the real UI (e.g. renames go through the Library edit form, adds through the add form) rather than calling internals.
 - **Click-level tests (`tests/ui.test.js`)** cover every interactive control with real DOM events, finding elements by id, text, aria-label, or title — never by their handler attribute — so they survive changes to how events are wired. Most assert the function a control calls (with its arguments) via `spy(name)`, which swaps the page's global function; handlers must therefore look functions up by name when the event fires. Every one of the app's event handlers is covered: removing any single one fails at least one test. jsdom has no `IntersectionObserver`, so `loadApp()` installs a no-op one.
@@ -350,6 +352,7 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 
 - **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. An ordinary Upload first pulls (2.18.7, after the baseline-id guard below), like fetching before a push, so an edit another device already uploaded wins by last-write-wins here instead of being overwritten by this device's older one. It then pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt` whose version isn't the cloud's (`cloudUpdatedAt`, 2.18.7 — so an item it only pulled is never sent back; before, a device that was behind re-sent its older copy over a newer one), this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema — the union of the cloud's and this device's (`cloudSchemaUnion()`, 2.18.6: every category and field either side has, an identity flag set in the cloud stays set, categories this device knows were deleted dropped; before 2.18.6 the last device to upload replaced every category's field list, so a device without an identity flag erased it for everyone joining later); cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
 - **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled). A first or full pull (no cursor) starts from the packed baseline when the root doc has `baselineChunks` (2.19.0): it reads the chunk docs, refuses to merge anything unless every one carries the root doc's `baselineId` (a mismatch means a reset is partway through), and layers item docs written since on top (newer title/fields, the baseline's rating). It builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. **Pulling into an empty library** (no items, matches, or tombstones — after Adopt's clear, or on a brand-new device) also moves the `lastUploaded*` cursors past everything it pulled (2.18.3): it's all already in the cloud, and with every cursor at 0 the next Upload used to re-send every item and tombstone (identical rewrites, but one write each, and a re-read on every other device's next pull). These are the values that redundant Upload used to leave them at. A non-empty device's cursors are never touched, since it may have unsent work. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
+- **Sync on load (`syncOnLoad()`, 2.21.0).** When a signed-in session is restored (`onAuthStateChanged`, which fires after the page loads — or when signing in later), the app pulls once, so a device starts from what the others already uploaded instead of editing a stale copy. Only on a device that has synced before (`hasSyncedWithCloud()`; a library being connected for the first time is merged on purpose), only when online, at most once per page load; Pull only — Upload stays a deliberate action. A success always toasts: what arrived ("pulled 2 items, 5 comparisons") or "already up to date". The pull runs with `{ background: true }`: a cloud that can't be reached stays quiet, and **a missed reset is adopted only if this device has nothing unsent** (`unsentChanges()`, the same lists an Upload sends). With unsent changes it adopts nothing and toasts how many changes a Pull would discard, suggesting a backup export first; the user then Pulls when ready. The outcome is the same either way — Upload refuses after a missed reset — but adopting clears local work, so the user decides when. Cost: about 8 reads when nothing is new (the root doc plus one per collection queried; Firestore bills an empty query as one read).
 
 ### Auth, hosting, and setup
 
@@ -630,7 +633,8 @@ One line each; the sections above have the details.
 | `undeleteItem(id)` / `renderDeletedItems()` / `tsAfterUndeletes(id)` | Manual undelete / Deleted Items view / tie-safe timestamp |
 | `dedupeById(list)` | Dedupe `matchLog` entries |
 | `cloudSignIn()` / `cloudSignOut()` / `renderCloudAuthUI()` / `cloudErrorMessage(e)` | Auth and Cloud sync card |
-| `uploadToFirestore({ full })` / `pullFromFirestore({ full })` | Firestore push / pull |
+| `uploadToFirestore({ full })` / `pullFromFirestore({ full, background })` | Firestore push / pull |
+| `syncOnLoad()` / `unsentChanges()` | The Pull when a signed-in session starts (2.21.0) / what an ordinary Upload would send |
 | `packBaseline(items)` | Packs items with ratings into as few JSON chunk strings as fit `BASELINE_CHUNK_BYTES` (2.19.0) |
 | `cloudSchemaUnion(remoteRoot)` | The root doc cats/schema an Upload writes: cloud ∪ this device, identity flags never cleared (2.18.6) |
 | `tombstoneDoc(t)` / `tombstoneFromDoc(d)` | Tombstone ↔ Firestore doc |
