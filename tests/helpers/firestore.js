@@ -9,6 +9,10 @@
 //     one before, so `where('syncedAt', '>', cursor)` behaves like the real thing.
 //   - Deleting a document doesn't delete its subcollections.
 //   - An `undefined` field value is rejected, as the real SDK does.
+//   - Reads are billed per document returned, as Firestore does: db.reads counts them (a
+//     doc get() is one; a collection get() is one per doc it returns).
+//   - createFirestore({ deny: ['baseline'] }) rejects writes to paths containing any of
+//     those segments with a permission-denied error, like a missing security rule.
 //
 // Usage: const db = createFirestore(); connect(app, db); then call the app's own cloud
 // functions with `await app.window.eval('uploadToFirestore()')`.
@@ -42,12 +46,19 @@ function deepMerge(base, patch) {
 }
 const copy = v => (isMap(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, copy(x)])) : Array.isArray(v) ? v.map(copy) : v);
 
-function createFirestore() {
+function createFirestore({ deny = [] } = {}) {
   const docs = new Map(); // full path -> data
   const written = []; // every path set(), in order — see db.written
+  const counts = { reads: 0 };
   let clock = 1_000_000;
 
+  function checkAllowed(path) {
+    if (deny.some(seg => path.split('/').includes(seg))) {
+      const e = new Error('Missing or insufficient permissions.'); e.code = 'permission-denied'; throw e;
+    }
+  }
   function write(path, data, opts, now) {
+    checkAllowed(path);
     const resolved = resolve(data, now);
     written.push(path);
     const existing = docs.get(path);
@@ -69,7 +80,7 @@ function createFirestore() {
     return {
       id: path.split('/').pop(), path,
       collection: name => collectionRef(`${path}/${name}`),
-      get: async () => snapshot(path),
+      get: async () => { counts.reads++; return snapshot(path); },
       set: async (data, opts) => write(path, data, opts, ++clock),
       delete: async () => { docs.delete(path); },
     };
@@ -91,6 +102,7 @@ function createFirestore() {
           .filter(k => k.startsWith(prefix) && !k.slice(prefix.length).includes('/'))
           .filter(k => filters.every(f => matches(docs.get(k), f)))
           .map(snapshot);
+        counts.reads += found.length;
         return { docs: found, size: found.length, empty: !found.length, forEach: fn => found.forEach(fn) };
       },
     };
@@ -101,15 +113,22 @@ function createFirestore() {
     batch() {
       const ops = [];
       return {
-        set(ref, data, opts) { ops.push(now => write(ref.path, data, opts, now)); },
-        delete(ref) { ops.push(() => docs.delete(ref.path)); },
-        async commit() { const now = ++clock; ops.forEach(op => op(now)); },
+        set(ref, data, opts) { ops.push({ check: () => checkAllowed(ref.path), run: now => write(ref.path, data, opts, now) }); },
+        delete(ref) { ops.push({ run: () => docs.delete(ref.path) }); },
+        async commit() {
+          const now = ++clock;
+          // All or nothing, like a real batch: a denied write fails the whole commit.
+          ops.forEach(op => op.check && op.check());
+          ops.forEach(op => op.run(now));
+        },
       };
     },
     // Test-side inspection: the stored data of one document, or undefined.
     // Paths written so far (one entry per set(), repeats included). Tests clear it with
     // db.written.length = 0 before the step they want to measure.
     written,
+    get reads() { return counts.reads; },
+    set reads(n) { counts.reads = n; },
     peek: path => (docs.has(path) ? copy(docs.get(path)) : undefined),
   };
 }
