@@ -53,11 +53,9 @@ describe('simulation findings (minimal reproductions)', () => {
     [{ type: 'add', dev: 0, eid: 3 }, { type: 'vote', dev: 0, a: 65, b: 72 }, { type: 'delete', dev: 0, eid: 3 },
       { type: 'csvAdd', dev: 0, eid: 4, director: 'Villeneuve' }]);
 
-  finding('a plain Pull on a device that missed a reset keeps every device consistent',
-    "the pull merges the reseed into the device's old state (stored ratings only seed new items), then lets it upload",
+  finding('a plain Pull on a device that missed a reset keeps every device consistent (2.19.0)', false,
     [{ type: 'add', dev: 0, eid: 6 }, { type: 'vote', dev: 0, a: 97, b: 24 }, { type: 'reset', dev: 0 }, { type: 'stalePull', dev: 2 }]);
 
-  finding('a year edit, identity on and a reset, then a plain Pull elsewhere, leaves one copy',
-    'combination of the stale-pull and identity findings',
+  finding('a year edit, identity on and a reset, then a plain Pull elsewhere, leaves one copy (2.19.0)', false,
     [{ type: 'editYear', dev: 1, eid: 0 }, { type: 'identityOn', dev: 0 }, { type: 'reset', dev: 0 }, { type: 'stalePull', dev: 1 }]);
 });

@@ -171,3 +171,149 @@ describe('a device that adopted earlier', () => {
     assert.deepEqual(rankings(B), rankings(A));
   });
 });
+
+describe('the packed baseline (2.19.0)', () => {
+  // A reset used to write one Firestore doc per item, ratings baked in, and every device
+  // adopting it read them all back: about 6,500 writes and 6,500 reads per device for the
+  // real library, most of a day's free quota. It now packs the items into a few chunk docs.
+  const root = () => db.peek('rankers/shared');
+  const cloudPaths = prefix => db.written.filter(p => p.startsWith('rankers/shared/' + prefix));
+  function addMany(app, n) {
+    app.run(`for (let k = 0; k < ${n}; k++) {
+      const title = 'Film ' + k, id = itemKey('Movies', title);
+      state.items[id] = { id, cat: 'Movies', title, fields: { Year: String(1950 + (k % 70)), Director: 'Someone' }, elo: 1000 + (k % 50), wins: k % 7, losses: k % 5, hidden: false, updatedAt: 2 };
+    }`);
+  }
+
+  test('a reset writes a chunk doc, not a doc per item', async () => {
+    addMany(A, 200);
+    db.written.length = 0;
+    await cloud(A, 'resetSharedBaseline()');
+    assert.deepEqual(cloudPaths('items/'), [], 'item docs were written');
+    assert.equal(root().baselineChunks, 1);
+    assert.ok(cloudPaths('baseline/0').length >= 1);
+  });
+
+  test('adopting reads a handful of docs, whatever the library size', async () => {
+    addMany(A, 200);
+    await cloud(A, 'resetSharedBaseline()');
+    db.reads = 0;
+    await cloud(B, 'adoptFreshBaseline()');
+    assert.ok(db.reads <= 5, `adopting read ${db.reads} docs for 204 items`);
+    assert.deepEqual(rankings(B), rankings(A));
+  });
+
+  test('a baseline split across several chunks restores every item and rating', async () => {
+    addMany(A, 50);
+    A.run('BASELINE_CHUNK_BYTES = 1000');
+    await cloud(A, 'resetSharedBaseline()');
+    assert.ok(root().baselineChunks > 3, 'expected several chunks');
+    await cloud(B, 'adoptFreshBaseline()');
+    assert.deepEqual(rankings(B), rankings(A));
+  });
+
+  test('a pull that finds an incomplete baseline merges nothing', async () => {
+    A.run('BASELINE_CHUNK_BYTES = 200');
+    await cloud(A, 'resetSharedBaseline()');
+    await db.collection('rankers').doc('shared').collection('baseline').doc('1').delete();
+    assert.equal(await B.window.eval('pullFromFirestore()'), false);
+    assert.deepEqual(Object.keys(B.get('state.items')), []);
+  });
+
+  test('an item edited after the reset keeps its rating from the baseline and its new fields', async () => {
+    edit(A, 'Heat', { fields: { Director: 'M. Mann' } });
+    await adoptAndCompare();
+    assert.equal(rankings(B)[id(B, 'Heat')].fields.Director, 'M. Mann');
+  });
+
+  test("Reset checks it can write the baseline before deleting anything", async () => {
+    const db2 = createFirestore({ deny: ['baseline'] });
+    const C = loadApp();
+    try {
+      connect(C, db2, { email: 'c@example.com' });
+      seed(C, 'dC');
+      await cloud(C, 'uploadToFirestore()');
+      const before = db2.peek('rankers/shared/items/' + id(C, 'Heat'));
+      await C.window.eval('resetSharedBaseline()');
+      assert.deepEqual(db2.peek('rankers/shared/items/' + id(C, 'Heat')), before, 'the cloud was wiped anyway');
+    } finally { C.close(); }
+  });
+});
+
+describe('a device that missed a reset (2.19.0)', () => {
+  // A plain Pull merged the reseed into the device's old state: its stale ratings stayed
+  // (stored ratings only seed items a device lacks), and the pull then let it upload them.
+  // It now adopts the reset, as "Adopt fresh baseline" does.
+  beforeEach(async () => {
+    await cloud(B, 'adoptFreshBaseline()');
+    for (let n = 0; n < 2; n++) voteOn(A, 'Collateral', 'Heat');
+    await cloud(A, 'resetSharedBaseline()');
+  });
+
+  test('a plain Pull adopts the reset; unsent votes there are not kept', async () => {
+    voteOn(B, 'Ronin', 'Thief');
+    await cloud(B, 'pullFromFirestore()');
+    assert.deepEqual(rankings(B), rankings(A));
+  });
+
+  test('items hidden on it stay hidden', async () => {
+    B.run(`state.items[${JSON.stringify(id(B, 'Ronin'))}].hidden = true`);
+    await cloud(B, 'pullFromFirestore()');
+    assert.equal(B.get(`state.items[${JSON.stringify(id(B, 'Ronin'))}].hidden`), true);
+  });
+
+  test('Upload is refused until it pulls, then works', async () => {
+    voteOn(B, 'Ronin', 'Thief');
+    assert.equal(await B.window.eval('uploadToFirestore()'), false);
+    await cloud(B, 'pullFromFirestore()');
+    voteOn(B, 'Ronin', 'Thief');
+    await cloud(B, 'uploadToFirestore()');
+    await cloud(A, 'pullFromFirestore()');
+    assert.deepEqual(rankings(A), rankings(B));
+  });
+
+  test('also after the first reset ever, when no device had seen a baseline', async () => {
+    const db2 = createFirestore();
+    const C = loadApp(), D = loadApp();
+    try {
+      connect(C, db2, { email: 'c@example.com' }); connect(D, db2, { email: 'd@example.com' });
+      seed(C, 'dC');
+      await cloud(C, 'uploadToFirestore()');
+      await cloud(D, 'pullFromFirestore()');
+      voteOn(C, 'Heat', 'Ronin');
+      await cloud(C, 'resetSharedBaseline()');
+      await cloud(D, 'pullFromFirestore()');
+      assert.deepEqual(rankings(D), rankings(C));
+    } finally { C.close(); D.close(); }
+  });
+
+  test('also on a device that has only ever uploaded, never pulled', async () => {
+    const db2 = createFirestore();
+    const C = loadApp(), D = loadApp();
+    try {
+      connect(C, db2, { email: 'c@example.com' }); connect(D, db2, { email: 'd@example.com' });
+      seed(C, 'dC');
+      await cloud(C, 'uploadToFirestore()'); // the cloud was empty, so C has never pulled anything
+      await cloud(D, 'pullFromFirestore()');
+      voteOn(D, 'Heat', 'Ronin');
+      await cloud(D, 'resetSharedBaseline()');
+      voteOn(C, 'Thief', 'Collateral'); // unsent: lost when C adopts
+      await cloud(C, 'pullFromFirestore()');
+      assert.deepEqual(rankings(C), rankings(D));
+    } finally { C.close(); D.close(); }
+  });
+
+  test('a device that has never synced merges its own library instead of clearing it', async () => {
+    const C = loadApp();
+    try {
+      connect(C, db, { email: 'c@example.com' });
+      const s = C.get('freshState()');
+      const own = C.call('itemKey', 'Movies', 'Manhunter');
+      s.items[own] = { id: own, cat: 'Movies', title: 'Manhunter', fields: { Year: '1986' }, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: 5 };
+      C.setState(s);
+      await cloud(C, 'pullFromFirestore()');
+      assert.ok(C.get(`!!state.items[${JSON.stringify(own)}]`), 'its own item was cleared');
+      assert.ok(C.get(`!!state.items[${JSON.stringify(id(C, 'Heat'))}]`), 'the cloud items arrived');
+    } finally { C.close(); }
+  });
+});

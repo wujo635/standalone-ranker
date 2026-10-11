@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.18.8` |
+| App version | `2.19.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -75,7 +75,7 @@ tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
-tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1)
+tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1); packed baseline and auto-adopt (2.19.0)
 tests/identity-sync.test.js    turning on an identity field on a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6)
 tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3); only what the cloud lacks, after pulling (2.18.7)
 tests/simulation/engine.js     randomized multi-device simulation: random user actions + sync steps, invariants, shrinking
@@ -335,8 +335,9 @@ An optional second transport next to file export/import — both feed `mergeImpo
 
 ### Layout: one document per fact
 
-- `rankers/shared` — root doc: `{ cats, schema, updatedAt, updatedBy, baselineId? }`
-- `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Exception: a baseline reseed bakes ratings in — see below. Ordinary uploads write with `mergeFields`, so a baked rating stays on the doc through later edits, 2.18.1.)
+- `rankers/shared` — root doc: `{ cats, schema, updatedAt, updatedBy, baselineId?, baselineChunks? }`
+- `rankers/shared/baseline/{n}` — the packed baseline a reset writes (2.19.0): `{ baselineId, index, count, data, syncedAt }`, where `data` is a JSON string of `[{ id, cat, title, fields, updatedAt, elo, wins, losses }, …]` — every item with its rating, split into as few docs as fit `BASELINE_CHUNK_BYTES` (900 KB of UTF-8) each (`packBaseline()`). One string field, not an array of maps: Firestore indexes every nested map field and caps a doc at 40,000 index entries.
+- `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Ratings stored at a reset live in the packed baseline since 2.19.0. Before that a reseed baked them into the item docs themselves; a cloud last reset before 2.19.0 still has them there, and pulls still read them. Ordinary uploads write with `mergeFields`, so such a stored rating stays on the doc through later edits, 2.18.1.)
 - `rankers/shared/matches/{matchId}` — `{ cat, wid, lid, ts, seq, syncedAt }`
 - `rankers/shared/itemDeletes/{itemId}` — `{ itemId, ts, deviceId, title, cat, renamedTo, syncedAt }`, mapped both ways by `tombstoneDoc()`/`tombstoneFromDoc()`. `title`/`cat`/`renamedTo` are written as `null` when absent — Firestore rejects `undefined` field values.
 - `rankers/shared/itemUndeletes/{itemId}` — same shape, without `renamedTo`, plus `recreated` (2.18.8)
@@ -347,7 +348,7 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 ### Upload and pull
 
 - **`uploadToFirestore()`** writes item docs with `set(…, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] })` (2.18.1), so it never erases a rating a reset stored there. An ordinary Upload first pulls (2.18.7, after the baseline-id guard below), like fetching before a push, so an edit another device already uploaded wins by last-write-wins here instead of being overwritten by this device's older one. It then pushes only what this device hasn't pushed, tracked by the `settings.lastUploaded*` cursors: items with a newer `updatedAt` whose version isn't the cloud's (`cloudUpdatedAt`, 2.18.7 — so an item it only pulled is never sent back; before, a device that was behind re-sent its older copy over a newer one), this device's own matches (by `deviceId` prefix and `seq`), and newer tombstones/undeletes. Writes are committed in batches of at most 500 (Firestore's hard per-batch limit, 2.0.4), then the root doc's cats/schema — the union of the cloud's and this device's (`cloudSchemaUnion()`, 2.18.6: every category and field either side has, an identity flag set in the cloud stays set, categories this device knows were deleted dropped; before 2.18.6 the last device to upload replaced every category's field list, so a device without an identity flag erased it for everyone joining later); cursors advance only once everything succeeds, so an interrupted upload simply re-sends next time.
-- **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled), builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. **Pulling into an empty library** (no items, matches, or tombstones — after Adopt's clear, or on a brand-new device) also moves the `lastUploaded*` cursors past everything it pulled (2.18.3): it's all already in the cloud, and with every cursor at 0 the next Upload used to re-send every item and tombstone (identical rewrites, but one write each, and a re-read on every other device's next pull). These are the values that redundant Upload used to leave them at. A non-empty device's cursors are never touched, since it may have unsent work. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
+- **`pullFromFirestore()`** fetches docs with `syncedAt` newer than `state.lastSyncedServerTs` from all six subcollections (everything, on a device that's never pulled). A first or full pull (no cursor) starts from the packed baseline when the root doc has `baselineChunks` (2.19.0): it reads the chunk docs, refuses to merge anything unless every one carries the root doc's `baselineId` (a mismatch means a reset is partway through), and layers item docs written since on top (newer title/fields, the baseline's rating). It builds an `incoming` payload, calls `mergeImport(incoming, { cloudOrigin: true })`, advances the cursor, and records the root doc's `baselineId` in `settings.knownBaselineId`. **Pulling into an empty library** (no items, matches, or tombstones — after Adopt's clear, or on a brand-new device) also moves the `lastUploaded*` cursors past everything it pulled (2.18.3): it's all already in the cloud, and with every cursor at 0 the next Upload used to re-send every item and tombstone (identical rewrites, but one write each, and a re-read on every other device's next pull). These are the values that redundant Upload used to leave them at. A non-empty device's cursors are never touched, since it may have unsent work. `{ full: true }` ignores the cursor (used by recovery); a full pull never rewinds the cursor.
 
 ### Auth, hosting, and setup
 
@@ -368,11 +369,14 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
    - does a full pull, so anything only in Firestore is absorbed;
    - clears all four tombstone logs on the live local state;
    - downloads `ranker-pre-reset-backup.json` as an offline safety net;
-   - wipes Firestore (`wipeFirestoreCollections()`), resets the upload cursors;
-   - reseeds with `uploadToFirestore({ full: true })`: **ratings baked into every item doc, an empty matches collection, no tombstones**, and a fresh random `baselineId` on the root doc.
+   - checks it can write the `baseline` collection (a throwaway `preflight` doc) and aborts with nothing deleted if it can't — the collection needs its own security rule (2.19.0);
+   - wipes Firestore (`wipeFirestoreCollections()`, `baseline` included), resets the upload cursors;
+   - reseeds with `uploadToFirestore({ full: true })`: **every item with its rating packed into a few `baseline` chunk docs (2.19.0) — no item docs —, an empty matches collection, no tombstones**, and a fresh random `baselineId` plus `baselineChunks` on the root doc.
+
+   **Cost (2.19.0).** Reseeding writes a few chunk docs, and every adopting device reads those plus whatever changed since — instead of a doc per item each way (about 6,500 writes plus 6,500 reads per adopting device for the real library, most of a day's free quota). The wipe still reads and deletes every doc written since the last reset: on the first reset after upgrading, that's every legacy item doc once; after that, only the deltas.
 
    Every step after the confirm is safely re-runnable if interrupted.
-2. **On every other device: "↓ Adopt fresh baseline"** (`adoptFreshBaseline()`). It clears local state (`clearAllDataCore()`) and pulls the reseed, so every item takes the baked rating (the "no local copy" path) and any match ranked after the reset applies normally on top. It preserves this device's own hidden-item markings (2.13.0) by re-applying them to ids that still exist. A plain Pull is *not* equivalent: an item the device already has never adopts an incoming rating.
+2. **On every other device: "↓ Adopt fresh baseline"** (`adoptFreshBaseline()`). It clears local state (`clearAllDataCore()`) and pulls the reseed, so every item takes the baked rating (the "no local copy" path) and any match ranked after the reset applies normally on top. It preserves this device's own hidden-item markings (2.13.0) by re-applying them to ids that still exist. Since 2.19.0 a plain **Pull on a device that missed the reset adopts it automatically** — same clear, pull and hidden restore, with a toast saying unsent changes there aren't kept. "Missed" means the device has synced before (pulled, uploaded, or seen a baseline) and the root doc's `baselineId` differs from its own; a device that has never synced merges as before, so a local library being connected for the first time isn't cleared. Before 2.19.0 the Pull merged the reseed into the old state, keeping stale ratings (an item a device already has never adopts an incoming rating) and then letting it upload them — found by the sync simulation. Reset's own pull and the recovery export are full pulls and keep merging.
 
 **Working after a reset (2.18.1).** The stored ratings must survive whatever happens before another device adopts:
 - **Edits** (Library edit form, CSV bulk add): ordinary uploads write only `cat`/`title`/`fields`/`updatedAt`/`syncedAt` (`mergeFields`), leaving the stored rating on the doc. Before 2.18.1 they replaced the whole doc, so an edited item reached a later-adopting device at 1000 plus its post-reset votes, its pre-reset history gone.
@@ -380,13 +384,13 @@ Every doc id is the fact's own id, so writing a fact twice is an idempotent over
 
 Pinned end to end by `tests/reset-baseline.test.js`.
 
-**Baseline-id guard (2.12.0).** Every Upload first reads the root doc (also used for the schema union above); for an ordinary Upload, if it has a `baselineId` this device hasn't seen (`settings.knownBaselineId`), the upload is refused with a toast pointing at Adopt — so a device that missed a reset can't push stale data onto the new baseline. A root doc with no `baselineId` (never reset) skips the check entirely; a `full` reseed is exempt.
+**Baseline-id guard (2.12.0).** Every Upload first reads the root doc (also used for the schema union above); for an ordinary Upload, if it has a `baselineId` this device hasn't seen (`settings.knownBaselineId`), the upload is refused with a toast saying to Pull first (which adopts the reset, 2.19.0) — so a device that missed a reset can't push stale data onto the new baseline. A root doc with no `baselineId` (never reset) skips the check entirely; a `full` reseed is exempt.
 
 **What survives:**
 
 | | Device running Reset | Devices running Adopt |
 |---|---|---|
-| Items + ratings | Kept; reseeded with ratings baked in | Wiped, then adopted from the reseed |
+| Items + ratings | Kept; reseeded into the packed baseline, ratings included | Wiped, then adopted from the reseed |
 | `matchLog` | Kept locally; Firestore reseeded **empty** (the baked ratings already include every match) | Wiped; only post-reset matches appear |
 | Tombstones (all four logs) | **Dropped** (deliberately — see below) | Dropped |
 | `cats`/`schema` | Kept; reseeded | Wiped, then pulled back |
@@ -403,7 +407,7 @@ Pinned end to end by `tests/reset-baseline.test.js`.
 
 ### Limitations
 
-- A device's first pull (or a pull after `lastSyncedServerTs` is reset) reads every doc ever written, against Firestore's free-tier limit of about 50,000 reads/day. Fine at this app's scale; the baseline reset bounds it.
+- A device's first pull (or a pull after `lastSyncedServerTs` is reset) reads the packed baseline (a few docs) plus every doc written since the last reset, against Firestore's free-tier limits of about 50,000 reads, 20,000 writes and 20,000 deletes a day. Before 2.19.0 the baseline was a doc per item, so a reset plus one adopt cost about 19,000 reads for the real library.
 - `cloudSyncTimes` (last upload/pull shown in the card) is in-memory only.
 
 ### Security rules
@@ -422,6 +426,7 @@ service cloud.firestore {
       match /itemUndeletes/{itemId} { allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>']; }
       match /catDeletes/{catId}     { allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>']; }
       match /catUndeletes/{catId}   { allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>']; }
+      match /baseline/{chunkId}     { allow read, write: if request.auth.uid in ['<uid-A>', '<uid-B>']; }  // 2.19.0
     }
   }
 }
@@ -623,6 +628,7 @@ One line each; the sections above have the details.
 | `dedupeById(list)` | Dedupe `matchLog` entries |
 | `cloudSignIn()` / `cloudSignOut()` / `renderCloudAuthUI()` / `cloudErrorMessage(e)` | Auth and Cloud sync card |
 | `uploadToFirestore({ full })` / `pullFromFirestore({ full })` | Firestore push / pull |
+| `packBaseline(items)` | Packs items with ratings into as few JSON chunk strings as fit `BASELINE_CHUNK_BYTES` (2.19.0) |
 | `cloudSchemaUnion(remoteRoot)` | The root doc cats/schema an Upload writes: cloud ∪ this device, identity flags never cleared (2.18.6) |
 | `tombstoneDoc(t)` / `tombstoneFromDoc(d)` | Tombstone ↔ Firestore doc |
 | `resetSharedBaseline()` / `adoptFreshBaseline()` / `exportRecoveryBaseline()` | Baseline reset, adopt, offline fallback |

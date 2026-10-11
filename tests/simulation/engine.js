@@ -210,12 +210,27 @@ class Sim {
         this.uploaded(d);
         break;
       }
-      case 'pull': case 'stalePull': {
-        if (s.type === 'pull' && !dv.adoptedSinceReset) return false; // see stalePull
-        if (s.type === 'stalePull') this.flags.stalePull = true;
+      case 'pull': {
+        if (!dv.adoptedSinceReset) return false; // see stalePull
         await this.cloud(d, 'pullFromFirestore()');
         dv.seen = this.cloudVersion;
-        if (s.type === 'stalePull') dv.adoptedSinceReset = true; // the app now lets it upload
+        break;
+      }
+      // A plain Pull on a device that missed a reset. Since 2.19.0 the app adopts the reset
+      // (clear, then pull everything), so the model treats it exactly like 'adopt'.
+      case 'stalePull':
+      case 'adopt': {
+        await this.cloud(d, s.type === 'adopt' ? 'adoptFreshBaseline()' : 'pullFromFirestore()');
+        // Adopt erases this device's unsent votes and edits; the cloud version stands.
+        this.votes.forEach(v => { if (v.dev === d && !v.uploaded) v.dropped = true; });
+        this.entities.forEach(x => {
+          if (!x.pending.has(d)) return;
+          x.pending.delete(d);
+          x.cur = x.pub ? { ...x.pub } : null;
+          if (!x.cur) x.gen++;
+        });
+        dv.adoptedSinceReset = true;
+        dv.seen = this.cloudVersion;
         break;
       }
       case 'reset': {
@@ -229,20 +244,6 @@ class Sim {
         this.votes.forEach(v => { if (v.dev === d && !v.dropped) v.uploaded = true; });
         this.cloudVersion++;
         this.devs.forEach((o, i) => { o.adoptedSinceReset = i === d; });
-        dv.seen = this.cloudVersion;
-        break;
-      }
-      case 'adopt': {
-        await this.cloud(d, 'adoptFreshBaseline()');
-        // Adopt erases this device's unsent votes and edits; the cloud version stands.
-        this.votes.forEach(v => { if (v.dev === d && !v.uploaded) v.dropped = true; });
-        this.entities.forEach(x => {
-          if (!x.pending.has(d)) return;
-          x.pending.delete(d);
-          x.cur = x.pub ? { ...x.pub } : null;
-          if (!x.cur) x.gen++;
-        });
-        dv.adoptedSinceReset = true;
         dv.seen = this.cloudVersion;
         break;
       }
@@ -313,7 +314,7 @@ class Sim {
         if (copies.length > 1) out.push(`complete: device ${d} has ${copies.length} copies of ${e.base.title} (${e.base.year}): ${copies.map(c => c.id + ' ' + c.title + ' ' + c.fields.Year).join(', ')}`);
         if (!e.cur && copies.length) out.push(`no-merge: device ${d} still has deleted ${copies[0].title} (${copies[0].fields.Year})`);
         if (e.cur && copies.length === 1 && (copies[0].title !== e.cur.title || (copies[0].fields.Year || '') !== e.cur.year)) out.push(`no-merge: device ${d} has ${e.base.title} as ${copies[0].title} (${copies[0].fields.Year}), expected ${e.cur.title} (${e.cur.year})`);
-        if (e.cur && copies.length === 1 && !e.tainted && !this.flags.stalePull) {
+        if (e.cur && copies.length === 1 && !e.tainted) {
           const counted = v => !v.dropped;
           const wins = this.votes.filter(v => counted(v) && v.w === e.eid && v.wGen === e.gen).length;
           const losses = this.votes.filter(v => counted(v) && v.l === e.eid && v.lGen === e.gen).length;

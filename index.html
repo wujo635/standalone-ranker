@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.18.8';
+const APP_VERSION = '2.19.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3540,6 +3540,10 @@ const firebaseConfig = {
 };
 const CLOUD_COLLECTION = 'rankers';
 const CLOUD_DOC = 'shared';
+// Upper bound, in UTF-8 bytes, for one baseline chunk's packed items (2.19.0). Firestore
+// caps a document at 1 MiB; the rest is headroom for the doc's other fields. A `let` so
+// tests can force several chunks out of a small library.
+let BASELINE_CHUNK_BYTES = 900000;
 
 let cloudAvailable = false; // false if the SDK failed to load/init — cloud UI degrades to a disabled/explanatory state instead of throwing
 let cloudAuth = null, cloudDb = null;
@@ -3692,6 +3696,25 @@ function cloudSchemaUnion(remoteRoot) {
   return { cats, schema };
 }
 
+// Packs items, ratings included, into as few JSON strings as fit BASELINE_CHUNK_BYTES each
+// (2.19.0) — one string per baseline chunk doc. A single string field rather than an
+// array of maps: Firestore indexes every nested field of a map, and a doc may have at
+// most 40,000 index entries (6,500 items x 8 fields would blow it), while one string is
+// one entry. Always returns at least one chunk, so an empty library still has a baseline.
+function packBaseline(items) {
+  const bytes = s => unescape(encodeURIComponent(s)).length;
+  const chunks = [];
+  let cur = [], size = 2;
+  items.forEach(i => {
+    const rec = { id: i.id, cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt, elo: i.elo, wins: i.wins, losses: i.losses };
+    const n = bytes(JSON.stringify(rec)) + 1;
+    if (cur.length && size + n > BASELINE_CHUNK_BYTES) { chunks.push(JSON.stringify(cur)); cur = []; size = 2; }
+    cur.push(rec); size += n;
+  });
+  chunks.push(JSON.stringify(cur));
+  return chunks;
+}
+
 async function uploadToFirestore(opts) {
   const full = !!(opts && opts.full);
   if (!cloudAvailable || !cloudUser) return false;
@@ -3713,7 +3736,7 @@ async function uploadToFirestore(opts) {
     if (!full) {
       const remoteBaselineId = remoteRoot.baselineId;
       if (remoteBaselineId && remoteBaselineId !== state.settings.knownBaselineId) {
-        toast('The shared baseline was reset since this device last synced — run "Adopt fresh baseline" (Data tab) first, or you risk pushing stale or already-deleted data back in.');
+        toast('The shared baseline was reset since this device last synced — Pull first (it adopts the reset; changes made here since your last upload are not kept), or you risk pushing stale or already-deleted data back in.');
         return false;
       }
       // Pull before pushing (2.18.7), like fetching before a push: an edit another device
@@ -3751,22 +3774,25 @@ async function uploadToFirestore(opts) {
     // from-scratch full-history recovery upload) could otherwise exceed 500 writes
     // and fail the entire upload outright, pushing nothing at all.
     const writes = [];
-    itemsToPush.forEach(i => writes.push([sharedRef.collection('items').doc(i.id), {
+    // A full push (resetSharedBaseline()'s reseed) packs every item into a few baseline
+    // chunk docs instead of writing one doc per item (2.19.0): a reset used to cost a
+    // write per item to reseed and a read per item for every device that adopted it —
+    // most of a day's free quota for a 6,500-item library. Now both cost a few docs.
+    const newBaselineId = full ? uid() : undefined;
+    const baselineChunks = full ? packBaseline(itemsToPush) : [];
+    baselineChunks.forEach((data, index) => writes.push([sharedRef.collection('baseline').doc(String(index)), {
+      baselineId: newBaselineId, index, count: baselineChunks.length, data,
+      syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }]));
+    (full ? [] : itemsToPush).forEach(i => writes.push([sharedRef.collection('items').doc(i.id), {
       cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt,
-      // Only a full/reseed push bakes ratings into the item doc — see this function's
-      // top comment. pullFromFirestore() reads these back as elo/wins/losses on the
-      // incoming item, and unionItemsAndSchema() already treats any incoming item
-      // carrying a real elo as "freshly seeded" (previously only true for file
-      // imports) — exactly the mechanism that lets a device with no local copy adopt
-      // the baked-in rating directly, with no matches left to replay.
-      ...(full ? { elo: i.elo, wins: i.wins, losses: i.losses } : {}),
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     // An ordinary push writes only these fields and leaves the rest of the doc alone
     // (2.18.1). A plain set() replaces the whole doc, so editing an item after a reset
     // used to erase its stored rating, and a device adopting the baseline afterwards
     // started that item from 1000. Stored ratings that no longer apply (the item was
     // deleted or renamed since) are sorted out on pull — see routeStoredRatings().
-    }, full ? undefined : { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] }]));
+    }, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] }]));
     matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
       cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -3810,13 +3836,12 @@ async function uploadToFirestore(opts) {
     // baseline every other device must match before its own next ordinary upload (see
     // the guard above) — omitted entirely on an ordinary upload so the merge-write
     // leaves whatever baselineId is already there untouched.
-    const newBaselineId = full ? uid() : undefined;
     const rootWrite = {
       ...cloudSchemaUnion(remoteRoot),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: cloudUser.email || cloudUser.uid
     };
-    if (full) rootWrite.baselineId = newBaselineId;
+    if (full) { rootWrite.baselineId = newBaselineId; rootWrite.baselineChunks = baselineChunks.length; }
     await sharedRef.set(rootWrite, { merge: true });
     if (full) state.settings.knownBaselineId = newBaselineId;
 
@@ -3868,6 +3893,21 @@ async function pullFromFirestore(opts) {
     // exist yet, and that must not be mistaken for an error that aborts the retry.
     if (!rootDoc.exists) { toast('Nothing uploaded to the cloud yet'); return true; }
     const rootData = rootDoc.data();
+    // A device that missed a reset adopts it on an ordinary Pull (2.19.0), the way "Adopt
+    // fresh baseline" does: clear, then pull everything. Merging the reseed into its old
+    // state instead kept its stale ratings (stored ratings only seed items a device lacks)
+    // and then let it upload them — found by the sync simulation. Full pulls (Reset's own,
+    // the recovery export) keep merging. "Missed a reset" means this device has synced
+    // with the cloud before (pulled, uploaded, or seen a baseline) and the baseline has
+    // changed since — including a first-ever reset, which leaves every other device with
+    // knownBaselineId null. A device that has never synced (a local library being
+    // connected for the first time) merges as before, so its data isn't cleared.
+    const st = state.settings;
+    const syncedBefore = state.lastSyncedServerTs != null || !!st.knownBaselineId ||
+      [st.lastUploadedItemsAt, st.lastUploadedSeq, st.lastUploadedDeletesAt, st.lastUploadedUndeletesAt, st.lastUploadedCatDeletesAt, st.lastUploadedCatUndeletesAt].some(v => v > 0);
+    const adopting = !full && !!rootData.baselineId && syncedBefore && rootData.baselineId !== state.settings.knownBaselineId;
+    const hiddenIds = adopting ? Object.values(state.items).filter(i => i.hidden).map(i => i.id) : [];
+    if (adopting) clearAllDataCore();
     // Record whatever baseline this device has now actually seen — this is how the
     // uploadToFirestore() guard above learns a device is caught up after a reset (via
     // adoptFreshBaseline()'s pull, or any ordinary Pull). Undefined on a root doc from
@@ -3885,8 +3925,18 @@ async function pullFromFirestore(opts) {
     const [itemsSnap, matchesSnap, deletesSnap, undeletesSnap, catDeletesSnap, catUndeletesSnap] =
       await Promise.all([itemsQ.get(), matchesQ.get(), deletesQ.get(), undeletesQ.get(), catDeletesQ.get(), catUndeletesQ.get()]);
 
+    // A first or full pull starts from the packed baseline (2.19.0), when the cloud has
+    // one, then layers item docs written since on top. Every chunk must carry the root
+    // doc's baselineId — a mismatch means a reset is partway through, so nothing is merged.
+    const baseItems = {};
+    if (rootData.baselineChunks && !cursor) {
+      const chunkSnap = await sharedRef.collection('baseline').get();
+      const chunks = chunkSnap.docs.map(d => d.data()).filter(c => c.baselineId === rootData.baselineId);
+      if (chunks.length !== rootData.baselineChunks) { toast('The cloud is partway through a reset — try again in a moment'); return false; }
+      chunks.forEach(c => JSON.parse(c.data).forEach(i => { baseItems[i.id] = i; }));
+    }
     const incoming = {
-      items: {}, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [],
+      items: baseItems, cats: rootData.cats || [], schema: rootData.schema || {}, matchLog: [],
       itemDeletes: [], itemUndeletes: [], catDeletes: [], catUndeletes: []
     };
     let maxSynced = state.lastSyncedServerTs || 0;
@@ -3897,7 +3947,13 @@ async function pullFromFirestore(opts) {
       // deliberately bakes them in — see uploadToFirestore(opts)'s top comment.
       // unionItemsAndSchema() already treats any incoming item with a real elo as
       // "freshly seeded," so this flows through with no other change needed.
-      incoming.items[doc.id] = { id: doc.id, cat: d.cat, title: d.title, fields: d.fields, updatedAt: d.updatedAt, elo: d.elo, wins: d.wins, losses: d.losses };
+      // An item edited since the baseline: its newer title/fields over the baseline copy,
+      // keeping the baseline's rating (item docs written since carry none).
+      const base = incoming.items[doc.id];
+      if (!base || (d.updatedAt || 0) > (base.updatedAt || 0)) {
+        incoming.items[doc.id] = { id: doc.id, cat: d.cat, title: d.title, fields: d.fields, updatedAt: d.updatedAt,
+          elo: base ? base.elo : d.elo, wins: base ? base.wins : d.wins, losses: base ? base.losses : d.losses };
+      }
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
     matchesSnap.forEach(doc => {
@@ -3950,6 +4006,11 @@ async function pullFromFirestore(opts) {
     // matches after its last pull) must not reset lastSyncedServerTs backward, which
     // would make the next incremental pull re-fetch docs it's already merged.
     state.lastSyncedServerTs = Math.max(state.lastSyncedServerTs || 0, maxSynced);
+    if (adopting) {
+      hiddenIds.forEach(id => { if (state.items[id]) state.items[id].hidden = true; });
+      renderLibrary();
+      toast('The shared baseline was reset on another device — adopted it (changes made here since your last upload are not kept)');
+    }
     save();
 
     cloudSyncTimes.lastPull = Date.now();
@@ -4026,7 +4087,7 @@ async function deleteAllDocs(collectionRef) {
 // cloud with no explanation.
 async function wipeFirestoreCollections() {
   const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
-  const subcollections = ['items', 'matches', 'itemDeletes', 'itemUndeletes', 'catDeletes', 'catUndeletes'];
+  const subcollections = ['items', 'matches', 'itemDeletes', 'itemUndeletes', 'catDeletes', 'catUndeletes', 'baseline'];
   for (const name of subcollections) {
     await deleteAllDocs(sharedRef.collection(name));
   }
@@ -4082,6 +4143,18 @@ async function resetSharedBaseline() {
   backup._meta.matchLogCompacted = true;
   downloadJson(backup, 'ranker-pre-reset-backup.json');
 
+  // The reseed writes the baseline collection (2.19.0), which needs its own security rule
+  // (see ARCHITECTURE.md). Check it's writable before wiping anything, so a missing rule
+  // can't leave the cloud wiped with no baseline.
+  try {
+    const probe = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC).collection('baseline').doc('preflight');
+    await probe.set({ preflight: true });
+    await probe.delete();
+  } catch (e) {
+    toast('Reset aborted, nothing was deleted: can\'t write the cloud baseline (' + cloudErrorMessage(e) + '). Add the "baseline" rule from ARCHITECTURE.md in the Firebase console.');
+    return;
+  }
+
   toast('Wiping cloud data…');
   try {
     await wipeFirestoreCollections();
@@ -4120,8 +4193,10 @@ async function resetSharedBaseline() {
 // item adopts them directly (unionItemsAndSchema()'s "!cur" branch) — an item this
 // device already has locally never adopts an incoming rating, and with the reseed
 // pushing zero matches there's no delta left to apply either. A plain "Pull rankings"
-// on a non-cleared device after a reset would silently keep this device's old (possibly
-// stale) ratings for every overlapping item instead of adopting the reset ones. Uses
+// on a non-cleared device after a reset used to silently keep this device's old
+// (possibly stale) ratings for every overlapping item; since 2.19.0 an ordinary Pull on a
+// device that missed a reset adopts it automatically (see pullFromFirestore()), so this
+// button is the explicit version of the same thing. Uses
 // clearAllDataCore() rather than clearAllData() so this function's own confirm()
 // (specific to this scenario) is the only one shown.
 async function adoptFreshBaseline() {
