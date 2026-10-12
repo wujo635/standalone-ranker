@@ -102,7 +102,8 @@ const commands = {
       year: year(r['release-group']?.['first-release-date'] || r.date),
       language: LANGS[lang] || lang || '',
       albumArtist: credit(r['artist-credit']),
-      tracks: r.media.flatMap((m, d) => m.tracks.map(t => ({
+      // A medium can have no track list (e.g. a bonus DVD), so default it to empty.
+      tracks: r.media.flatMap((m, d) => (m.tracks || []).map(t => ({
         disc: d + 1, n: t.position, title: t.title,
         artist: credit(t['artist-credit']), length: t.length ? Math.round(t.length / 1000) : null,
         recording: t.recording?.disambiguation || '', ...work(t)
