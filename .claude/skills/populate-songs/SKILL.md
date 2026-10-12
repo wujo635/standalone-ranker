@@ -62,14 +62,21 @@ For every selected album or EP:
 
 1. `editions <rgId>`. Use the **earliest standard edition** (no edition name, usually the
    lowest track count among the early dates) as the base track list. Get it with `tracks`.
-2. **Include bonus/deluxe tracks.** If there's a deluxe, bonus, expanded, or anniversary edition
-   with more tracks, fetch the most complete one and add tracks that are **distinct songs** not
-   already on the list.
+2. **Find bonus/deluxe tracks, but don't add them unless the user says so.** The user
+   generally doesn't want bonus tracks. If there's a deluxe, bonus, expanded, or anniversary
+   edition with more tracks, fetch the most complete one and find the tracks that are
+   **distinct songs** not already on the list. List them in the preview under their own
+   heading, with the edition each comes from, and ask which (if any) to add. Leave them out of
+   the CSV until the user picks. This doesn't apply when the user explicitly asked for a
+   release's extra songs (e.g. "all the new songs from repackages"); those are requested,
+   not bonus.
    - Skip versions of songs already listed: live, remix, demo, instrumental, acoustic,
      a cappella, radio/single edit, remaster. A track with `instrumentalVersion: true` is one
      of these, even without "Instrumental" in its title.
-   - A track that is a previously unreleased song is a distinct song, so keep it.
-   - A bonus track still gets the original album's name in Album, not "Meteora (Deluxe)".
+   - A track that is a previously unreleased song is a distinct song, so it's a bonus-track
+     candidate.
+   - A bonus track the user picks still gets the original album's name in Album, not
+     "Meteora (Deluxe)".
 3. **Skip non-song tracks:** intros, interludes, skits, spoken outros. Clues are the length
    (usually under ~60s) or a title like "Intro", "Foreword", "Interlude". List what you skipped
    in the preview so the user can add any back.
@@ -86,7 +93,7 @@ For every selected album or EP:
 | Album | The release-group title (the original album name). Use the same bilingual form as Title when the album name isn't in the Latin alphabet: `七里香 (Common Jasmine Orange)`, with the English name from the album's Wikipedia infobox `name`. Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
 | Language | The track's `lyrics` from `tracks` when present: it's the language actually sung. A `+`-joined value (two sung languages) becomes `Multiple`. Otherwise use the release's `language`, but sanity-check it. That value describes the script the track list is *written* in, not what's sung. K-pop releases with romanized titles come back as "English" or "Multiple". If it's missing or clearly wrong, use the artist's main language, and flag the override in the preview. If a track is known to be in a different language, override it for that track only. **A song with no lyrics gets `Instrumental`**, not the artist's language (see below). **Never write plain "Chinese".** Use the variety: `Mandarin`, `Cantonese`, `Hokkien`. The user filters Mandarin separately from Cantonese. `tracks` maps the specific codes. When MusicBrainz says only "Chinese" (`zho`), use the artist's main variety (Mandarin for Jay Chou, Cantonese for most Hong Kong artists) and flag it. |
-| Genre | The album's genres: `genre "<Album> (album)"`, falling back to `"<Album>"` or `"<Album> (<Artist> album)"`. Take the first 1–3, comma-separated (Genre is a multi-value field). The same value goes on every track of that album. For a non-album single, try the song's own page, then the artist's. If nothing is found, leave it blank. Don't guess. |
+| Genre | The album's genres: `genre "<Album> (album)"`, falling back to `"<Album>"` or `"<Album> (<Artist> album)"`. Take the first 1–3, comma-separated (Genre is a multi-value field). The same value goes on every track of that album. For a non-album single, try the song's own page, then the artist's. **If the album page has no genres** (compilations and anthologies often leave the infobox `genre` empty; BTS's *Proof* does), try each track's own song page, and use its genres for that track only. **Check that a page is actually about the song.** A song title that redirects back to the album has no page of its own. A plain title can land on something else: "Run BTS" is a variety show, and "Bad Decisions" is a disambiguation page. In those cases, try `"<Title> (song)"` and `"<Title> (<Artist> song)"`. If nothing is found, leave it blank. Don't guess. List each blank Genre in the preview with where you looked. |
 
 **Instrumentals go in Language, not Genre.** Language describes the vocals, so a song with
 no lyrics gets `Language: Instrumental`. That way a Language filter for Japanese doesn't show it.
@@ -103,6 +110,17 @@ no lyrics gets `Language: Instrumental`. That way a Language filter for Japanese
 and its album, or an EP and a later album), keep **one** row, using the earliest *album*
 appearance. To match, compare titles case-insensitively with punctuation and
 feat./version suffixes ignored.
+
+**A repackage can retitle the same recording.** Repackages and anthologies often drop an
+"Intro:"/"Outro:" prefix: BTS's *Answer* has "Singularity", "Her" and "Tear", which are
+*Tear*'s "Intro: Singularity" and *Her*/*Tear*'s "Outro: Her"/"Outro: Tear".
+- Treat a track as the **same recording** when its title matches an earlier one after
+  stripping an `Intro:`/`Outro:`/`Interlude:` prefix, and its length is within ~5 seconds.
+  Small differences are silence padded at the start or end for the new track order;
+  "Singularity" is 3:17 vs 3:14 and is still the same recording.
+- Drop the repackage copy and keep the original. List it under "dropped duplicates".
+- A version that's clearly longer is a different version, not padding:
+  "Serendipity (Full Length Edition)" is 4:37 vs 2:19. Treat it like a bonus track and ask.
 
 **Language versions of the same song collide.** Examples: a Japanese "Dumb Dumb" on a
 Japanese EP, or an English "Bad Boy" on a later EP.
