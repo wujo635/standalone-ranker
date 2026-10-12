@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.21.0';
+const APP_VERSION = '2.21.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2641,10 +2641,16 @@ function parsePreloadCSV(text) {
   let headerLine = null;
   let inData = false;
 
+  // A line starting with # is a directive — except, once data rows have begun, one that
+  // isn't #category/#primary/#field: that's a row whose title starts with # (2.21.1).
+  // Before, "#Cookie Jar,Red Velvet,..." was read as an unknown directive and dropped,
+  // which hit every CSV the app's own export wrote for such a title (csvCell() didn't
+  // quote it then), including files already saved.
+  const DIRECTIVES = ['category', 'primary', 'field'];
   for (const line of lines) {
-    if (line.startsWith('#')) {
+    const directive = line.startsWith('#') ? splitCSVLine(line.slice(1))[0].toLowerCase().trim() : null;
+    if (directive !== null && (!inData || DIRECTIVES.includes(directive))) {
       const parts = splitCSVLine(line.slice(1)); // strip leading #
-      const directive = parts[0].toLowerCase().trim();
       if (directive === 'category') category = parts[1]?.trim();
       else if (directive === 'primary') primary = parts[1]?.trim();
       else if (directive === 'field') {
@@ -2689,12 +2695,16 @@ function parsePreloadCSV(text) {
 }
 
 function splitCSVLine(line) {
-  // Handles quoted fields with commas inside
+  // Handles quoted fields with commas inside, and "" inside quotes as a literal quote —
+  // the escape csvCell() writes (2.21.1). Before, every " just toggled quoting, so a
+  // title with a quote in it lost the quote on its way back in, landing on a different
+  // id than the item it was exported from.
   const result = [];
   let cur = '', inQuotes = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-    if (ch === '"') { inQuotes = !inQuotes; }
+    if (ch === '"' && inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+    else if (ch === '"') { inQuotes = !inQuotes; }
     else if (ch === ',' && !inQuotes) { result.push(cur); cur = ''; }
     else { cur += ch; }
   }
@@ -2963,8 +2973,10 @@ function exportCategoryCSV() {
 
 function csvCell(val) {
   const s = String(val || '');
-  // Quote if contains comma, quote, or newline
-  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+  // Quote if contains comma, quote, or newline — or starts with #, which the importer
+  // would otherwise read as a directive row (2.21.1; parsePreloadCSV() now also reads an
+  // unknown # line among the data as a row).
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.startsWith('#')) {
     return '"' + s.replace(/"/g, '""') + '"';
   }
   return s;

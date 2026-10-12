@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.21.0` |
+| App version | `2.21.1` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -75,6 +75,7 @@ tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
+tests/csv.test.js              Export CSV -> import gives back the same titles and ids: # titles, double quotes (2.21.1)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1); packed baseline and auto-adopt (2.19.0)
 tests/identity-sync.test.js    an in-place identity change reaching a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6); identity on/off resets the shared baseline (2.20.0)
 tests/upload-cursors.test.js   what Upload sends after Adopt / a first pull (2.18.3); only what the cloud lacks, after pulling (2.18.7)
@@ -224,7 +225,8 @@ Stephen Curry,Warriors,PG
 ```
 
 - `#category` and `#primary` are required; each `#field` takes a name and `required`/`optional`. `filterable`/`identity`/`multi` flags don't round-trip through CSV.
-- The header row must include the primary label and all field names; quoted values with commas are supported.
+- The header row must include the primary label and all field names; quoted values with commas are supported, and `""` inside quotes is a literal quote (`splitCSVLine()`, 2.21.1).
+- A line starting with `#` is a directive, except among the data rows, where only `#category`/`#primary`/`#field` are: any other `#` line there is a row whose title starts with `#` (2.21.1). Export (`csvCell()`) quotes a cell that starts with `#`, as well as any with a comma, quote or newline. So **Export CSV → import gives back the same titles, and so the same ids**. Before 2.21.1, a `#` title was dropped and a title with a double quote lost the quote.
 - Importing into an existing category prompts:
   - **Bulk add** (`bulkAddCSVImport()`) — matches rows by id (title + identity values); updates fields on matches, preserving ELO and W/L (only bumping `updatedAt` when a value actually changed); adds new rows at ELO 1000.
   - **Replace** — tombstones every existing item (`deleteItemsInCat()`), then imports the rows fresh at ELO 1000. Rows landing on a just-tombstoned id are undeleted automatically, so they survive the next sync (2.17.1).
