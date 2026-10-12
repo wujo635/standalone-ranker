@@ -56,6 +56,21 @@ If it returns nothing, the artist is probably filed under their native-script na
   etc.). Don't use AskUserQuestion here: it only shows 4 options. Then ask whether to also add
   **non-album singles**, meaning singles whose song doesn't appear on any selected album or
   EP. To find them, compare each single's title against the track lists you've collected.
+- **Discographies also check compilations for repackages.** The default `albums` list leaves
+  out compilations, but MusicBrainz files many repackages as compilations, and those often add
+  new songs. Examples: Red Velvet's *The ReVe Festival: Finale* ("Psycho"), BTS's
+  *화양연화 Young Forever* and *LOVE YOURSELF 結 'Answer'*. Missing this left "Psycho" out of
+  a Red Velvet run.
+  - Also run `albums <artistId> --all`, and look at the `Compilation` release groups.
+  - For each one that could be a repackage (a reissue or "special edition" of an album or EP,
+    or an "Answer"/"Finale"-style closer), get its tracks. Then compare them with the
+    albums/EPs list's track lists, the same way as the deduplication check in step 4.
+  - List the ones that add new songs in their own section of the numbered list, with the new
+    song titles. That way the user can include them by number.
+  - Leave out greatest-hits and best-of compilations with no new songs, and live, remix and
+    soundtrack releases.
+  - If the user picks a repackage, add only its **new** songs. The songs it shares with
+    earlier releases keep their original album.
 
 ### 3. Get each release's tracks
 For every selected album or EP:
