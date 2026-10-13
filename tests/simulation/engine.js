@@ -29,7 +29,7 @@ const CAT = 'Movies';
 // Two pairs share a title (Superman, Dune): they can only coexist with Year as identity.
 const POOL = [['Heat', '1995'], ['Ronin', '1998'], ['Thief', '1981'], ['Superman', '1978'], ['Superman', '2025'], ['Dune', '1984'], ['Dune', '2021']];
 const DEFAULT_TYPES = ['add', 'add', 'rename', 'editYear', 'editDirector', 'csvAdd', 'delete', 'vote', 'vote', 'vote',
-  'upload', 'upload', 'pull', 'pull', 'identityOn', 'identityOff', 'reset', 'adopt', 'stalePull'];
+  'upload', 'upload', 'pull', 'pull', 'identityOn', 'identityOff', 'reset', 'adopt', 'stalePull', 'reload'];
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -43,12 +43,8 @@ class Sim {
     this.clock = 1_800_000_000_000;
     this.devs = [];
     for (let d = 0; d < this.opts.devices; d++) {
-      const app = loadApp();
-      connect(app, this.db, { email: `d${d}@example.com` });
+      const app = this.openPage(d);
       app.run(`state.settings.deviceId = 'dev${d}'`);
-      // One shared, strictly increasing clock: real actions are seconds apart, so
-      // same-millisecond ties (a different, unrealistic class of bug) never happen.
-      app.window.Date.now = () => this.clock;
       this.devs.push({ app, seen: 0, adoptedSinceReset: true });
     }
     this.cloudVersion = 0;       // bumped by every successful upload or reset
@@ -64,6 +60,15 @@ class Sim {
   }
 
   close() { this.devs.forEach(d => d.app.close()); }
+  // A page for device d, started from `saved` (its localStorage) when reloading.
+  openPage(d, saved) {
+    const app = loadApp(saved ? { saved } : {});
+    connect(app, this.db, { email: `d${d}@example.com` });
+    // One shared, strictly increasing clock: real actions are seconds apart, so
+    // same-millisecond ties (a different, unrealistic class of bug) never happen.
+    app.window.Date.now = () => this.clock;
+    return app;
+  }
   tick() { this.clock += 1000; }
 
   // --- reading the app ---------------------------------------------------------
@@ -149,7 +154,7 @@ class Sim {
       }
       case 'csvAdd': {
         const target = e.cur || { title: e.base.title, year: e.base.year };
-        app.run(`bulkAddCSVImport({ category: ${JSON.stringify(CAT)}, items: [{ title: ${JSON.stringify(target.title)}, fields: { Year: ${JSON.stringify(target.year)}, Director: ${JSON.stringify(s.director)} } }] })`);
+        app.run(`bulkAddCSVImport({ category: ${JSON.stringify(CAT)}, items: [{ title: ${JSON.stringify(target.title)}, fields: { Year: ${JSON.stringify(target.year)}, Director: ${JSON.stringify(s.director)} } }] }); save();`); // save() as resolveCSVImport() does
         if (!this.items(d).some(i => i.title === target.title && i.fields.Year === target.year)) return this.note(s, 'rejected by app');
         if (e.cur) this.mutated(e, d, { ...e.cur, director: s.director });
         else this.created(e, d, { title: target.title, year: target.year, director: s.director });
@@ -188,7 +193,7 @@ class Sim {
         const its = this.items(d).sort((x, y) => x.id.localeCompare(y.id));
         const w = its[s.a % its.length], l = its[(s.a + 1 + (s.b % (its.length - 1))) % its.length];
         if (!w || !l || w.id === l.id) return false;
-        app.run(`eloUpdate(state.items[${JSON.stringify(w.id)}], state.items[${JSON.stringify(l.id)}]); recordMatch(${JSON.stringify(CAT)}, ${JSON.stringify(w.id)}, ${JSON.stringify(l.id)});`);
+        app.run(`eloUpdate(state.items[${JSON.stringify(w.id)}], state.items[${JSON.stringify(l.id)}]); recordMatch(${JSON.stringify(CAT)}, ${JSON.stringify(w.id)}, ${JSON.stringify(l.id)}); save();`); // save() like the real vote()
         const we = this.entityOfItem(w), le = this.entityOfItem(l);
         // A vote cast on a copy the model can't attribute, or by a device that may hold a
         // previous incarnation of a deleted film, is outside what the W/L check models.
@@ -245,6 +250,16 @@ class Sim {
       case 'reset': {
         if (!(await this.cloud(d, 'resetSharedBaseline()'))) return this.note(s, 'failed');
         this.resetModel(d);
+        break;
+      }
+      // Closing and reopening the tab: a new page on the same saved data. Nothing about
+      // the library may change (2.21.2: a state started fresh was saved unstamped, and
+      // reloading it re-ran the v1 migrations).
+      case 'reload': {
+        const saved = app.window.localStorage.getItem('ranker-v1');
+        if (!saved) return false;
+        app.close();
+        dv.app = this.openPage(d, saved);
         break;
       }
       default: throw new Error('unknown step ' + s.type);
