@@ -52,6 +52,31 @@ describe('sync on load (2.21.0)', () => {
     assert.equal(db.reads, reads);
   });
 
+  test("this device's own upload isn't reported as pulled when the app reopens (2.21.2)", async () => {
+    // Reported live: add an item, 32 comparisons, Upload, reopen — the toast said it
+    // pulled 1 item and 32 comparisons. The pull re-fetches this device's own docs (the
+    // cursor can't safely move past them), but they bring nothing new.
+    A.run(`(() => { const id = itemKey('Movies', 'Dune'); state.items[id] = { id, cat: 'Movies', title: 'Dune', fields: { Year: '', Director: '' }, elo: 1000, wins: 0, losses: 0, hidden: false, updatedAt: Date.now() }; save(); })()`);
+    for (let n = 0; n < 32; n++) vote(A, n % 2 ? 'Dune' : 'Heat', n % 2 ? 'Thief' : 'Dune');
+    await cloud(A, 'uploadToFirestore()');
+    const fb = fakeFirebase(db);
+    const A2 = page('a@example.com', 'dA', { saved: A.window.localStorage.getItem('ranker-v1'), beforeScript: fb.install });
+    fb.signIn('a@example.com');
+    for (let n = 0; n < 50 && !lastToast(A2).startsWith('Synced'); n++) await new Promise(r => setTimeout(r, 0));
+    assert.equal(lastToast(A2), 'Synced with the cloud — already up to date');
+    assert.deepEqual(rank(A2), rank(A));
+  });
+
+  test('a rename pulled from another device counts as one item, not a deletion', async () => {
+    const heatId = JSON.stringify(A.get("itemKey('Movies', 'Heat')"));
+    A.run(`document.getElementById('sel-cat').value = 'Movies'; onLibCatChange(); renderLibrary(); editItem(${heatId});`);
+    A.window.document.getElementById('edit-primary-' + A.get("itemKey('Movies', 'Heat')")).value = 'Heat II';
+    A.run(`saveItem(${heatId})`);
+    await cloud(A, 'uploadToFirestore()');
+    await syncOnLoad(B);
+    assert.equal(lastToast(B), 'Synced with the cloud — pulled 1 item');
+  });
+
   test('nothing new still gets a toast', async () => {
     assert.equal(await syncOnLoad(B), true);
     assert.equal(lastToast(B), 'Synced with the cloud — already up to date');

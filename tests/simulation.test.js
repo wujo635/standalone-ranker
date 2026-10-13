@@ -45,6 +45,19 @@ describe('simulation findings (minimal reproductions)', () => {
   finding('turning identity off while another device has an unsent edit leaves one copy (2.20.0)', false,
     [{ type: 'identityOn', dev: 0 }, { type: 'adopt', dev: 1 }, { type: 'editYear', dev: 1, eid: 2 }, { type: 'identityOff', dev: 0 }]);
 
+  // Found from a live report (2.21.2): a state started fresh (new device, Adopt, a Pull
+  // that adopts) was saved without its schema stamp, and reloading re-ran the v1
+  // migrations on it — re-keying by title alone and emptying matchLog.
+  finding('reloading after an adopt keeps same-titled items apart (2.21.2)', false,
+    [{ type: 'identityOn', dev: 0 }, { type: 'add', dev: 0, eid: 3 }, { type: 'add', dev: 0, eid: 4 }, { type: 'upload', dev: 0 },
+      { type: 'adopt', dev: 1 }, { type: 'reload', dev: 1 }]);
+
+  finding('votes made after an adopt survive a reload and reach other devices (2.21.2)', false,
+    [{ type: 'reset', dev: 0 }, { type: 'adopt', dev: 1 }, { type: 'vote', dev: 1, a: 3, b: 5 }, { type: 'vote', dev: 1, a: 7, b: 1 }, { type: 'reload', dev: 1 }]);
+
+  finding("a device's own uploaded votes aren't counted again after a reload (2.21.2)", false,
+    [{ type: 'vote', dev: 1, a: 3, b: 5 }, { type: 'upload', dev: 1 }, { type: 'reload', dev: 1 }]);
+
   finding('an Upload from a device without an identity flag keeps the flag in the cloud (2.18.6)', false,
     [{ type: 'identityOn', dev: 2 }, { type: 'upload', dev: 2 }, { type: 'upload', dev: 0 }, { type: 'pull', dev: 1 }]);
 

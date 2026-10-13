@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.21.1';
+const APP_VERSION = '2.21.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -617,6 +617,15 @@ let savedChars = 0;
 let loadFailed = null;
 function save() {
   if (loadFailed) { renderSaveWarning(); return; }
+  // Always saved with its schema stamp (2.21.2). State in memory is always the current
+  // schema, but only migrateData() stamped it, so a state started fresh — a new device,
+  // Clear all data, Adopt, and since 2.19.0 every Pull that adopts a reset — was saved
+  // without one until the next load. That load then ran every migration from v1 on it:
+  // v4 re-keyed items by title alone (same-titled items overwrote each other: the Oct 9
+  // loss of Superman (1978)), emptied matchLog (votes not yet uploaded were never sent;
+  // this device's own uploaded votes were applied again when pulled back) and gave the
+  // device a new id. See migrateData() for data already saved that way.
+  state._meta = { ...(state._meta || {}), appVersion: APP_VERSION, dataSchemaVersion: DATA_SCHEMA_VERSION };
   const json = JSON.stringify(state);
   try {
     localStorage.setItem('ranker-v1', json);
@@ -680,7 +689,14 @@ function discardUnreadableData() {
 // Each block handles one version boundary. Add a new block here whenever
 // DATA_SCHEMA_VERSION is bumped — the migration and the version bump travel together.
 function migrateData(data) {
-  const v = data._meta?.dataSchemaVersion || 1;
+  // No stamp normally means data from before stamping began (pre-1.2, schema v1). But
+  // until 2.21.2, save() didn't stamp a state started fresh (see save()), so a device
+  // can hold current data with no stamp. That data has fields only v6 introduced
+  // (itemDeletes, lastSyncedServerTs), which real v1 data never had — so it's taken as
+  // current and nothing is migrated. Migrating it from v1 is what re-keyed items by
+  // title alone and emptied matchLog.
+  const unstampedCurrent = !data._meta && Array.isArray(data.itemDeletes) && 'lastSyncedServerTs' in data;
+  const v = data._meta?.dataSchemaVersion || (unstampedCurrent ? DATA_SCHEMA_VERSION : 1);
 
   if (v < 2) {
     // v1 -> v2: items had a hardcoded top-level `year` string field.
@@ -4102,6 +4118,15 @@ async function pullFromFirestore(opts) {
     // lastUploadedSeq need nothing: only this device's own matches are ever sent.
     const wasEmpty = !Object.keys(state.items).length && !state.matchLog.length &&
       !state.itemDeletes.length && !state.itemUndeletes.length && !state.catDeletes.length && !state.catUndeletes.length;
+    // What this pull actually changed here, for syncOnLoad()'s toast (2.21.2) — not how
+    // many docs came back. The cursor can't move past this device's own uploads (see
+    // "Known gaps"), so the next pull re-fetches them; counting docs reported them as
+    // pulled ("1 item, 32 comparisons" right after uploading them). Renames count as
+    // the item they changed, not as a deletion.
+    const deleteKey = t => t.itemId + '|' + t.ts;
+    const itemsBefore = new Map(Object.values(state.items).map(i => [i.id, i.updatedAt]));
+    const matchesBefore = new Set(state.matchLog.map(m => m.id));
+    const deletesBefore = new Set(state.itemDeletes.filter(t => !t.renamedTo).map(deleteKey).concat(state.catDeletes.map(t => 'cat|' + t.cat + '|' + t.ts)));
     mergeImport(incoming, { cloudOrigin: true });
     if (wasEmpty) {
       const s = state.settings;
@@ -4119,8 +4144,10 @@ async function pullFromFirestore(opts) {
     state.lastSyncedServerTs = Math.max(state.lastSyncedServerTs || 0, maxSynced);
     lastPullSummary = {
       adopted: adopting,
-      items: itemsSnap.size, matches: matchesSnap.size,
-      deletes: deletesSnap.size + undeletesSnap.size + catDeletesSnap.size + catUndeletesSnap.size,
+      items: Object.values(state.items).filter(i => itemsBefore.get(i.id) !== i.updatedAt).length,
+      matches: state.matchLog.filter(m => !matchesBefore.has(m.id)).length,
+      deletes: state.itemDeletes.filter(t => !t.renamedTo && !deletesBefore.has(deleteKey(t))).length +
+        state.catDeletes.filter(t => !deletesBefore.has('cat|' + t.cat + '|' + t.ts)).length,
     };
     if (adopting) {
       hiddenIds.forEach(id => { if (state.items[id]) state.items[id].hidden = true; });
