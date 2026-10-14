@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.23.0` |
+| App version | `2.24.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -483,7 +483,7 @@ All items start at 1000. The leaderboard's score bar is normalized: top item 100
 
 ELO and W/L are hidden while ranking (to avoid anchoring) and shown in the Library and Leaderboard. The mode is saved per device in `settings.rankMode` (2.16.1). All modes draw from `itemsForCat()` — the active filters applied, hidden items excluded.
 
-- **1 vs 1** (`loadPair()`, `vote()`): two items, pick one — one ELO update. Keyboard voting via `handleRankVoteKey()`: `←`/`1` and `→`/`2`, only when the Rank tab is active in 1v1 mode and focus isn't in a text field. `standardSessionVotes` counts votes since the category was last selected (in memory only).
+- **1 vs 1** (`loadPair()`, `vote()`): two items, pick one — one ELO update. Keyboard voting via `handleRankVoteKey()`: `←`/`1` and `→`/`2`, only when the Rank tab is active in 1v1 mode and focus isn't in a text field. `standardSessionVotes` counts votes since the category was last selected (in memory only). When the category's Library web search is on (see Library → Web search), each card also shows a "🔎 YouTube"/"🔎 Google" link (`webSearchLink()`, 2.24.0); clicking it, or Enter/Space on it, opens the search without voting — the card's own Enter/Space handler only acts when the card itself is focused, and `delegate()` lets the plain link through (see Event wiring).
 - **Podium** (`loadPodium()`, `submitPodium()`): 3–5 items; assign 🥇🥈🥉. Each placed item beats every lower-placed and unplaced item; unplaced items aren't compared. Up to 9 updates per round.
 - **Tier** (`loadTier()`, `submitTier()`): 3–30 items (chosen per session) sorted into S/A/B/C/D; every cross-tier pair is an update (up to 45 for 10 items). The pool (`startTierSession()`) takes never-ranked items first (up to half the session), fills the rest from ranked items — a random ELO window of them with Smart pairing — and tops up from whatever is left, so a session always has exactly the size asked for (2.17.3). No skip button.
 
@@ -516,7 +516,7 @@ The History tab (`renderHistory()`) shows the last 50 rankings; `undoRanking()` 
 - **Arguments:** `data-args` holds a JSON array — always built with `argsAttr(...args)`, which escapes it for the attribute, so user text (a category name with quotes or apostrophes) arrives intact. `data-pass="el" | "checked" | "event"` passes the element, its `checked` state, or the event instead; it's a separate attribute so no user-supplied argument can ever be mistaken for one of these.
 - **Lookup by name at event time** (`window[name]`) keeps markup and code decoupled — and lets the click tests stub a function by name.
 - **Only the innermost element** carrying the attribute acts, so a button inside a clickable panel header (the filter panel's ✕ Clear) doesn't also toggle the header — no `stopPropagation()` needed.
-- A link (`<a>`) with a `data-action` never navigates; `data-keep-focus` makes mousedown leave focus where it is (the search ✕ button).
+- A link (`<a>`) with a `data-action` never navigates, and a plain link (`href`, no action) inside an element with an action just follows the link without running the outer action (2.24.0: the 🔎 search link on a 1v1 card doesn't vote); `data-keep-focus` makes mousedown leave focus where it is (the search ✕ button).
 - Inline code that used to be several statements lives in small named functions: `onLibCatChange()`, `onRankCatChange()`, `toggleFilterPanel()`, `selectLBCat()`, `showAllLBRows()`, `toggleDeletedItemsShowAll()`.
 - **Adding a control:** give it the right attribute and `argsAttr(...)`, and make sure the function is a top-level `function` declaration (so it's on `window`). Add a test to `tests/ui.test.js` that finds it by id, text, aria-label, or title.
 
@@ -605,7 +605,7 @@ One line each; the sections above have the details.
 | Function | What it does |
 |---|---|
 | `renderLibrary()` / `filteredLibraryList()` / `libGoToPage(p)` / `clearLibSearch()` | Library list, its matching set, paging, search clear |
-| `cycleLibWebSearch()` / `webSearchFor(cat)` / `webSearchQuery(item)` | Library per-category web-search toggle (Off → YouTube → Google), the category's engine, and a row's search text (2.23.0) |
+| `cycleLibWebSearch()` / `webSearchFor(cat)` / `webSearchQuery(item)` / `webSearchLink(item, cls, text)` | Library per-category web-search toggle (Off → YouTube → Google), the category's engine, an item's search text (2.23.0), and its 🔎 link markup, shared by Library rows and 1v1 cards (2.24.0) |
 | `itemsForCat(cat)` / `libItems()` | Rank/Leaderboard pool (filtered, no hidden) / Library pool |
 | `sortedCats(cats)` / `rebuildCatSelects()` | Categories in display (alphabetical) order / refill the Library and Rank dropdowns |
 | `getFilteredItems(cat, items, filters)` / `filterNarrows(f)` / `activeFilterKey(cat)` | Apply filters / is a filter active / fingerprint of active filters |
