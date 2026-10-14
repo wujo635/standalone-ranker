@@ -156,7 +156,7 @@ Japanese EP, or an English "Bad Boy" on a later EP.
   same title would land on the same item.
 
 ### 5. Check against the existing library (if available)
-If `imports/songs-library.csv` exists, it's the user's own "Export category as CSV" of Songs.
+If `imports/songs.csv` exists, it's the user's own "Export category as CSV" of Songs.
 Leave out songs already in it, matching on the normalized Title + Artist, and list them as
 "already in library".
 
