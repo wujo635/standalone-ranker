@@ -480,7 +480,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.22.0';
+const APP_VERSION = '2.22.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3567,42 +3567,71 @@ function mergeImport(incoming, opts) {
   return true;
 }
 
+// Whether this device holds nothing yet: no items, matches or tombstones. That's after
+// Clear all data or Adopt fresh baseline's clear, or on a brand-new device.
+function isEmptyLibrary() {
+  return !Object.keys(state.items).length && !state.matchLog.length &&
+    !state.itemDeletes.length && !state.itemUndeletes.length && !state.catDeletes.length && !state.catUndeletes.length;
+}
+
+// An empty library's built-in categories hold CAT_DEFAULTS (freshState()), not fields
+// anyone chose, so the incoming field list should be taken as-is for them. Call before
+// merging into an empty library: a pull (2.22.0) or a file import (2.22.1). The additive
+// merge kept every default field and its default settings, so a removed built-in field
+// (Songs' "Year", real report) came back on any device that adopted a reset, started
+// fresh, or was cleared and restored from a backup, and a filterable flag turned off came
+// back on; that device's next Upload or Reset then put them back in the cloud. Only
+// fields still exactly the defaults are dropped; a category this device edited merges as
+// before, and a built-in category the incoming data lacks keeps its defaults.
+function dropUntouchedDefaultSchemas(incomingSchema) {
+  Object.keys(incomingSchema || {}).forEach(c => {
+    if (CAT_DEFAULTS[c] && JSON.stringify(state.schema[c]) === JSON.stringify(CAT_DEFAULTS[c])) delete state.schema[c];
+  });
+}
+
 function importData(e) {
   const file = e.target.files[0]; if (!file) return;
   const r = new FileReader();
   r.onload = ev => {
     try {
-      const d = JSON.parse(ev.target.result);
-      // A recovery baseline (see exportRecoveryBaseline()) has its matchLog compacted
-      // away to keep file size down, and its tombstones dropped entirely (a reset means
-      // past deletions are no longer remembered going forward — see
-      // resetSharedBaseline()) — its items' ratings are only trustworthy as a COMPLETE
-      // replacement for an empty library, not as an update merged onto one that already
-      // has some of these items: unionItemsAndSchema() only ever adopts an incoming
-      // rating for an item the receiving device has no copy of at all, and with no
-      // matchLog there's no delta left to apply either, so any overlapping item would
-      // silently keep its old rating instead of picking up whatever changed upstream —
-      // and with no tombstones, an item this device already knows was deleted won't get
-      // re-deleted by this import either.
-      if (d._meta && d._meta.matchLogCompacted && Object.keys(state.items).length > 0) {
-        const proceed = confirm(
-          "This file is a compacted recovery baseline — its match-by-match history was " +
-          "collapsed into final ratings and past deletions were dropped, to keep the file " +
-          "small and start clean. Importing it into a library that already has items can " +
-          "silently lose ranking updates for anything that already exists here (there's no " +
-          "per-match history left to apply, and existing items don't adopt an incoming " +
-          "rating directly), and won't re-apply any deletions either.\n\n" +
-          "Only continue if this device was just cleared (Data tab → Clear all data) " +
-          "before this import.\n\nContinue anyway?"
-        );
-        if (!proceed) { toast('Import cancelled'); return; }
-      }
-      const migrated = migrateData(d);
-      mergeImport(migrated);
+      importPayload(JSON.parse(ev.target.result));
     } catch(err) { toast('Invalid JSON file: ' + err.message); }
   };
   r.readAsText(file);
   e.target.value = '';
+}
+
+// The import once the file is read (split out of importData() in 2.22.1, so tests run
+// the real import path without a file picker).
+function importPayload(d) {
+  // A recovery baseline (see exportRecoveryBaseline()) has its matchLog compacted
+  // away to keep file size down, and its tombstones dropped entirely (a reset means
+  // past deletions are no longer remembered going forward — see
+  // resetSharedBaseline()) — its items' ratings are only trustworthy as a COMPLETE
+  // replacement for an empty library, not as an update merged onto one that already
+  // has some of these items: unionItemsAndSchema() only ever adopts an incoming
+  // rating for an item the receiving device has no copy of at all, and with no
+  // matchLog there's no delta left to apply either, so any overlapping item would
+  // silently keep its old rating instead of picking up whatever changed upstream —
+  // and with no tombstones, an item this device already knows was deleted won't get
+  // re-deleted by this import either.
+  if (d._meta && d._meta.matchLogCompacted && Object.keys(state.items).length > 0) {
+    const proceed = confirm(
+      "This file is a compacted recovery baseline — its match-by-match history was " +
+      "collapsed into final ratings and past deletions were dropped, to keep the file " +
+      "small and start clean. Importing it into a library that already has items can " +
+      "silently lose ranking updates for anything that already exists here (there's no " +
+      "per-match history left to apply, and existing items don't adopt an incoming " +
+      "rating directly), and won't re-apply any deletions either.\n\n" +
+      "Only continue if this device was just cleared (Data tab → Clear all data) " +
+      "before this import.\n\nContinue anyway?"
+    );
+    if (!proceed) { toast('Import cancelled'); return; }
+  }
+  const empty = isEmptyLibrary();
+  const migrated = migrateData(d);
+  if (empty) dropUntouchedDefaultSchemas(migrated.schema);
+  mergeImport(migrated);
 }
 
 // Extracted from clearAllData() so adoptFreshBaseline() can wipe local state without
@@ -4131,8 +4160,7 @@ async function pullFromFirestore(opts) {
     // device now has is already in the cloud, so the cursors move past it (2.18.3). The
     // values are the same ones that redundant Upload used to leave them at. matchSeq/
     // lastUploadedSeq need nothing: only this device's own matches are ever sent.
-    const wasEmpty = !Object.keys(state.items).length && !state.matchLog.length &&
-      !state.itemDeletes.length && !state.itemUndeletes.length && !state.catDeletes.length && !state.catUndeletes.length;
+    const wasEmpty = isEmptyLibrary();
     // What this pull actually changed here, for syncOnLoad()'s toast (2.21.2) — not how
     // many docs came back. The cursor can't move past this device's own uploads (see
     // "Known gaps"), so the next pull re-fetches them; counting docs reported them as
@@ -4142,17 +4170,7 @@ async function pullFromFirestore(opts) {
     const itemsBefore = new Map(Object.values(state.items).map(i => [i.id, i.updatedAt]));
     const matchesBefore = new Set(state.matchLog.map(m => m.id));
     const deletesBefore = new Set(state.itemDeletes.filter(t => !t.renamedTo).map(deleteKey).concat(state.catDeletes.map(t => 'cat|' + t.cat + '|' + t.ts)));
-    // An empty library's built-in categories hold CAT_DEFAULTS (freshState()), not fields
-    // anyone chose, so take the cloud's field list for them as-is (2.22.0). The additive
-    // merge kept every default field, so a removed built-in field (Songs' "Year", real
-    // report) came back on any device that adopted a reset or started fresh, and that
-    // device's next Upload put it back in the cloud. Only fields still exactly the
-    // defaults are dropped; a category this device edited merges as before.
-    if (wasEmpty) {
-      Object.keys(incoming.schema).forEach(c => {
-        if (CAT_DEFAULTS[c] && JSON.stringify(state.schema[c]) === JSON.stringify(CAT_DEFAULTS[c])) delete state.schema[c];
-      });
-    }
+    if (wasEmpty) dropUntouchedDefaultSchemas(incoming.schema);
     mergeImport(incoming, { cloudOrigin: true });
     if (wasEmpty) {
       const s = state.settings;
