@@ -10,9 +10,16 @@
 //   node songs.mjs tracks <releaseId>         track list (+ language, date; per-track sung `lyrics` language) of one release
 //   node songs.mjs genre "<Wikipedia title>"  genres from the page's infobox
 //   node songs.mjs csv <rows.json> <out.csv>  write a preload CSV from [{Title, Artist, ...}]
+//   node songs.mjs simplify "<text>"         the text as the csv step writes it (Simplified Chinese)
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import * as OpenCC from 'opencc-js';
+
+// The user wants every Chinese character in Simplified, Japanese kanji and Korean hanja
+// included (2026-10-13). OpenCC's standard-Traditional preset ('t'), not Taiwan's ('tw'),
+// which over-converts by phrase (著 -> 着). Kana, hangul and Latin pass through unchanged.
+const toSimplified = OpenCC.Converter({ from: 't', to: 'cn' });
 
 const UA = 'standalone-ranker-populate-songs/1.0 ( https://github.com/wujo635/standalone-ranker )';
 const MB = 'https://musicbrainz.org/ws/2/';
@@ -126,6 +133,10 @@ const commands = {
     return { genres: [...new Set(genres)] };
   },
 
+  simplify(text) {
+    return toSimplified(String(text ?? ''));
+  },
+
   csv(rowsPath, outPath) {
     const rows = JSON.parse(readFileSync(rowsPath, 'utf8'));
     // The app's splitCSVLine() toggles on every `"` and has no `""` escape, so a literal
@@ -133,7 +144,7 @@ const commands = {
     // Curly apostrophes and Unicode hyphens (MusicBrainz style) become ASCII, so a title
     // matches what a user would type — the title is part of the item id.
     const cell = v => {
-      const s = String(v ?? '').replace(/[‘’]/g, "'").replace(/[‐‑]/g, '-').replace(/"/g, '”').replace(/[\r\n]+/g, ' ').trim();
+      const s = toSimplified(String(v ?? '')).replace(/[‘’]/g, "'").replace(/[‐‑]/g, '-').replace(/"/g, '”').replace(/[\r\n]+/g, ' ').trim();
       // parsePreloadCSV() treats any line starting with `#` as a directive, so a leading-`#`
       // title ("#Cookie Jar") must be quoted or the row is silently dropped.
       return /,/.test(s) || s.startsWith('#') ? `"${s}"` : s;
@@ -163,7 +174,7 @@ const commands = {
 
 const [cmd, ...args] = process.argv.slice(2);
 if (!commands[cmd]) {
-  console.error('Usage: node songs.mjs artist|albums|editions|tracks|genre|csv ...');
+  console.error('Usage: node songs.mjs artist|albums|editions|tracks|genre|simplify|csv ...');
   process.exit(1);
 }
 try {

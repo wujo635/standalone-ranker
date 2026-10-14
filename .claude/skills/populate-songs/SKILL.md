@@ -24,7 +24,8 @@ node .claude/skills/populate-songs/songs.mjs <command> ...
 | `editions <releaseGroupId>` | official releases of one album: date, country, edition name, track count |
 | `tracks <releaseId>` | album title, first-release year, language, and the track list. Each track has `lyrics` (the sung language from its linked work; `Instrumental` when it has no lyrics) when MusicBrainz knows it, and `instrumentalVersion: true` for an instrumental version of a vocal song |
 | `genre "<Wikipedia page title>"` | genres from the infobox (follow `redirect` if returned) |
-| `csv <rows.json> <out.csv>` | writes the preload CSV (handles quoting, curly quotes, header/directives) |
+| `simplify "<text>"` | the text in Simplified Chinese, exactly as `csv` writes it |
+| `csv <rows.json> <out.csv>` | writes the preload CSV (handles quoting, curly quotes, header/directives) and converts every Chinese character to **Simplified** |
 
 ## Workflow
 
@@ -32,7 +33,9 @@ node .claude/skills/populate-songs/songs.mjs <command> ...
 `artist "<name>"`. If the top result isn't clearly right (several plausible names, low score,
 same-name artists), ask the user to choose, showing country and disambiguation.
 If it returns nothing, the artist is probably filed under their native-script name: Jay Chou is
-`周杰倫`. Retry with that name if you know it.
+`周杰倫` (MusicBrainz names are usually Traditional). Retry with that name if you know it.
+
+**Every Chinese character the user sees is Simplified** (the user's settled preference, 2026-10-13): song titles, artists, albums and featured names, including Japanese kanji and Korean hanja (`東方神起` → `东方神起`, `LOVE YOURSELF 轉 'Tear'` → `转`). Kana, hangul and Latin are untouched. Look things up in whatever script the source uses, and write rows with the source's text: the `csv` step converts it all (OpenCC, standard Traditional → Simplified). In the preview, show the Simplified form; `simplify` gives it. A few characters stay as they are because they're also valid Simplified or have no Simplified form (`妳`, `祇`, Japanese `呪`).
 
 ### 2. Pick releases
 `albums <artistId>`.
@@ -103,7 +106,7 @@ For every selected album or EP:
 
 | Field | Rule |
 |---|---|
-| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. **Non-Latin titles use the bilingual form `<original title> (<English title>)`**, as MusicBrainz usually lists them: `피카부 (Peek-a-Boo)`, `빨간 맛 (Red Flavor)`. This is the user's settled preference, so don't ask. If MusicBrainz gives only the English title (e.g. Red Velvet's "Ice Cream Cake", "Bad Boy"), keep that unchanged. Don't add an original-script title MusicBrainz doesn't list. **If MusicBrainz gives only the original title** (common for Mandopop, e.g. `晴天`), take the English from the album's English Wikipedia track list (`titleN` is the English, `noteN` the original), e.g. `晴天 (Sunny Day)`. A name the user supplies also counts. Never translate a title yourself. With no source, keep the original title alone and flag it. **Featured artists go in the title as `<Title> (ft. <Artist>)`**, after any English part, e.g. `千里之外 (Far Away) (ft. Fei Yu-ching)`. Join several featured artists with ` & `. Take them from the track's MusicBrainz artist credit, or from a "feat." note in Wikipedia's track list. MusicBrainz often omits them. **Write each featured artist's native-script name**, as MusicBrainz names the artist, e.g. `(ft. 費玉清)`, not `(ft. Fei Yu-ching)`. Wikipedia usually gives only an English name, so look it up: `artist "<English name>"` matches aliases. For a Taiwanese release, use the Traditional Chinese form, to match the titles. One person gets one spelling across the run; Wikipedia's "Lara Liang" and "Lara Veronin" are both `梁心頤`. If MusicBrainz has no native name, use the English one and flag it. | The title is part of the id, so a song already in the library under a different title form isn't matched: it's added as a new item. Flag any such song in the preview (see step 5). |
+| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. **Non-Latin titles use the bilingual form `<original title> (<English title>)`**, as MusicBrainz usually lists them: `피카부 (Peek-a-Boo)`, `빨간 맛 (Red Flavor)`. This is the user's settled preference, so don't ask. If MusicBrainz gives only the English title (e.g. Red Velvet's "Ice Cream Cake", "Bad Boy"), keep that unchanged. Don't add an original-script title MusicBrainz doesn't list. **If MusicBrainz gives only the original title** (common for Mandopop, e.g. `晴天`), take the English from the album's English Wikipedia track list (`titleN` is the English, `noteN` the original), e.g. `晴天 (Sunny Day)`. A name the user supplies also counts. Never translate a title yourself. With no source, keep the original title alone and flag it. **Featured artists go in the title as `<Title> (ft. <Artist>)`**, after any English part, e.g. `千里之外 (Far Away) (ft. Fei Yu-ching)`. Join several featured artists with ` & `. Take them from the track's MusicBrainz artist credit, or from a "feat." note in Wikipedia's track list. MusicBrainz often omits them. **Write each featured artist's native-script name**, as MusicBrainz names the artist, e.g. `(ft. 費玉清)`, not `(ft. Fei Yu-ching)`. Wikipedia usually gives only an English name, so look it up: `artist "<English name>"` matches aliases. One person gets one spelling across the run; Wikipedia's "Lara Liang" and "Lara Veronin" are both `梁心頤`. If MusicBrainz has no native name, use the English one and flag it. | The title is part of the id, so a song already in the library under a different title form isn't matched: it's added as a new item. Flag any such song in the preview (see step 5). |
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests out of Artist; they go in the Title (see above). That keeps the Artist filter clean. A track-level duet credit, like `周杰倫 & 費玉清`, counts as a featured guest. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. **A non-Latin artist name uses `<native name> (<English name>)`**, e.g. `周杰倫 (Jay Chou)`. Artist is part of the id once it's an identity field, so if the library already has this artist, reuse its exact spelling (step 5). |
 | Album | The release-group title (the original album name). Use the same bilingual form as Title when the album name isn't in the Latin alphabet: `七里香 (Common Jasmine Orange)`, with the English name from the album's Wikipedia infobox `name`. Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
@@ -176,12 +179,17 @@ The id includes the Artist value exactly, so "The Backstreet Boys" vs "Backstree
 "Red Velvet × aespa" vs "Red Velvet & aespa", gives a *new* item instead of updating the
 existing one.
 - Compare each Artist value in the CSV with the library's Artist values. Normalize first:
-  case-insensitive, ignore a leading "The", and treat `×`, `x`, `&`, `and` and `,` as the same
+  Simplified Chinese on both sides (`simplify`; a library exported before it was converted may
+  still hold Traditional, e.g. `周杰倫 (Jay Chou)`), case-insensitive, ignore a leading "The", and treat `×`, `x`, `&`, `and` and `,` as the same
   separator.
 - A normalized match that isn't an exact match is a spelling difference. Use the library's
   spelling in the CSV, and list each substitution in the preview.
 - Also flag any CSV row whose normalized Title + Artist matches a library row while the exact
   values differ. That row would be added as a near-duplicate.
+- **A Traditional/Simplified difference is a spelling difference too.** Compare titles and
+  albums after `simplify` on both sides. A library song still in Traditional is the same song
+  as the CSV's Simplified row: leave it out of the CSV and list it as needing a rename in the
+  app (which keeps its rating), not as a new song.
 - **The same song with a different title form is a near-duplicate too.** For example, the
   library has `Peek-a-Boo` and the CSV has `피카부 (Peek-a-Boo)`. Treat the English part in
   parentheses as the title when comparing. Leave such rows out of the CSV and list them.
