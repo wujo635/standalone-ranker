@@ -74,6 +74,8 @@
   button.danger:hover { background: var(--danger-bg); }
   button.ghost { border-color: transparent; background: none; color: var(--text-muted); }
   button.ghost:hover { color: var(--text-primary); background: var(--surface-2); }
+  .web-search-link { border-radius: var(--radius); color: var(--text-muted); text-decoration: none; line-height: 1.4; transition: background .15s; }
+  .web-search-link:hover { color: var(--text-primary); background: var(--surface-2); }
 
   .row { display: flex; align-items: center; gap: 8px; }
   .flex1 { flex: 1; min-width: 0; }
@@ -253,6 +255,7 @@
         <select id="sel-cat" data-change="onLibCatChange"></select>
         <button data-action="openNewCatModal">+ New category</button>
         <button class="ghost btn-sm" data-action="openSchemaEditor" title="Edit fields">⚙ Fields</button>
+        <button class="ghost btn-sm" id="lib-websearch-btn" data-action="cycleLibWebSearch" title="Web search link on each item: Off → YouTube → Google (per category, this device only)">🔎 Search: Off</button>
       </div>
       <div class="section-label">Add item</div>
       <div id="add-form"></div>
@@ -480,7 +483,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.22.1';
+const APP_VERSION = '2.23.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1695,6 +1698,44 @@ function libGoToPage(p) {
   renderLibrary();
 }
 
+// Per-category web-search link on Library rows (2.23.0). A per-device UI preference, not
+// part of `state` — it isn't synced or exported, and lives in its own localStorage key.
+// The query is the title plus the values of identity and required fields, in schema
+// order, space-separated (e.g. "Paranoid Android Radiohead" for Songs, whose Artist is
+// required) — the fields that pin down which item this is; optional extras are left out.
+const WEB_SEARCH_KEY = 'ranker-websearch';
+const WEB_SEARCH_ENGINES = {
+  youtube: { label: 'YouTube', url: q => 'https://www.youtube.com/results?search_query=' + encodeURIComponent(q) },
+  google:  { label: 'Google',  url: q => 'https://www.google.com/search?q=' + encodeURIComponent(q) },
+};
+const WEB_SEARCH_CYCLE = ['', 'youtube', 'google'];
+// In-memory copy, so the toggle still works for this session where storage is unavailable.
+let webSearchMem = null;
+function webSearchPrefs() {
+  if (!webSearchMem) {
+    try { webSearchMem = JSON.parse(localStorage.getItem(WEB_SEARCH_KEY)) || {}; } catch(e) { webSearchMem = {}; }
+  }
+  return webSearchMem;
+}
+function webSearchFor(cat) {
+  const e = webSearchPrefs()[cat];
+  return WEB_SEARCH_ENGINES[e] ? e : '';
+}
+function cycleLibWebSearch() {
+  const cat = libCat();
+  if (!cat) return;
+  const prefs = webSearchPrefs();
+  const next = WEB_SEARCH_CYCLE[(WEB_SEARCH_CYCLE.indexOf(webSearchFor(cat)) + 1) % WEB_SEARCH_CYCLE.length];
+  if (next) prefs[cat] = next; else delete prefs[cat];
+  try { localStorage.setItem(WEB_SEARCH_KEY, JSON.stringify(prefs)); } catch(e) {}
+  renderLibrary();
+}
+function webSearchQuery(item) {
+  const keyFields = extraFields(item.cat).filter(f => f.identity || f.required);
+  return [item.title, ...keyFields.map(f => (item.fields || {})[f.name])]
+    .map(v => String(v || '').trim()).filter(Boolean).join(' ');
+}
+
 function clearLibSearch() {
   document.getElementById('lib-search').value = '';
   renderLibrary();
@@ -1907,6 +1948,9 @@ function renderLibrary() {
 
   const searchClearBtn = document.getElementById('lib-search-clear');
   if (searchClearBtn) searchClearBtn.style.display = query ? '' : 'none';
+  const engine = webSearchFor(cat);
+  const webSearchBtn = document.getElementById('lib-websearch-btn');
+  if (webSearchBtn) webSearchBtn.textContent = '🔎 Search: ' + (engine ? WEB_SEARCH_ENGINES[engine].label : 'Off');
 
   // Render filter UI
   renderFilterUI(cat);
@@ -1961,6 +2005,7 @@ function renderLibrary() {
         ${editForm}
       </div>
       ${!isEditing ? `<span class="item-elo">ELO ${Math.round(i.elo)}</span>` : ''}
+      ${engine && !isEditing ? `<a class="btn-sm web-search-link" href="${esc(WEB_SEARCH_ENGINES[engine].url(webSearchQuery(i)))}" target="_blank" rel="noopener noreferrer" aria-label="Search ${WEB_SEARCH_ENGINES[engine].label} for ${esc(i.title)}" title="Search ${WEB_SEARCH_ENGINES[engine].label}: ${esc(webSearchQuery(i))}">🔎</a>` : ''}
       <button class="btn-sm ghost" data-action="toggleHidden"${argsAttr(i.id)} aria-label="${i.hidden?'Unhide':'Hide'} ${esc(i.title)}" title="${i.hidden?'Unhide (include in ranking)':'Hide (exclude from ranking)'}">${i.hidden ? '\u25c9' : '\u25ce'}</button>
       <button class="btn-sm ghost" data-action="editItem"${argsAttr(i.id)} aria-label="Edit ${esc(i.title)}" title="Edit">\u270e</button>
       <button class="btn-sm ghost" data-action="deleteItem"${argsAttr(i.id)} aria-label="Remove ${esc(i.title)}" title="Remove">\u2715</button>
