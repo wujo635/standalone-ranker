@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.22.1` |
+| App version | `2.23.0` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -541,6 +541,7 @@ Category pickers — the Library and Rank dropdowns (`rebuildCatSelects()`) and 
 - **Search** (`#lib-search`): case-insensitive substring match on the title and every field value; cleared, along with filters, when the category changes. A "✕" button (`#lib-search-clear`, `clearLibSearch()`) shows while there's text. Two CSS details keep that button from moving under the cursor: `html { overflow-y: scroll; }` reserves the scrollbar gutter so the page width never changes, and the button is centred with `margin: auto` rather than `transform` (which `button:active`'s press effect would override).
 - **Pagination** (2.6.0): `renderLibrary()` renders one `LIB_PAGE_SIZE` (50) page of `filteredLibraryList()` (search + filters over the whole category), with Prev/Next. A fingerprint of `(cat, query, filterState[cat])` resets to page 1 when it changes; the page is clamped when the list shrinks.
 - **Hiding** (`hidden`): the ◎/◉ button (`toggleHidden()`) excludes an item from ranking and the Leaderboard (`itemsForCat()`), while the Library (`libItems()`) keeps showing it, dimmed. The bulk toolbar applies `bulkSetHidden()` to every item in `filteredLibraryList()`, across all pages. `hidden` is a per-device preference: stripped from exports, forced `false` on import, never synced.
+- **Web search** (2.23.0): the "🔎 Search" button next to ⚙ Fields (`cycleLibWebSearch()`) cycles the current category through Off → YouTube → Google. When on, each row gets a 🔎 link (a real `<a target="_blank">`, so middle-click works too) searching for `webSearchQuery(item)`: the title plus the values of identity and required fields, in schema order, space-separated (Songs: "Title Artist"); optional fields are left out. The choice is a per-device UI preference in its own localStorage key, `ranker-websearch` (`{ [cat]: "youtube" | "google" }`), not part of `state`: never synced, exported, or cleared by Clear all data. An in-memory copy keeps the toggle working for the session where storage is blocked.
 - **Inline editing:** `editItem()` expands a row; `saveItem()` validates, normalizes, and saves. Saving with nothing changed toasts "No changes" without bumping `updatedAt`; a title/identity change is a rename (see "Item renames").
 
 ### Leaderboard
@@ -604,6 +605,7 @@ One line each; the sections above have the details.
 | Function | What it does |
 |---|---|
 | `renderLibrary()` / `filteredLibraryList()` / `libGoToPage(p)` / `clearLibSearch()` | Library list, its matching set, paging, search clear |
+| `cycleLibWebSearch()` / `webSearchFor(cat)` / `webSearchQuery(item)` | Library per-category web-search toggle (Off → YouTube → Google), the category's engine, and a row's search text (2.23.0) |
 | `itemsForCat(cat)` / `libItems()` | Rank/Leaderboard pool (filtered, no hidden) / Library pool |
 | `sortedCats(cats)` / `rebuildCatSelects()` | Categories in display (alphabetical) order / refill the Library and Rank dropdowns |
 | `getFilteredItems(cat, items, filters)` / `filterNarrows(f)` / `activeFilterKey(cat)` | Apply filters / is a filter active / fingerprint of active filters |

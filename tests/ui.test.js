@@ -205,6 +205,40 @@ describe('Library', () => {
     assert.deepEqual(save, [[key('Heat')], [key('Heat')], [key('Heat')]]);
     assert.deepEqual(edit, [[key('Heat')], [key('Heat')], [key('Heat')]]);
   });
+
+  test('"🔎 Search" cycles Off → YouTube → Google → Off per category, adding a new-tab link to each row', () => {
+    change($('#sel-cat'), 'Songs');
+    const btn = $('#lib-websearch-btn');
+    const link = () => $('#lib-list a[aria-label$="for Paranoid Android"]');
+    assert.equal(btn.textContent, '🔎 Search: Off');
+    assert.equal(link(), null);
+
+    click(btn);
+    assert.equal(btn.textContent, '🔎 Search: YouTube');
+    // Title + required Artist; optional Genre is left out.
+    assert.equal(link().href, 'https://www.youtube.com/results?search_query=Paranoid%20Android%20Radiohead');
+    assert.equal(link().target, '_blank');
+
+    click(btn);
+    assert.equal(btn.textContent, '🔎 Search: Google');
+    assert.equal(link().href, 'https://www.google.com/search?q=Paranoid%20Android%20Radiohead');
+
+    // The setting is per category: Movies is still off.
+    change($('#sel-cat'), 'Movies');
+    assert.equal(btn.textContent, '🔎 Search: Off');
+    assert.equal($('#lib-list a.web-search-link'), null);
+    change($('#sel-cat'), 'Songs');
+    click(btn);
+    assert.equal(btn.textContent, '🔎 Search: Off');
+    assert.equal(link(), null);
+  });
+
+  test('the web-search setting is a per-device preference kept outside the saved state', () => {
+    change($('#sel-cat'), 'Songs');
+    click($('#lib-websearch-btn'));
+    assert.deepEqual(JSON.parse(app.window.localStorage.getItem('ranker-websearch')), { Songs: 'youtube' });
+    assert.ok(!app.window.localStorage.getItem('ranker-v1')?.includes('youtube'));
+  });
 });
 
 // --- filter panel ------------------------------------------------------------------
