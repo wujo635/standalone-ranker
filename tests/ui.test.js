@@ -389,6 +389,32 @@ describe('Schema Editor', () => {
 // --- Rank --------------------------------------------------------------------------
 
 describe('Rank', () => {
+  test('with the category\'s web search on, each 1v1 card has a search link that opens without voting', () => {
+    openRank('Songs');
+    assert.equal($$('#rank-pair a.web-search-link').length, 0, 'off by default');
+
+    click(tab('Library'));
+    change($('#sel-cat'), 'Songs');
+    click($('#lib-websearch-btn')); // → YouTube
+    openRank('Songs');
+    const links = $$('#rank-pair .vs-card a.web-search-link');
+    assert.equal(links.length, 2);
+    assert.deepEqual(links.map(a => a.textContent).sort(), ['🔎 YouTube', '🔎 YouTube']);
+    assert.ok(links.every(a => a.href.startsWith('https://www.youtube.com/results?search_query=') && a.target === '_blank'));
+    assert.ok(links.some(a => a.href.endsWith('So%20What%20Miles%20Davis')));
+
+    const vote = spy('vote');
+    const clickEv = new app.window.MouseEvent('click', { bubbles: true, cancelable: true });
+    links[0].dispatchEvent(clickEv);
+    assert.equal(clickEv.defaultPrevented, false, 'the link still navigates');
+    press(links[0], 'Enter');
+    press(links[0], ' ');
+    assert.equal(vote.length, 0, 'neither clicking nor Enter/Space on the link votes');
+    click(links[0].closest('.vs-card'));
+    press(links[0].closest('.vs-card'), 'Enter');
+    assert.equal(vote.length, 2, 'the card itself still votes');
+  });
+
   test('changing the category resets the session counter and reloads the view', () => {
     click(tab('Rank'));
     app.run('standardSessionVotes = 5');
