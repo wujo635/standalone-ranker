@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.24.1` |
+| App version | `2.24.2` |
 | Data schema version | `6` |
 | localStorage key | `ranker-v1` |
 
@@ -262,6 +262,7 @@ Both sync transports — file export/import and Firestore — end in the same fu
    - an id this device doesn't have is added, with `elo`/`wins`/`losses` defaulting to 1000/0/0 when the payload carries none (Firestore item docs never do), `hidden: false`, and skipped if tombstoned (itself or its category);
    - an id both sides have takes the incoming `title` and `fields` if its `updatedAt` is newer (last-write-wins on the whole edit). Ratings are never taken from the incoming side for an existing item.
    - Items created here *with* a rating in the payload are returned as `freshlySeeded`.
+   - Two copies in one payload that land on the same id (e.g. under an old and a new id) merge into one: title/fields by `updatedAt` as above, and — only when the item was freshly seeded by this payload — the rating of the copy with more comparisons (`wins + losses`; a tie keeps the first). Before 2.24.2 the first copy's rating always won, so the result depended on the file's key order.
    - On a Firestore pull, `routeStoredRatings()` first decides where each reset-stored rating belongs now (2.18.1) — see "Resetting the shared baseline".
 5. **Matches.** Incoming matches not already in the local `matchLog` have their ids moved with step 4's items and resolved through renames, then `applyNewMatches()` sorts them by `(ts, seq)` and applies each onto the live ratings with the same `eloUpdate()` a real vote uses. All of them are recorded in `matchLog`.
 

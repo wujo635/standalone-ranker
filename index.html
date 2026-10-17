@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.24.1';
+const APP_VERSION = '2.24.2';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3370,7 +3370,17 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats, cloudOrigin
       // On a cloud pull, remember which version the cloud has, so Upload doesn't send it
       // back (2.18.7). Kept only on this device; exports strip it (itemsForExport()).
       if (cloudOrigin) state.items[inc.id].cloudUpdatedAt = inc.updatedAt;
-    } else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
+      return;
+    }
+    // A second copy of an item this same payload just seeded — e.g. a file holding it
+    // under an old and a new id, both mapped onto one here (2.24.2). Its rating counts
+    // only between the two copies (a local item still never adopts one): the copy with
+    // more comparisons wins, so the result no longer depends on which came first.
+    if (freshlySeeded.has(inc.id) && inc.elo !== undefined) {
+      const games = i => (i.wins || 0) + (i.losses || 0);
+      if (games(inc) > games(cur)) { cur.elo = inc.elo; cur.wins = inc.wins || 0; cur.losses = inc.losses || 0; }
+    }
+    if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
       // Title travels with the rest of the edit. Same id means the titles can only
       // differ in case/whitespace (itemKey() lowercases and trims) — or, since 2.17.0,
       // because this copy was just moved here by a synced rename and still carries its
