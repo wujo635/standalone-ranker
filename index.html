@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.24.2';
+const APP_VERSION = '2.24.3';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -3202,8 +3202,8 @@ function moveOrMergeItem(fromId, toId) {
 }
 
 // Works out where each stored rating in a Firestore pull belongs now (2.18.1). A reset
-// stores every item's rating in its item doc (see uploadToFirestore()); ordinary uploads
-// leave it there, even when the item is later deleted or renamed. Every tombstone in
+// stores every item's rating in the packed baseline (2.19.0; in its item doc before
+// that), and it stays there even when the item is later deleted or renamed. Every tombstone in
 // Firestore is newer than that rating, since a reset wipes them all, so the item's
 // latest tombstone says what became of it:
 //  - none: the rating stays with the item;
@@ -3359,7 +3359,7 @@ function unionItemsAndSchema(incoming, tombstoneIds, tombstonedCats, cloudOrigin
       // pulled from a routine Pull has NOT already absorbed its own matches and must
       // not be treated as freshly seeded, or its matches get silently dropped instead
       // of applied. The one deliberate exception is a resetSharedBaseline() reseed,
-      // which bakes elo/wins/losses directly into item docs specifically so a device
+      // whose packed baseline (2.19.0) carries elo/wins/losses specifically so a device
       // adopting the reset (no local copy at all) can treat them as freshly seeded here
       // too, with no matches left to replay (the reseed pushes none — see
       // uploadToFirestore(opts)'s top comment). File export/import has always worked
@@ -3592,8 +3592,8 @@ function mergeImport(incoming, opts) {
   //
   // For a CLOUD-origin merge (pullFromFirestore(), cloudOrigin true), none of the above
   // applies — every new match is always applied to both sides, regardless of
-  // freshlySeeded status. This isn't an oversight: a Firestore item doc only ever
-  // carries a baked-in elo/wins/losses from a resetSharedBaseline() reseed, and that
+  // freshlySeeded status. This isn't an oversight: a cloud item only ever
+  // carries a baked-in elo/wins/losses from a resetSharedBaseline() reseed's baseline, and that
   // SAME reset always wipes the entire matches collection at the same moment (see
   // uploadToFirestore(opts)'s top comment) — so any match Firestore can possibly
   // deliver for that item is guaranteed to be strictly newer than the bake, never
@@ -3861,8 +3861,8 @@ function tombstoneFromDoc(d) {
 // reseed a just-wiped Firestore. This is not simply "push everything with the cursor
 // filters disabled": Firestore item docs normally never carry ratings (elo/wins/losses
 // live only in local state, kept current by replaying matches — see "Cloud sync" in
-// ARCHITECTURE.md), but a full push deliberately bakes ratings directly into each item
-// doc and pushes an EMPTY matchLog instead of the real one. Every match's effect is
+// ARCHITECTURE.md), but a full push deliberately bakes ratings into the packed baseline
+// chunk docs (2.19.0) and pushes an EMPTY matchLog instead of the real one. Every match's effect is
 // already reflected in those baked-in ratings by the time a reset reaches this point
 // (the full pull that precedes wipeFirestoreCollections() already ran applyNewMatches()
 // for all of them), so replaying the full historical log into a freshly wiped Firestore
@@ -4005,11 +4005,10 @@ async function uploadToFirestore(opts) {
     (full ? [] : itemsToPush).forEach(i => writes.push([sharedRef.collection('items').doc(i.id), {
       cat: i.cat, title: i.title, fields: i.fields, updatedAt: i.updatedAt,
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
-    // An ordinary push writes only these fields and leaves the rest of the doc alone
-    // (2.18.1). A plain set() replaces the whole doc, so editing an item after a reset
-    // used to erase its stored rating, and a device adopting the baseline afterwards
-    // started that item from 1000. Stored ratings that no longer apply (the item was
-    // deleted or renamed since) are sorted out on pull — see routeStoredRatings().
+    // Only these fields (2.18.1), which kept a rating a reset had stored on the doc. Since
+    // 2.19.0 ratings live in the baseline chunks and item docs carry none, so this is now
+    // just a write of the doc's own fields. Baseline ratings that no longer apply (the
+    // item was deleted or renamed since) are sorted out on pull — see routeStoredRatings().
     }, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] }]));
     matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
       cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
@@ -4189,17 +4188,14 @@ async function pullFromFirestore(opts) {
     let maxSynced = state.lastSyncedServerTs || 0;
     itemsSnap.forEach(doc => {
       const d = doc.data();
-      // elo/wins/losses are undefined on an ordinary item doc (Firestore normally never
-      // stores ratings) and only present after a resetSharedBaseline() reseed, which
-      // deliberately bakes them in — see uploadToFirestore(opts)'s top comment.
-      // unionItemsAndSchema() already treats any incoming item with a real elo as
-      // "freshly seeded," so this flows through with no other change needed.
-      // An item edited since the baseline: its newer title/fields over the baseline copy,
-      // keeping the baseline's rating (item docs written since carry none).
+      // Item docs carry no rating; a reset's ratings live in the baseline (2.19.0). An
+      // item edited since the baseline: its newer title/fields over the baseline copy,
+      // keeping the baseline's rating. Before 2.24.3 a pull also read a rating stored on
+      // the item doc itself, which only a reset from before 2.19.0 ever wrote.
       const base = incoming.items[doc.id];
       if (!base || (d.updatedAt || 0) > (base.updatedAt || 0)) {
         incoming.items[doc.id] = { id: doc.id, cat: d.cat, title: d.title, fields: d.fields, updatedAt: d.updatedAt,
-          elo: base ? base.elo : d.elo, wins: base ? base.wins : d.wins, losses: base ? base.losses : d.losses };
+          ...(base && { elo: base.elo, wins: base.wins, losses: base.losses }) };
       }
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
@@ -4426,8 +4422,8 @@ async function wipeFirestoreCollections() {
 // ARCHITECTURE.md: run this on whichever device's data you trust most right now (User
 // A). Absorbs everything Firestore currently has, saves an offline backup as a safety
 // net, wipes every Firestore doc, then reseeds Firestore from this device's own
-// now-complete state — via uploadToFirestore({ full: true }), which bakes ratings
-// directly into item docs and pushes an EMPTY matchLog, actually bounding Firestore's
+// now-complete state — via uploadToFirestore({ full: true }), which packs ratings
+// into the baseline chunk docs and pushes an EMPTY matchLog, actually bounding Firestore's
 // growth back down (see that function's top comment for why this isn't simply "push
 // everything"). The offline backup file uses the same compaction, for the same reason.
 // Every step after the confirm() is written to be safely re-runnable: if it's
@@ -4542,7 +4538,7 @@ async function runBaselineReset(opts = {}) {
 // OTHER than the one that ran it. Clears this device's local state, then pulls the
 // freshly reseeded Firestore straight in — no file needs to be passed between devices
 // for this to work. Clearing first is not just cleanliness here: resetSharedBaseline()'s
-// reseed bakes ratings into item docs specifically so a device with NO local copy of an
+// reseed bakes ratings into the packed baseline specifically so a device with NO local copy of an
 // item adopts them directly (unionItemsAndSchema()'s "!cur" branch) — an item this
 // device already has locally never adopts an incoming rating, and with the reseed
 // pushing zero matches there's no delta left to apply either. A plain "Pull rankings"
