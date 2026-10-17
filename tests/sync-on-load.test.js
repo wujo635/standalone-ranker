@@ -138,3 +138,63 @@ describe('sync on load (2.21.0)', () => {
     assert.equal(lastToast(B), '');
   });
 });
+
+// Reported live: a restored sign-in got no toast and the user had to Pull by hand. A
+// cold-start "unavailable" (or being offline at load) ended syncOnLoad() quietly for
+// the whole page load, with no retry.
+describe('sync on load retries an unreachable cloud (2.24.1)', () => {
+  const waitFor = async pred => { for (let n = 0; n < 200 && !pred(); n++) await new Promise(r => setTimeout(r, 5)); };
+  // Makes the next `n` cloud calls on `app` fail the way an unreachable Firestore does.
+  const failNext = (app, n) => app.run(`window.__realDb = cloudDb; window.__fails = ${n}; cloudDb = {
+    collection: (...a) => { if (window.__fails-- > 0) { const e = new Error('offline'); e.code = 'unavailable'; throw e; } return window.__realDb.collection(...a); },
+    batch: (...a) => window.__realDb.batch(...a) }`);
+
+  const clearToast = app => { app.window.document.getElementById('toast').textContent = ''; };
+
+  test('retries after an unavailable error and toasts once it gets through', async () => {
+    vote(A, 'Thief', 'Heat');
+    await cloud(A, 'uploadToFirestore()');
+    B.run('SYNC_ON_LOAD_RETRY_MS = [0, 0]');
+    failNext(B, 2);
+    clearToast(B);
+    assert.equal(await syncOnLoad(B), false);
+    await waitFor(() => lastToast(B).startsWith('Synced'));
+    assert.equal(lastToast(B), 'Synced with the cloud — pulled 1 comparison');
+    assert.deepEqual(rank(B), rank(A));
+  });
+
+  test('gives up with a toast after the last retry', async () => {
+    B.run('SYNC_ON_LOAD_RETRY_MS = [0, 0]');
+    failNext(B, 99);
+    clearToast(B);
+    await syncOnLoad(B);
+    await waitFor(() => lastToast(B) !== '');
+    assert.equal(lastToast(B), "Couldn't reach the cloud to sync — Pull when you're back online");
+    assert.equal(B.get('syncOnLoadAttempts'), 3);
+  });
+
+  test('offline at load pulls once the device comes back online', async () => {
+    vote(A, 'Thief', 'Heat');
+    await cloud(A, 'uploadToFirestore()');
+    let online = false;
+    Object.defineProperty(B.window.navigator, 'onLine', { get: () => online, configurable: true });
+    const reads = db.reads;
+    clearToast(B);
+    assert.equal(await syncOnLoad(B), false);
+    assert.equal(db.reads, reads, 'no pull while offline');
+    online = true;
+    B.window.dispatchEvent(new B.window.Event('online'));
+    await waitFor(() => lastToast(B).startsWith('Synced'));
+    assert.equal(lastToast(B), 'Synced with the cloud — pulled 1 comparison');
+  });
+
+  test("a manual Pull while a retry is pending means the retry doesn't pull again", async () => {
+    B.run('SYNC_ON_LOAD_RETRY_MS = [50]');
+    failNext(B, 1);
+    await syncOnLoad(B);
+    await cloud(B, 'pullFromFirestore()');
+    const reads = db.reads;
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(db.reads, reads);
+  });
+});
