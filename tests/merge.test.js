@@ -380,4 +380,24 @@ describe('schema adoption', () => {
     assert.ok(s.itemDeletes.some(t => t.itemId === oldDune.id), '2.7.3: old id tombstoned so other devices drop it');
     assert.equal(s.matchLog[0].wid, newDune.id, 'local matchLog follows the rekey');
   });
+
+  test('two copies of one item in a payload merge into one, keeping the more-played rating either way round (2.24.2)', () => {
+    // HANDOFF 1c: a file holding Dune under its old title-only id and its new identity id.
+    // Both land on the new id. Whichever copy came first used to keep its rating, so the
+    // result depended on the order of the file's keys.
+    const idFields = [{ name: 'Year', required: true, identity: true }];
+    const suffix = app.call('identitySuffixForFields', idFields, { Year: '2021' });
+    const oldDune = item('Movies', 'Dune', { fields: { Year: '2021' }, elo: 1100, wins: 4, updatedAt: 1 });
+    const newDune = item('Movies', 'Dune', { suffix, title: 'DUNE', fields: { Year: '2021' }, elo: 1020, wins: 1, losses: 1, updatedAt: 5 });
+    for (const order of [[oldDune, newDune], [newDune, oldDune]]) {
+      setLocal();
+      importFile(exportPayload({ schema: { Movies: { primary: 'Title', fields: idFields } }, items: byId(order) }));
+      const dunes = Object.values(state().items).filter(i => i.title.toLowerCase() === 'dune');
+      const label = order[0] === oldDune ? 'old copy first' : 'new copy first';
+      assert.equal(dunes.length, 1, label + ': one Dune');
+      assert.equal(dunes[0].id, newDune.id, label);
+      assert.deepEqual(rating(dunes[0]), [1100, 4, 0], label + ': the copy with more comparisons keeps its rating');
+      assert.equal(dunes[0].title, 'DUNE', label + ': the newer edit keeps its title');
+    }
+  });
 });
