@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.24.0';
+const APP_VERSION = '2.24.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -4100,6 +4100,9 @@ function hasSyncedWithCloud() {
 // Returns true/false so callers can tell whether the pull actually completed.
 // What the last successful pull brought in, for syncOnLoad()'s toast (2.21.0).
 let lastPullSummary = null;
+// The last pull's error code ('unavailable', ...), null if it didn't throw — so
+// syncOnLoad() can tell an unreachable cloud, worth retrying, from everything else.
+let lastPullErrorCode = null;
 
 async function pullFromFirestore(opts) {
   const full = !!(opts && opts.full);
@@ -4108,6 +4111,7 @@ async function pullFromFirestore(opts) {
   // cloud simply can't be reached.
   const background = !!(opts && opts.background);
   lastPullSummary = null;
+  lastPullErrorCode = null;
   if (!cloudAvailable || !cloudUser) return false;
   try {
     const sharedRef = cloudDb.collection(CLOUD_COLLECTION).doc(CLOUD_DOC);
@@ -4266,6 +4270,7 @@ async function pullFromFirestore(opts) {
     renderCloudSyncTimes();
     return true;
   } catch (e) {
+    lastPullErrorCode = e.code || 'error';
     if (!(background && e.code === 'unavailable')) toast(cloudErrorMessage(e));
     return false;
   }
@@ -4279,11 +4284,39 @@ async function pullFromFirestore(opts) {
 // first time is merged on purpose, by the user), only online, at most once per page
 // load. Pull only: Upload stays a deliberate action. A background pull won't adopt a
 // missed reset while there are unsent changes (see pullFromFirestore()).
+//
+// A cloud that can't be reached (2.24.1) — offline at startup, or Firestore answering
+// "unavailable" on a cold start — used to end it quietly for the whole page load, so the
+// user had to remember to Pull. Now it waits for the device to come back online, and
+// retries after each delay in SYNC_ON_LOAD_RETRY_MS (sooner if an `online` event fires);
+// after the last one it toasts that it gave up. Every skip is logged as [syncOnLoad].
+// A `let` so tests can shorten the delays.
+let SYNC_ON_LOAD_RETRY_MS = [15000, 60000, 180000];
 let syncOnLoadStarted = false;
+let syncOnLoadAttempts = 0;
+let syncOnLoadPulledAt = null; // cloudSyncTimes.lastPull when it started
 async function syncOnLoad() {
-  if (syncOnLoadStarted || !cloudAvailable || !cloudUser || !hasSyncedWithCloud() || navigator.onLine === false) return false;
+  if (syncOnLoadStarted) return false; // auth state firing again; once per page load
+  const skip = !cloudAvailable ? 'cloud sync unavailable' : !cloudUser ? 'not signed in' :
+    !hasSyncedWithCloud() ? 'this device has never synced (Pull or Upload once first)' : null;
+  if (skip) { console.log('[syncOnLoad] skipped — ' + skip); return false; }
   syncOnLoadStarted = true;
+  syncOnLoadPulledAt = cloudSyncTimes.lastPull;
+  return runSyncOnLoad();
+}
+
+async function runSyncOnLoad() {
+  if (!cloudUser) { console.log('[syncOnLoad] skipped — signed out before it could run'); return false; }
+  // A manual Pull that succeeded while this waited already did the job.
+  if (cloudSyncTimes.lastPull !== syncOnLoadPulledAt) { console.log('[syncOnLoad] skipped — already pulled'); return false; }
+  if (navigator.onLine === false) {
+    console.log('[syncOnLoad] offline — will pull when back online');
+    window.addEventListener('online', () => runSyncOnLoad(), { once: true });
+    return false;
+  }
+  syncOnLoadAttempts++;
   const ok = await pullFromFirestore({ background: true });
+  if (!ok && lastPullErrorCode === 'unavailable') { retrySyncOnLoad(); return false; }
   // An adopt already toasted its own message; anything else gets a short summary.
   if (!ok || !lastPullSummary || lastPullSummary.adopted) return ok;
   const { items, matches, deletes } = lastPullSummary;
@@ -4291,6 +4324,20 @@ async function syncOnLoad() {
   const parts = [items && plural(items, 'item'), matches && plural(matches, 'comparison'), deletes && plural(deletes, 'deletion')].filter(Boolean);
   toast(parts.length ? 'Synced with the cloud — pulled ' + parts.join(', ') : 'Synced with the cloud — already up to date');
   return ok;
+}
+
+function retrySyncOnLoad() {
+  const delay = SYNC_ON_LOAD_RETRY_MS[syncOnLoadAttempts - 1];
+  if (delay === undefined) {
+    console.log('[syncOnLoad] gave up — cloud unreachable after ' + syncOnLoadAttempts + ' attempts');
+    toast("Couldn't reach the cloud to sync — Pull when you're back online");
+    return;
+  }
+  console.log('[syncOnLoad] cloud unreachable — retrying in ' + Math.round(delay / 1000) + 's');
+  let timer;
+  const retry = () => { clearTimeout(timer); window.removeEventListener('online', retry); runSyncOnLoad(); };
+  timer = setTimeout(retry, delay);
+  window.addEventListener('online', retry);
 }
 
 // "Something's gone wrong with sync, start over clean" recovery path: forces a full
