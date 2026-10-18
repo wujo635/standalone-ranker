@@ -18,11 +18,11 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.24.3` |
+| App version | `2.25.0` |
 | Data schema version | `6` |
-| localStorage key | `ranker-v1` |
+| Storage | IndexedDB `ranker` / store `kv` / key `ranker-v1` (2.25.0); localStorage `ranker-v1` where IndexedDB has never worked |
 
-Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved to localStorage. CI (`.github/workflows/docs-sync-check.yml`) fails if this table and the code disagree.
+Both constants live at the top of the `<script>` block and are the single source of truth. The Data tab displays them at runtime alongside the schema version of whatever is currently saved, and which storage this browser uses. CI (`.github/workflows/docs-sync-check.yml`) fails if this table and the code disagree.
 
 ### How to bump versions
 
@@ -70,6 +70,7 @@ tests/helpers/app.js           loads the real index.html into jsdom for tests
 tests/helpers/sync.js          two-device helpers: simulated Firestore pull and file import
 tests/helpers/firestore.js     in-memory Firestore for running the real upload/pull/reset/adopt code; fakeFirebase() for the app's own cloud startup
 tests/migrate.test.js          migrateData() version chain + load()
+tests/storage.test.js          IndexedDB storage: the move from localStorage, reload, the marker pause, early saves, Clear all data, startup pull waiting for load (2.25.0)
 tests/reload.test.js           reloading gives back what was saved: same-titled items, unsent votes, no double counting (2.21.2)
 tests/merge.test.js            mergeImport(): items, matches, cloud pulls, tombstones, schema adoption
 tests/rename.test.js           renames across two devices (2.17.0)
@@ -96,7 +97,7 @@ tests/simulation.test.js       fixed passing seeds + each simulation finding as 
 
 Tests use Node's built-in runner (`node:test`) plus [jsdom](https://github.com/jsdom/jsdom), the only dependency, dev-only. `loadApp()` in `tests/helpers/app.js` loads the actual `index.html` into a fresh jsdom page per test and runs its inline script, so tests exercise exactly the code that ships. jsdom never fetches external `<script src>` tags, so the Firebase CDN doesn't load and the app takes its normal "cloud sync unavailable" path.
 
-- **Driving the page:** `app.get(expr)`, `app.call(fnName, ...args)`, `app.run(code)`, and `app.setState(obj)` evaluate in the page's global scope, so they see top-level `let`/`const` bindings like `state`. `loadApp({ saved })` seeds `localStorage['ranker-v1']` before the script runs, for testing `load()`.
+- **Driving the page:** `app.get(expr)`, `app.call(fnName, ...args)`, `app.run(code)`, and `app.setState(obj)` evaluate in the page's global scope, so they see top-level `let`/`const` bindings like `state`. `loadApp({ saved })` seeds `localStorage['ranker-v1']` before the script runs, for testing `load()`. jsdom has no IndexedDB, so every test runs the localStorage path unless it passes `loadApp({ idb })`, an `IDBFactory` from `fake-indexeddb` (2.25.0): the same factory plus `storage: app.localStorage()` models a reload in the same browser, and `await app.ready()` waits for the asynchronous load.
 - **Everything crosses the boundary as JSON.** Objects created inside jsdom belong to another JS realm, which makes `assert.deepStrictEqual` fail on otherwise-identical values; JSON also mirrors how real data reaches the app.
 - **Top-level `let` bindings aren't `window` properties.** To stub one (e.g. `cloudDb`, `cloudUser`), assign the bare identifier via `app.run('cloudUser = ...')`; `window.cloudUser = ...` silently does nothing.
 - **Two-device tests** (`tests/helpers/sync.js`) model both sync paths exactly as the app calls them: a file import is `mergeImport(migrateData(json))`; a Firestore pull is `mergeImport(incoming, { cloudOrigin: true })` with item docs that carry no ratings and tombstones round-tripped through `tombstoneDoc()`/`tombstoneFromDoc()`.
@@ -113,7 +114,7 @@ Not covered yet: the CSV parser, and Firestore upload/pull beyond the reset/adop
 
 ## Data model
 
-All state is held in a single `state` object in memory and mirrored to localStorage.
+All state is held in a single `state` object in memory and mirrored to IndexedDB (localStorage where IndexedDB has never worked; see "Persistence").
 
 ```js
 state = {
@@ -238,12 +239,17 @@ Stephen Curry,Warriors,PG
 
 ### Persistence
 
-`save()` serializes the whole `state` to `localStorage['ranker-v1']` on every write; `load()` reads it on startup, runs `migrateData()`, and restores per-device settings. A legacy `media-ranker-v1` key is migrated on first load.
+`save()` serializes the whole `state` to one JSON string on every write; `load()` reads it on startup, runs `migrateData()`, and restores per-device settings. A legacy `media-ranker-v1` key is migrated on first load.
+
+- **Where it's stored: IndexedDB (2.25.0).** localStorage's ~5M-character cap was the hard limit on library size (over 60% used by October 2026). The same string now goes in a single IndexedDB record (database `ranker`, store `kv`, key `ranker-v1`), through a small wrapper (`idbOpen()`, `idbRun()`), so everything that reads it (`migrateData()`, `loadFailed.raw`, `savedChars`) is unchanged and there's no data schema change. `save()` builds the string synchronously and issues a put; read-write transactions on one store commit in creation order, so saves land in order with no queue or debounce. A failed put sets `saveFailed` as before.
+- **The move, and the marker.** On load, if IndexedDB has no record and this browser hasn't moved yet, `load()` reads localStorage and saves straight to IndexedDB. Only once a put succeeds does `save()` remove `localStorage['ranker-v1']` and set `localStorage['ranker-storage'] = 'idb'` (`STORAGE_MARKER_KEY`). With the marker set, localStorage is never read for the library again. **If IndexedDB then fails to open** (or to read), `load()` sets `loadFailed = { storage: true, message }` instead of falling back: the banner says the data couldn't be opened and to reload, saving is paused, and `clearAllDataCore()` keeps it paused — starting from an empty localStorage would look like the library was lost, and its first save would bury the real data. **Without the marker** (IndexedDB has never worked here: no `indexedDB`, Firefox on `file://`, some private windows) the app uses localStorage exactly as before 2.25.0, including the 80% warning; the Data tab's **Storage** row says so. A missing record with the marker set is an empty library, as a missing localStorage key always was (Clear all data deletes the record). `idbOpen()` gives up after 5 s, so a browser that never answers can't leave the app blank.
+- **Startup is asynchronous with IndexedDB.** `load()` resolves `appReady` when done (synchronously without IndexedDB, as before). Until then `save()` writes nothing (`appLoaded`) — mid-move, an early save of the empty startup state would otherwise replace the localStorage library `load()` is about to read — and the startup cloud pull (`onAuthStateChanged` → `syncOnLoad()`) waits for `appReady`, since on the empty startup state it would see a device that never synced and skip.
+- **Size and persistence.** With IndexedDB, the near-full warning and the Data tab's **Browser storage used** row use `navigator.storage.estimate()` (`refreshStorageEstimate()`), and `load()` asks `navigator.storage.persist()` once so the browser doesn't clear the site's data under disk pressure (Firefox may show a prompt). Copying `localStorage['ranker-v1']` by hand no longer gives a raw backup; use Export.
 
 - **Every save carries the schema stamp (2.21.2).** `save()` sets `state._meta.dataSchemaVersion` before writing. Before, only `migrateData()` stamped state, so a state started fresh (`freshState()`: a new device, Clear all data, Adopt, and since 2.19.0 every Pull that adopts a reset) was saved unstamped until the next load. That load took it for pre-1.2 data and ran every migration from v1. The v4 step re-keyed items by **title alone**, so same-titled items overwrote each other: the Oct 9 loss of Superman (1978) and the duplicated Songs that followed. It also **emptied `matchLog`**: votes not yet uploaded were never sent, and this device's own uploaded votes were applied a second time when the next pull fetched them back. Data already saved that way is recognised by fields only v6 has (`itemDeletes`, `lastSyncedServerTs`) and taken as current. Pinned by `tests/reload.test.js`; the simulation now reloads pages too.
 
-- **Write failures are loud (2.15.0).** A failed `setItem` logs, toasts once, and sets `saveFailed`; `renderSaveWarning()` shows a persistent `#save-warning` banner ("Changes are not being saved", with **Export backup now**). The wording distinguishes a full quota (`QuotaExceededError`/`NS_ERROR_DOM_QUOTA_REACHED`) from blocked storage. It clears on the next successful write.
-- **Near-full warning.** Once the last write reaches `LS_WARN_RATIO` (80%) of `LS_LIMIT_CHARS` (~5.2M characters) the banner shows a softer "N% full" warning, and the Data tab shows **Browser storage used**.
+- **Write failures are loud (2.15.0).** A failed write (`setItem`, or the IndexedDB put) logs, toasts once, and sets `saveFailed`; `renderSaveWarning()` shows a persistent `#save-warning` banner ("Changes are not being saved", with **Export backup now**). The wording distinguishes a full quota (`QuotaExceededError`/`NS_ERROR_DOM_QUOTA_REACHED`) from blocked storage. It clears on the next successful write.
+- **Near-full warning.** Once the last write reaches `LS_WARN_RATIO` (80%) of `LS_LIMIT_CHARS` (~5.2M characters) — or, with IndexedDB, of the browser's quota estimate (`storageUsedRatio()`) — the banner shows a softer "N% full" warning, and the Data tab shows **Browser storage used**.
 - **Unreadable saved data pauses saving (2.16.1).** If `ranker-v1` exists but can't be parsed or migrated, `load()` starts from `freshState()` but sets `loadFailed = { message, raw }`, and `save()` writes nothing while it's set — so the stored data is never overwritten by an empty state. The banner offers **Download raw saved data** (`downloadUnreadableData()`) and **Discard and resume saving** (`discardUnreadableData()`, confirm-gated). `clearAllDataCore()` also clears `loadFailed`. A blocked-storage *read* isn't treated this way; there's nothing stored to protect.
 
 ---
@@ -576,7 +582,8 @@ One line each; the sections above have the details.
 | Function | What it does |
 |---|---|
 | `freshState()` | A new empty `state`, including a fresh `deviceId` |
-| `load()` | Reads localStorage, `migrateData()`, restores settings, renders; sets `loadFailed` on unreadable data |
+| `load()` | Reads IndexedDB (moving a localStorage library over once) or localStorage, `migrateData()`, restores settings, renders, resolves `appReady`; sets `loadFailed` on unreadable data or an IndexedDB that won't open after the move (2.25.0) |
+| `idbOpen()` / `idbRun()` / `storageUsedRatio()` / `refreshStorageEstimate()` / `renderStorageInfo()` | The IndexedDB wrapper; the share of storage used; the quota estimate; the Data tab's version and storage rows (2.25.0) |
 | `save()` / `renderSaveWarning()` | Writes state; shows the save-failure / near-full / unreadable-data banner |
 | `downloadUnreadableData()` / `discardUnreadableData()` | Recovery actions for `loadFailed` |
 | `migrateData(data)` | Applies every schema migration in order; backfills optional fields |
@@ -685,7 +692,7 @@ One line each; the sections above have the details.
 | Decision | Why | Alternative |
 |---|---|---|
 | Single HTML file, vanilla JS | Zero setup, trivially shareable, easy to read | Bundler + framework |
-| localStorage | No server needed | IndexedDB (larger), backend |
+| IndexedDB, one record (2.25.0; localStorage before) | No server needed; same JSON string as before, so nothing else changed | Per-collection stores with incremental writes, backend |
 | ELO scoring | Well understood, self-balancing | TrueSkill, win counts |
 | Schema per category | User-defined fields | Hard-coded fields per type |
 | Several ranking modes | Different speeds and batch sizes | One mode |
@@ -714,11 +721,11 @@ One line each; the sections above have the details.
 |---|---|---|
 | < 500 | None | — |
 | 500–2,000 | Only when the Leaderboard is scrolled deep / Show all | Virtual scrolling ([clusterize.js](https://clusterize.js.org/)) if it matters |
-| 2,000–10,000 | localStorage pressure | IndexedDB + virtual scrolling |
+| 2,000–10,000 | localStorage pressure (solved by IndexedDB, 2.25.0) | Virtual scrolling |
 | 10,000+ | Both | Backend + virtual scrolling |
 
 Real categories do exceed 500 — NBA Players has ~4,900 items.
 
 ### localStorage cap
 
-Browsers allow roughly 5M characters per origin. Items *and* the ever-growing `matchLog` count toward it (an Aug 2026 backup was ~2.8 MB). Hitting the limit is loud (see "Persistence") but still stops saving. Fix: IndexedDB.
+Browsers allow roughly 5M characters per origin for localStorage. Items *and* the ever-growing `matchLog` count toward it (an Aug 2026 backup was ~2.8 MB; over 60% by October). Since 2.25.0 the library lives in IndexedDB, where browsers allow far more; only a browser where IndexedDB has never worked still has this cap (see "Persistence").

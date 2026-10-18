@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.24.3';
+const APP_VERSION = '2.25.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -615,12 +615,77 @@ const LS_WARN_RATIO = 0.8;
 let saveFailed = false;
 let saveFailedQuota = false;
 let savedChars = 0;
+let savedSchemaLabel = '—'; // schema stamp of the stored data, for the Data tab
 // Set by load() when saved data exists but couldn't be parsed/migrated: { message, raw }.
 // While set, save() writes nothing, so the unreadable-but-maybe-recoverable original
-// stays in localStorage untouched until the user downloads it or discards it.
+// stays in storage untouched until the user downloads it or discards it. With
+// `storage: true` (2.25.0) the data couldn't even be reached: IndexedDB failed to open on
+// a browser whose data already lives there, so there's nothing to download or discard.
 let loadFailed = null;
+
+// IndexedDB (2.25.0). localStorage's ~5M-character cap was the hard limit on library size,
+// so the same JSON string save() always built now goes in one IndexedDB record instead,
+// where browsers allow far more. Being the same string, everything that reads it
+// (migrateData(), loadFailed.raw, savedChars) is unchanged. A browser where IndexedDB has
+// never worked keeps using localStorage as before. Once a save to IndexedDB succeeds, the
+// localStorage copy is removed and a marker records that this browser's data lives in
+// IndexedDB — so if it later fails to open, load() pauses saving instead of starting from
+// an empty localStorage, which would look like the library had been lost.
+const IDB_NAME = 'ranker', IDB_STORE = 'kv', IDB_KEY = 'ranker-v1';
+const STORAGE_MARKER_KEY = 'ranker-storage'; // 'idb' once this browser's data lives there
+let idb = null; // open database while IndexedDB is in use, else null (localStorage)
+let storageMarked = false;
+let storageEstimate = null; // { usage, quota } from navigator.storage.estimate(), IndexedDB only
+// Resolves when load() has finished. Until then save() does nothing, so an early save
+// can't overwrite the stored library with the empty startup state, and the startup cloud
+// pull waits for it (see onAuthStateChanged).
+let appLoaded = false, resolveAppReady;
+const appReady = new Promise(r => { resolveAppReady = r; });
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    // A browser that never answers would leave the app blank forever.
+    const timer = setTimeout(() => reject(new Error('IndexedDB took too long to open')), 5000);
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => { clearTimeout(timer); resolve(req.result); };
+    req.onerror = () => { clearTimeout(timer); reject(req.error); };
+  });
+}
+// One request in its own transaction, settled when the transaction commits. Read-write
+// transactions on one store run in the order they're created, so saves land in order.
+function idbRun(mode, op) {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, mode);
+    const req = op(tx.objectStore(IDB_STORE));
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = tx.onabort = () => reject(tx.error || req.error);
+  });
+}
+function lsGet(key) { try { return localStorage.getItem(key); } catch(e) { return null; } }
+
+function refreshStorageEstimate() {
+  if (!idb || !navigator.storage?.estimate) return Promise.resolve();
+  return navigator.storage.estimate().then(e => { storageEstimate = e; }, () => {});
+}
+// Share of the available storage in use: IndexedDB's own estimate, or localStorage's cap.
+function storageUsedRatio() {
+  if (!idb) return savedChars / LS_LIMIT_CHARS;
+  return storageEstimate?.quota ? storageEstimate.usage / storageEstimate.quota : 0;
+}
+
+function onSaveError(e) {
+  console.error('[save] write failed', e);
+  // Chrome/Safari: QuotaExceededError; Firefox: NS_ERROR_DOM_QUOTA_REACHED. Anything
+  // else (e.g. SecurityError when storage is blocked) gets the generic wording.
+  saveFailedQuota = e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED');
+  if (!saveFailed) toast(saveFailedQuota ? 'Save failed: browser storage is full' : 'Save failed: browser storage unavailable');
+  saveFailed = true;
+  renderSaveWarning();
+}
+
 function save() {
-  if (loadFailed) { renderSaveWarning(); return; }
+  if (loadFailed || !appLoaded) { renderSaveWarning(); return; }
   // Always saved with its schema stamp (2.21.2). State in memory is always the current
   // schema, but only migrateData() stamped it, so a state started fresh — a new device,
   // Clear all data, Adopt, and since 2.19.0 every Pull that adopts a reset — was saved
@@ -631,17 +696,28 @@ function save() {
   // device a new id. See migrateData() for data already saved that way.
   state._meta = { ...(state._meta || {}), appVersion: APP_VERSION, dataSchemaVersion: DATA_SCHEMA_VERSION };
   const json = JSON.stringify(state);
+  if (idb) {
+    idbRun('readwrite', s => s.put(json, IDB_KEY)).then(() => {
+      savedChars = json.length;
+      savedSchemaLabel = String(DATA_SCHEMA_VERSION);
+      saveFailed = false;
+      // The first save here moves this browser over: the localStorage copy goes (freeing
+      // its space), and the marker makes a later IndexedDB failure pause saving.
+      if (!storageMarked) {
+        try { localStorage.removeItem('ranker-v1'); localStorage.setItem(STORAGE_MARKER_KEY, 'idb'); storageMarked = true; } catch(e) {}
+      }
+      renderSaveWarning();
+    }, onSaveError);
+    return;
+  }
   try {
     localStorage.setItem('ranker-v1', json);
     savedChars = json.length;
+    savedSchemaLabel = String(DATA_SCHEMA_VERSION);
     saveFailed = false;
   } catch(e) {
-    console.error('[save] localStorage write failed', e);
-    // Chrome/Safari: QuotaExceededError; Firefox: NS_ERROR_DOM_QUOTA_REACHED. Anything
-    // else (e.g. SecurityError when storage is blocked) gets the generic wording.
-    saveFailedQuota = e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED');
-    if (!saveFailed) toast(saveFailedQuota ? 'Save failed: browser storage is full' : 'Save failed: browser storage unavailable');
-    saveFailed = true;
+    onSaveError(e);
+    return;
   }
   renderSaveWarning();
 }
@@ -649,8 +725,11 @@ function save() {
 function renderSaveWarning() {
   const el = document.getElementById('save-warning');
   if (!el) return;
-  const nearFull = savedChars / LS_LIMIT_CHARS >= LS_WARN_RATIO;
-  if (loadFailed) {
+  const nearFull = storageUsedRatio() >= LS_WARN_RATIO;
+  if (loadFailed?.storage) {
+    el.className = 'save-warning is-error';
+    el.innerHTML = `<strong>Ranker couldn't open its saved data, so saving is paused.</strong> This browser keeps Ranker's data in IndexedDB, which failed to open (error: ${esc(loadFailed.message)}). Nothing has been changed or lost — reload the page to try again. Until then, anything you do here won't be saved.`;
+  } else if (loadFailed) {
     el.className = 'save-warning is-error';
     el.innerHTML = `<strong>Your saved data couldn't be loaded, so saving is paused.</strong> Ranker started empty and won't overwrite what's stored (error: ${esc(loadFailed.message)}). Download the raw data to recover it; if you import a backup instead, choose "Discard and resume saving" afterwards so the import is kept.
       <div class="row" style="gap:8px;margin-top:8px">
@@ -663,7 +742,7 @@ function renderSaveWarning() {
     el.innerHTML = `<strong>Changes are not being saved.</strong> ${why}, so anything you do now will be lost on reload. <button class="btn-sm danger" data-action="exportData">Export backup now</button>`;
   } else if (nearFull) {
     el.className = 'save-warning';
-    el.innerHTML = `Browser storage is ${Math.round(savedChars / LS_LIMIT_CHARS * 100)}% full. Consider exporting a backup — saving will fail once it reaches the limit.`;
+    el.innerHTML = `Browser storage is ${Math.round(storageUsedRatio() * 100)}% full. Consider exporting a backup — saving will fail once it reaches the limit.`;
   } else {
     el.className = 'save-warning hidden';
     el.innerHTML = '';
@@ -680,7 +759,7 @@ function downloadUnreadableData() {
 }
 
 function discardUnreadableData() {
-  if (!loadFailed) return;
+  if (!loadFailed || loadFailed.storage) return;
   if (!confirm("Discard the saved data that couldn't be loaded and resume saving? Whatever is on screen now will replace it. Download the raw data first if you might want to recover it.")) return;
   loadFailed = null;
   save();
@@ -821,22 +900,44 @@ function migrateData(data) {
   return data;
 }
 
-function load() {
-  let src = null;
-  try {
-    const raw = localStorage.getItem('ranker-v1');
-    // also try old key from previous version
-    const legacy = !raw && localStorage.getItem('media-ranker-v1');
-    src = raw || legacy;
-    if (raw) savedChars = raw.length;
-  } catch(e) {
-    // Storage itself is unreadable (blocked, private mode quirks). Nothing to protect
-    // here — save() will fail the same way and raise its own banner.
-    console.error('[load] localStorage read failed', e);
+// Reads the saved library: from IndexedDB (2.25.0), else from localStorage. Without
+// IndexedDB this runs to the end synchronously, as before 2.25.0; with it, the app
+// renders once the read finishes (resolving appReady).
+async function load() {
+  storageMarked = lsGet(STORAGE_MARKER_KEY) === 'idb';
+  let src = null, fromLocalStorage = false;
+  if (typeof indexedDB !== 'undefined') {
+    try {
+      idb = await idbOpen();
+      src = (await idbRun('readonly', s => s.get(IDB_KEY))) ?? null;
+    } catch(e) {
+      console.error('[load] IndexedDB unavailable', e);
+      idb = null;
+      // This browser's data lives in IndexedDB, so localStorage holds nothing (or an
+      // old copy): starting from it would look like the library was lost. Pause saving.
+      if (storageMarked) loadFailed = { message: (e && e.message) || String(e), raw: null, storage: true };
+    }
+  }
+  // localStorage is read only while this browser hasn't moved to IndexedDB: as the store
+  // itself (no IndexedDB), or once, to move its data over.
+  if (!src && !storageMarked) {
+    try {
+      const raw = localStorage.getItem('ranker-v1');
+      // also try old key from previous version
+      const legacy = !raw && localStorage.getItem('media-ranker-v1');
+      src = raw || legacy;
+      fromLocalStorage = !!src;
+    } catch(e) {
+      // Storage itself is unreadable (blocked, private mode quirks). Nothing to protect
+      // here — save() will fail the same way and raise its own banner.
+      console.error('[load] localStorage read failed', e);
+    }
   }
   if (src) {
+    savedChars = src.length;
     try {
       const parsed = JSON.parse(src);
+      savedSchemaLabel = parsed._meta ? String(parsed._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)';
       const migrated = migrateData(parsed);
       state = migrated;
       ensureSchemaWellFormed();
@@ -858,9 +959,19 @@ function load() {
   }
   if (['standard', 'podium', 'tier'].includes(state.settings?.rankMode)) rankMode = state.settings.rankMode;
   applyRankModeUI(rankMode);
+  appLoaded = true;
+  // Moving to IndexedDB: save the library there now. save() removes the localStorage
+  // copy only once that write has succeeded.
+  if (idb && fromLocalStorage && !loadFailed) save();
+  if (idb) {
+    // Ask the browser not to clear this site's storage when the disk runs low.
+    navigator.storage?.persisted?.().then(p => p || navigator.storage.persist()).catch(() => {});
+    refreshStorageEstimate().then(renderSaveWarning);
+  }
   // No eager loadPair() here: the Library is the startup tab and switchTab('rank')
   // runs initRankView() on entry, so a pair would just be drawn off-screen.
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSaveWarning();
+  resolveAppReady();
 }
 
 // --- Utilities ---
@@ -2899,20 +3010,30 @@ function applyCSVImport({ category, primary, fields, items }, updateSchema) {
 }
 
 // --- Data ---
-function renderStats() {
-  let savedRaw = null;
-  try { savedRaw = localStorage.getItem('ranker-v1'); } catch(e) {}
-  let savedSchema = '—';
-  try { const s = JSON.parse(savedRaw); savedSchema = s._meta ? String(s._meta.dataSchemaVersion) : 'pre-v1.2 (no stamp)'; } catch(e) {}
-  const usedChars = savedRaw ? savedRaw.length : 0;
-  const usedRatio = usedChars / LS_LIMIT_CHARS;
-  const storageVal = `${(usedChars / 1e6).toFixed(2)} MB of ~${(LS_LIMIT_CHARS / 1e6).toFixed(1)} MB (${Math.round(usedRatio * 100)}%)`;
-  document.getElementById('version-info').innerHTML = [
+// Version and storage rows at the top of the Data tab. With IndexedDB (2.25.0) the size is
+// the library's own, and the limit is the browser's estimate for this site, fetched
+// asynchronously — so the rows render again once it arrives.
+function renderStorageInfo() {
+  const mb = n => (n / 1e6).toFixed(2) + ' MB';
+  const size = n => n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : mb(n);
+  const usedRatio = storageUsedRatio();
+  const storageVal = idb
+    ? mb(savedChars) + (storageEstimate?.quota ? ` (this site may use up to ~${size(storageEstimate.quota)}, ${Math.round(usedRatio * 100)}% used)` : '')
+    : `${mb(savedChars)} of ~${(LS_LIMIT_CHARS / 1e6).toFixed(1)} MB (${Math.round(usedRatio * 100)}%)`;
+  const el = document.getElementById('version-info');
+  if (!el) return;
+  el.innerHTML = [
     ['App version', APP_VERSION],
     ['Data schema version', DATA_SCHEMA_VERSION],
-    ['Saved data schema', savedSchema],
+    ['Saved data schema', savedSchemaLabel],
+    ['Storage', loadFailed?.storage ? "IndexedDB (couldn't be opened)" : idb ? 'IndexedDB' : 'localStorage (IndexedDB unavailable in this browser)', !idb],
     ['Browser storage used', storageVal, usedRatio >= LS_WARN_RATIO || saveFailed],
   ].map(([l,v,warn]) => `<div class="stat-row"><span class="stat-label">${esc(l)}</span><span class="stat-val${warn?' warn':''}">${esc(String(v))}</span></div>`).join('');
+}
+
+function renderStats() {
+  renderStorageInfo();
+  if (idb) refreshStorageEstimate().then(renderStorageInfo);
 
   const counts = {}; let totalVotes = 0;
   Object.values(state.items).forEach(i => { counts[i.cat]=(counts[i.cat]||0)+1; totalVotes+=i.wins; });
@@ -3712,8 +3833,12 @@ function importPayload(d) {
 function clearAllDataCore() {
   state = freshState();
   lbCat = BUILTIN_CATS[0];
-  localStorage.removeItem('ranker-v1');
-  loadFailed = null; // the unreadable data it was protecting is gone now
+  if (idb) idbRun('readwrite', s => s.delete(IDB_KEY)).catch(e => console.error('[clear] IndexedDB delete failed', e));
+  try { localStorage.removeItem('ranker-v1'); } catch(e) {}
+  savedChars = 0;
+  // the unreadable data it was protecting is gone now — unless IndexedDB couldn't even be
+  // opened (2.25.0): that data is still there, untouched, and nothing may overwrite it.
+  if (!loadFailed?.storage) loadFailed = null;
   fieldTypeCache = {};
   rebuildCatSelects(); renderLibrary(); renderLB(); renderStats(); renderSyncStatus(); renderSaveWarning();
 }
@@ -3760,7 +3885,10 @@ try {
     cloudAuth = firebase.auth();
     cloudDb = firebase.firestore();
     cloudAvailable = true;
-    cloudAuth.onAuthStateChanged(user => { cloudUser = user; renderCloudAuthUI(); if (user) syncOnLoad(); });
+    // The startup pull waits for the library to finish loading (2.25.0): from IndexedDB
+    // that's asynchronous, and run on the empty startup state it would see a device that
+    // never synced and skip, or pull into the wrong state.
+    cloudAuth.onAuthStateChanged(user => { cloudUser = user; renderCloudAuthUI(); if (user) appReady.then(syncOnLoad); });
   }
 } catch (e) {
   cloudAvailable = false;
@@ -4591,7 +4719,7 @@ function switchTab(id) {
   if (id==='data') renderStats();
 }
 
-load();
+load().catch(e => console.error("[load] failed", e));
 </script>
 </body>
 </html>
