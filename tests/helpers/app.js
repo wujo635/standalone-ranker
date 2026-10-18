@@ -15,7 +15,13 @@ const INDEX_HTML = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'
 
 // `beforeScript(window)` runs before the app's script, e.g. to install a fake `firebase`
 // global (see fakeFirebase() in ./firestore.js) so the app's own cloud startup runs.
-function loadApp({ saved, beforeScript } = {}) {
+//
+// jsdom has no IndexedDB, so by default the app stores in localStorage, as a browser
+// without IndexedDB does. `idb` installs one (an IDBFactory from fake-indexeddb, 2.25.0);
+// pass the same factory to the next loadApp() to model a reload in the same browser, with
+// `storage` carrying that browser's localStorage entries over (app.localStorage()). With
+// IndexedDB the app loads asynchronously: await app.ready() before reading state.
+function loadApp({ saved, beforeScript, idb, storage } = {}) {
   const scriptErrors = [];
   const virtualConsole = new VirtualConsole();
   // Uncaught errors thrown by the page's own script arrive as "jsdomError". The app's
@@ -34,6 +40,8 @@ function loadApp({ saved, beforeScript } = {}) {
         window.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
       }
       // Seeds localStorage before the app's script runs, so load() sees it on startup.
+      Object.entries(storage || {}).forEach(([k, v]) => window.localStorage.setItem(k, v));
+      if (idb) window.indexedDB = idb;
       if (saved !== undefined) {
         window.localStorage.setItem('ranker-v1', typeof saved === 'string' ? saved : JSON.stringify(saved));
       }
@@ -61,6 +69,14 @@ function loadApp({ saved, beforeScript } = {}) {
     },
     // Replaces the page's `state` wholesale (e.g. with a freshState() tweaked in Node).
     setState(obj) { window.eval(`state = ${JSON.stringify(obj)}`); },
+    // Resolves once the app's load() has finished (immediate without IndexedDB).
+    ready() { return window.eval('appReady'); },
+    // This page's localStorage as a plain object, to carry into a reload.
+    localStorage() {
+      const out = {};
+      for (let i = 0; i < window.localStorage.length; i++) { const k = window.localStorage.key(i); out[k] = window.localStorage.getItem(k); }
+      return out;
+    },
     close() { window.close(); },
   };
 
