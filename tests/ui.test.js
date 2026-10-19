@@ -592,6 +592,32 @@ describe('Leaderboard', () => {
     assert.deepEqual(clear, [[cat]]);
   });
 
+  test("its filter panel shows and edits the selected category's filters (2.27.0)", () => {
+    // A filter set in the Library shows up, already applied, on the Leaderboard's panel.
+    const lib = $('#lib-filters .filter-panel-header');
+    if (lib.nextElementSibling.style.display === 'none') click(lib);
+    change($('#lib-filters input[data-field="Year"][data-op="min"]'), '1990');
+    click(tab('Leaderboard'));
+    const header = () => $('#lb-filters .filter-panel-header');
+    assert.equal(header().dataset.cat, 'Movies');
+    assert.equal($('#lb-filters .filter-count').textContent, '1');
+    assert.equal($('#lb-filters input[data-field="Year"][data-op="min"]').value, '1990');
+    assert.equal($('#lb-filters input[type="checkbox"][data-change="setLibHiddenOnly"]'), null, 'no Library-only Visibility card');
+    assert.equal($$('#lb-rows .item-row').length, 3);
+
+    // Editing it here narrows the Leaderboard; ✕ Clear clears it.
+    if (header().nextElementSibling.style.display === 'none') click(header());
+    change($('#lb-filters input[data-field="Year"][data-op="min"]'), '2000');
+    assert.equal($$('#lb-rows .item-row').length, 1);
+    click(byText('#lb-filters button', '✕ Clear'));
+    assert.equal($$('#lb-rows .item-row').length, MOVIES.length);
+
+    // Switching category redraws the panel for it.
+    click(byText('#lb-cats .pill', 'Songs'));
+    assert.equal(header().dataset.cat, 'Songs');
+    assert.ok($('#lb-filters input[data-field="Genre"]'));
+  });
+
   test('Show all loads every row', () => {
     click(tab('Leaderboard'));
     click(byText('#lb-cats .pill', 'Big'));
