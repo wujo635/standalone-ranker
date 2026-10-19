@@ -176,6 +176,31 @@ describe('Library', () => {
     assert.deepEqual(calls, [[true], [false]]);
   });
 
+  test('the Visibility filter\'s "Hidden only (N)" lists just this category\'s hidden items, to unhide', () => {
+    click($('button[aria-label="Hide Heat"]'));
+    click($('button[aria-label="Hide Thief"]'));
+    app.run(`state.items[${JSON.stringify(app.call('itemKey', 'Songs', 'So What'))}].hidden = true; renderLibrary();`);
+    const pill = () => $$('#lib-filters .filter-value-pill').find(p => p.textContent.includes('Hidden only'));
+    assert.ok(!$('#rank-filters .filter-value-pill') || !$$('#rank-filters .filter-value-pill').some(p => p.textContent.includes('Hidden only')), 'Library only');
+    assert.equal(pill().textContent.trim(), 'Hidden only (2)', 'counts only Movies');
+    change(pill().querySelector('input'), true);
+    assert.deepEqual(libTitles(), ['Heat', 'Thief']);
+    assert.equal($('#lib-filters .filter-count').textContent, '1', 'shows as an active filter');
+    click($('button[aria-label="Unhide Heat"]'));
+    assert.deepEqual(libTitles(), ['Thief']);
+    assert.equal(app.get(`state.items[${JSON.stringify(key('Heat'))}].hidden`), false);
+    assert.equal(pill().textContent.trim(), 'Hidden only (1)');
+    click($('button[aria-label="Unhide Thief"]'));
+    assert.match($('#lib-list').textContent, /No hidden items/);
+    // Clear turns it off; so does switching category.
+    click(byText('#lib-filters button', '✕ Clear'));
+    assert.equal(libTitles().length, MOVIES.length);
+    change(pill().querySelector('input'), true);
+    change($('#sel-cat'), 'Songs');
+    assert.equal(pill().querySelector('input').checked, false);
+    assert.deepEqual(libTitles(), ['Paranoid Android', 'So What']);
+  });
+
   test('Next / Prev page buttons call libGoToPage with the right page', () => {
     change($('#sel-cat'), 'Big');
     const calls = spy('libGoToPage', { passthrough: true });
