@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.25.0';
+const APP_VERSION = '2.26.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1131,6 +1131,10 @@ function deleteItemsInCat(cat) {
 let filterState = {}; // { [category]: { [fieldName]: { type, values, min, max, equals } } }
 let fieldTypeCache = {}; // { "cat:fieldName": "number" | "string" }
 let filterCollapsed = {}; // { [category]: boolean } - true = collapsed
+// Library-only Visibility filter (2.26.0): { [category]: true } lists only that category's
+// hidden items, for reviewing and unhiding them. Kept out of filterState because Rank and
+// the Leaderboard never include hidden items; in memory only, like `hidden` never synced.
+let libHiddenOnly = {};
 
 function inferFieldType(cat, fieldName) {
   const cacheKey = `${cat}:${fieldName}`;
@@ -1235,9 +1239,15 @@ function renderFilterUI(cat) {
   const rankEl = document.getElementById('rank-filters');
   if (!libEl && !rankEl) return;
 
+  // Initialize collapse state (default to collapsed)
+  if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
+  const isCollapsed = filterCollapsed[cat];
+  const libExtra = libHiddenOnly[cat] ? 1 : 0;
+
   if (!fields.length) {
     const emptyHtml = '<div class="filter-empty">No extra fields to filter.</div>';
-    if (libEl) libEl.innerHTML = emptyHtml;
+    // The Library still gets its Visibility card when there are no fields to filter.
+    if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, libExtra, buildVisibilityCard(cat) + emptyHtml);
     if (rankEl) rankEl.innerHTML = emptyHtml;
     return;
   }
@@ -1248,14 +1258,10 @@ function renderFilterUI(cat) {
   const fieldsHtml = buildFilterFieldCards(cat, fields);
   const activeCount = Object.values(filterState[cat] || {}).filter(filterNarrows).length;
 
-  // Initialize collapse state (default to collapsed)
-  if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
-  const isCollapsed = filterCollapsed[cat];
-
   // Each container gets its own directly-embedded id — no shared HTML
   // string and no text-replace, so there's no risk of a field value that
   // happens to match the id pattern getting corrupted.
-  if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, activeCount, fieldsHtml);
+  if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, activeCount + libExtra, buildVisibilityCard(cat) + fieldsHtml);
   if (rankEl) rankEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-rank', isCollapsed, activeCount, fieldsHtml);
 }
 
@@ -1274,6 +1280,27 @@ function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
   html += '</div>'; // Close filter-fields div
   html += '</div>'; // Close outer wrapper div
   return html;
+}
+
+// The Library's Visibility card: one "Hidden only (N)" pill, N = hidden items in `cat`.
+function buildVisibilityCard(cat) {
+  const n = Object.values(state.items).filter(i => i.cat === cat && i.hidden).length;
+  const on = !!libHiddenOnly[cat];
+  return `<div class="filter-card">
+        <div class="filter-card-header"><div class="filter-card-label">Visibility</div></div>
+        <div class="filter-values">
+          <label class="filter-value-pill${on ? ' active' : ''}" title="List only the items hidden on this device, to review and unhide them">
+            <input type="checkbox" ${on ? 'checked' : ''} data-cat="${esc(cat)}" data-change="setLibHiddenOnly" data-pass="el">
+            <span>Hidden only (${n})</span>
+          </label>
+        </div>
+      </div>`;
+}
+
+function setLibHiddenOnly(el) {
+  const cat = el.dataset.cat;
+  if (el.checked) libHiddenOnly[cat] = true; else delete libHiddenOnly[cat];
+  renderLibrary();
 }
 
 // Header (field name + "Has value" checkbox) is identical for both a number
@@ -1437,6 +1464,7 @@ function toggleFilterPanel(header) {
 }
 
 function clearAllFilters(cat) {
+  delete libHiddenOnly[cat];
   resetFilters(cat);
   if (document.getElementById('view-library').classList.contains('active')) {
     renderLibrary();
@@ -1800,6 +1828,7 @@ function libCat() { return document.getElementById('sel-cat').value; }
 // Library category select: a new category starts with an empty search and no filters.
 function onLibCatChange() {
   document.getElementById('lib-search').value = '';
+  delete libHiddenOnly[libCat()];
   resetFilters(libCat());
   renderLibrary();
 }
@@ -1807,7 +1836,7 @@ function libItems() { return Object.values(state.items).filter(i => i.cat === li
 
 const LIB_PAGE_SIZE = 50;
 let libPage = 1;
-let libPageKey = ''; // fingerprint of (cat, query, filterState[cat]) from the last render — page resets to 1 when this changes
+let libPageKey = ''; // fingerprint of (cat, query, filterState[cat], libHiddenOnly[cat]) from the last render — page resets to 1 when this changes
 
 function libGoToPage(p) {
   libPage = p;
@@ -2039,9 +2068,11 @@ function saveItem(id) {
 // Items currently shown in the Library for the active category — search text and
 // field filters both applied, in the same order renderLibrary() applies them.
 // Bulk hide/show actions operate on exactly this set, so "what you see is what you hide."
+// The Visibility filter's "Hidden only" (libHiddenOnly) narrows it to hidden items.
 function filteredLibraryList() {
   const cat = libCat();
   let list = libItems().sort((a,b) => a.title.localeCompare(b.title));
+  if (libHiddenOnly[cat]) list = list.filter(i => i.hidden);
 
   const query = document.getElementById('lib-search')?.value.toLowerCase().trim() || '';
   if (query) {
@@ -2083,7 +2114,9 @@ function renderLibrary() {
 
   const el = document.getElementById('lib-list');
   if (!list.length) {
-    el.innerHTML = query
+    el.innerHTML = libHiddenOnly[cat]
+      ? '<div class="empty">No hidden items' + (query ? ` match "${esc(query)}"` : ' to show') + '</div>'
+      : query
       ? `<div class="empty">No items match "${esc(query)}"</div>`
       : '<div class="empty">No items yet — add one above.</div>';
     return;
@@ -2093,7 +2126,7 @@ function renderLibrary() {
     <button class="ghost btn-sm" data-action="bulkSetHidden" data-args="[false]" title="Unhide every item matching the current search/filter, across all pages">◉ Unhide all matching (${list.length})</button>
   </div>`;
 
-  const pageKey = cat + '' + query + '' + JSON.stringify(filterState[cat] || {});
+  const pageKey = cat + '' + query + '' + JSON.stringify(filterState[cat] || {}) + '' + !!libHiddenOnly[cat];
   if (pageKey !== libPageKey) { libPage = 1; libPageKey = pageKey; }
   const pageCount = Math.max(1, Math.ceil(list.length / LIB_PAGE_SIZE));
   if (libPage > pageCount) libPage = pageCount;

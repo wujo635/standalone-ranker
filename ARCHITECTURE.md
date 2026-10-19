@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.25.0` |
+| App version | `2.26.0` |
 | Data schema version | `6` |
 | Storage | IndexedDB `ranker` / store `kv` / key `ranker-v1` (2.25.0); localStorage `ranker-v1` where IndexedDB has never worked |
 
@@ -546,8 +546,8 @@ Category pickers — the Library and Rank dropdowns (`rebuildCatSelects()`) and 
 ### Library
 
 - **Search** (`#lib-search`): case-insensitive substring match on the title and every field value; cleared, along with filters, when the category changes. A "✕" button (`#lib-search-clear`, `clearLibSearch()`) shows while there's text. Two CSS details keep that button from moving under the cursor: `html { overflow-y: scroll; }` reserves the scrollbar gutter so the page width never changes, and the button is centred with `margin: auto` rather than `transform` (which `button:active`'s press effect would override).
-- **Pagination** (2.6.0): `renderLibrary()` renders one `LIB_PAGE_SIZE` (50) page of `filteredLibraryList()` (search + filters over the whole category), with Prev/Next. A fingerprint of `(cat, query, filterState[cat])` resets to page 1 when it changes; the page is clamped when the list shrinks.
-- **Hiding** (`hidden`): the ◎/◉ button (`toggleHidden()`) excludes an item from ranking and the Leaderboard (`itemsForCat()`), while the Library (`libItems()`) keeps showing it, dimmed. The bulk toolbar applies `bulkSetHidden()` to every item in `filteredLibraryList()`, across all pages. `hidden` is a per-device preference: stripped from exports, forced `false` on import, never synced.
+- **Pagination** (2.6.0): `renderLibrary()` renders one `LIB_PAGE_SIZE` (50) page of `filteredLibraryList()` (search + filters over the whole category), with Prev/Next. A fingerprint of `(cat, query, filterState[cat], libHiddenOnly[cat])` resets to page 1 when it changes; the page is clamped when the list shrinks.
+- **Hiding** (`hidden`): the ◎/◉ button (`toggleHidden()`) excludes an item from ranking and the Leaderboard (`itemsForCat()`), while the Library (`libItems()`) keeps showing it, dimmed. The bulk toolbar applies `bulkSetHidden()` to every item in `filteredLibraryList()`, across all pages. To review what's hidden, the Library's filter panel has a **Visibility** card (2.26.0, `buildVisibilityCard()`) with one "Hidden only (N)" pill, N = hidden items in the category: it sets `libHiddenOnly[cat]`, and `filteredLibraryList()` then keeps only hidden items (combined with search and field filters), so each row's ◉ or "Unhide all matching" unhides them. It's kept out of `filterState` because Rank and the Leaderboard never include hidden items: the card is Library-only, counts toward the panel's active badge, and is cleared by ✕ Clear and by changing the Library category. In memory only, never saved, synced or exported. `hidden` is a per-device preference: stripped from exports, forced `false` on import, never synced.
 - **Web search** (2.23.0): the "🔎 Search" button next to ⚙ Fields (`cycleLibWebSearch()`) cycles the current category through Off → YouTube → Google. When on, each row gets a 🔎 link (a real `<a target="_blank">`, so middle-click works too) searching for `webSearchQuery(item)`: the title plus the values of identity and required fields, in schema order, space-separated (Songs: "Title Artist"); optional fields are left out. The choice is a per-device UI preference in its own localStorage key, `ranker-websearch` (`{ [cat]: "youtube" | "google" }`), not part of `state`: never synced, exported, or cleared by Clear all data. An in-memory copy keeps the toggle working for the session where storage is blocked.
 - **Inline editing:** `editItem()` expands a row; `saveItem()` validates, normalizes, and saves. Saving with nothing changed toasts "No changes" without bumping `updatedAt`; a title/identity change is a rename (see "Item renames").
 
@@ -620,6 +620,7 @@ One line each; the sections above have the details.
 | `filterEntry(cat, field)` | A field's `filterState` entry, re-created when the field's type has changed |
 | `fieldFilterType()` / `inferFieldType()` / `invalidateFieldTypeCache(cat)` | Filter type resolution and its cache |
 | `renderFilterUI(cat)` / `buildFilterFieldCards()` / `buildFilterPanel()` / `updateFilter(el)` / `clearAllFilters(cat)` / `resetFilters(cat)` | Filter UI |
+| `buildVisibilityCard(cat)` / `setLibHiddenOnly(el)` | Library-only Visibility card: "Hidden only (N)" (2.26.0) |
 | `renderLB()` / `appendLBRows(n)` / `lbRowHtml(item, idx)` | Leaderboard with infinite scroll |
 | `itemMeta()` / `itemMetaInline()` / `itemMetaStacked()` | Field display helpers |
 
