@@ -348,6 +348,31 @@ describe('filter panel', () => {
     assert.equal(libTitles().length, MOVIES.length);
     assert.notEqual(fields().style.display, 'none');
   });
+
+  // Library and Rank each keep their own category; filters are per category. Before 2.26.1
+  // renderFilterUI(cat) redrew BOTH tabs' panels for `cat`, so opening Rank on another
+  // category (in any mode) left the Library showing that category's filters over its own list.
+  for (const mode of ['standard', 'podium', 'tier']) {
+    test(`each tab's panel shows its own category after Rank (${mode}) is on another one`, () => {
+      openRank('Songs');
+      click($(`#mode-btn-${mode}`));
+      const rock = $$('#rank-filters input[data-field="Genre"]').find(i => i.dataset.value === 'Rock');
+      change(rock, true);
+      click(tab('Library'));
+      assert.equal($('#sel-cat').value, 'Movies');
+      assert.equal(header().dataset.cat, 'Movies', "the Library's panel is for its own category");
+      assert.ok($('#lib-filters input[data-field="Director"]'), 'with Movies fields');
+      assert.equal($('#lib-filters input[data-field="Genre"]'), null, 'not Songs fields');
+      assert.equal(libTitles().length, MOVIES.length);
+
+      // And the other way: a Library filter change leaves the Rank panel on Songs.
+      expand();
+      change($('#lib-filters input[data-field="Year"][data-op="min"]'), '2000');
+      assert.equal($('#rank-filters .filter-panel-header').dataset.cat, 'Songs');
+      assert.ok($$('#rank-filters input[data-field="Genre"]').find(i => i.dataset.value === 'Rock').checked,
+        "Rank keeps Songs' filter");
+    });
+  }
 });
 
 // --- New Category & Schema Editor --------------------------------------------------

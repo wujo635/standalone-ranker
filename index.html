@@ -484,7 +484,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.26.0';
+const APP_VERSION = '2.26.1';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1233,10 +1233,13 @@ function resetFilters(cat) {
   }
 }
 
+// Library and Rank each have their own category select, so each panel is drawn only when
+// its tab is on `cat`. Before 2.26.1 both were always redrawn for `cat`, so opening Rank
+// on another category put that category's filters over the Library's list.
 function renderFilterUI(cat) {
   const fields = extraFields(cat);
-  const libEl = document.getElementById('lib-filters');
-  const rankEl = document.getElementById('rank-filters');
+  const libEl = libCat() === cat ? document.getElementById('lib-filters') : null;
+  const rankEl = rankCat() === cat ? document.getElementById('rank-filters') : null;
   if (!libEl && !rankEl) return;
 
   // Initialize collapse state (default to collapsed)
