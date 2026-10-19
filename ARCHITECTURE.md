@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.26.1` |
+| App version | `2.27.0` |
 | Data schema version | `6` |
 | Storage | IndexedDB `ranker` / store `kv` / key `ranker-v1` (2.25.0); localStorage `ranker-v1` where IndexedDB has never worked |
 
@@ -555,6 +555,7 @@ Category pickers — the Library and Rank dropdowns (`rebuildCatSelects()`) and 
 
 *(2.16.0)* Infinite scroll rather than pages, since a ranking is read top-down.
 
+- A filter panel (2.27.0, `#lb-filters`) between the category pills and the list shows and edits `filterState[lbCat]` (see "Field filtering").
 - `renderLB()` sorts the filtered list into `lbList` and renders the first `lbShown` rows (`LB_BATCH` = 50), followed by a footer holding an invisible sentinel, "Showing N of M", and **Show all**.
 - An `IntersectionObserver` (400px below the viewport) calls `appendLBRows(LB_BATCH)` as the sentinel nears the screen, adding rows with `insertAdjacentHTML` rather than rebuilding. The sentinel is recreated after every append, and observing a new element always fires once, so tall screens keep loading until it's off-screen.
 - `lbShown` survives re-renders (votes, syncs, edits don't jump back to the top) and resets only when `(lbCat, activeFilterKey(lbCat))` changes. `activeFilterKey()` ignores the inert placeholder entries the filter UI creates.
@@ -568,7 +569,7 @@ Items are filtered by their extra fields in the Library, Leaderboard, and every 
 - **State:** `filterState[cat][field] = { type, values, min, max, equals, nonBlank }`; `filterCollapsed[cat]` (collapsed by default). Filters aren't persisted, and reset when the category changes.
 - **Types:** `fieldFilterType()` returns `'multi'` for multi fields, else `inferFieldType()`: `'number'` if ≥ 80% of up to 20 sampled values parse as numbers, else `'string'`. Results are cached in `fieldTypeCache`, invalidated per category whenever its items change (`invalidateFieldTypeCache()`). Since a field's type can change within a session, `filterEntry(cat, field)` re-creates a field's `filterState` entry whenever its type no longer matches (2.17.3) — conditions set for the old type are dropped, since a min on a text field or text values on a number field mean nothing.
 - **Matching** (AND across fields): numbers use min/max/equals; strings match selected values exactly; multi fields match if any token is selected; "Has value" (`nonBlank`, any type) excludes blanks. A field with no active condition is ignored. `filterNarrows()` is the single definition of "active", shared by the filter panel's count/Clear button and `activeFilterKey()`.
-- **UI:** `renderFilterUI(cat)` builds the cards once (`buildFilterFieldCards()`, skipping `filterable: false` fields) and renders them via `buildFilterPanel()` into `#lib-filters` only if the Library's category (`libCat()`) is `cat`, and into `#rank-filters` only if Rank's (`rankCat()`) is (2.26.1). Library and Rank keep independent category selects, and filters are per category: one category's filters apply in the Library, Rank and the Leaderboard alike, while each panel shows only its own tab's category. `updateFilter(el)` handles input changes; `clearAllFilters()`/`resetFilters()` clear. The panel header carries `data-cat`; the Clear button passes the category through `argsAttr()` (see "Event wiring").
+- **UI:** `renderFilterUI(cat)` builds the cards once (`buildFilterFieldCards()`, skipping `filterable: false` fields) and renders them via `buildFilterPanel()` into `#lib-filters` only if the Library's category (`libCat()`) is `cat`, and into `#rank-filters` only if Rank's (`rankCat()`) is (2.26.1), and into `#lb-filters` only if the Leaderboard's (`lbCat`) is and its tab is open (2.27.0; `renderLB()` draws it on entry and on every pill change). The three tabs keep independent categories, and filters are per category: one category's filters apply in the Library, Rank and the Leaderboard alike and can be edited from any of the three panels, while each panel shows only its own tab's category. The Library-only Visibility card isn't on the Rank or Leaderboard panels. `updateFilter(el)` handles input changes; `clearAllFilters()`/`resetFilters()` clear. The panel header carries `data-cat`; the Clear button passes the category through `argsAttr()` (see "Event wiring").
 - **Schema flags** set in the Fields editor: `filterable` (🔍), `identity`, `multi` (🏷️).
 
 ---

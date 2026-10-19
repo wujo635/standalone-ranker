@@ -370,6 +370,9 @@
   <!-- Leaderboard -->
   <div id="view-leaderboard" class="view">
     <div class="cat-pills" id="lb-cats"></div>
+    <div class="card">
+      <div id="lb-filters"></div>
+    </div>
     <div id="lb-list"></div>
   </div>
 
@@ -484,7 +487,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.26.1';
+const APP_VERSION = '2.27.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -1233,14 +1236,18 @@ function resetFilters(cat) {
   }
 }
 
-// Library and Rank each have their own category select, so each panel is drawn only when
-// its tab is on `cat`. Before 2.26.1 both were always redrawn for `cat`, so opening Rank
-// on another category put that category's filters over the Library's list.
+// Library, Rank and the Leaderboard (2.27.0) each have their own category, so each panel
+// is drawn only when its tab is on `cat`. Before 2.26.1 the Library and Rank panels were
+// always both redrawn for `cat`, so opening Rank on another category put that category's
+// filters over the Library's list.
 function renderFilterUI(cat) {
   const fields = extraFields(cat);
   const libEl = libCat() === cat ? document.getElementById('lib-filters') : null;
   const rankEl = rankCat() === cat ? document.getElementById('rank-filters') : null;
-  if (!libEl && !rankEl) return;
+  // Like renderLB(), skip the Leaderboard panel while its tab is hidden; renderLB() draws it on entry.
+  const lbEl = lbCat === cat && document.getElementById('view-leaderboard').classList.contains('active')
+    ? document.getElementById('lb-filters') : null;
+  if (!libEl && !rankEl && !lbEl) return;
 
   // Initialize collapse state (default to collapsed)
   if (filterCollapsed[cat] === undefined) filterCollapsed[cat] = true;
@@ -1252,6 +1259,7 @@ function renderFilterUI(cat) {
     // The Library still gets its Visibility card when there are no fields to filter.
     if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, libExtra, buildVisibilityCard(cat) + emptyHtml);
     if (rankEl) rankEl.innerHTML = emptyHtml;
+    if (lbEl) lbEl.innerHTML = emptyHtml;
     return;
   }
 
@@ -1266,6 +1274,7 @@ function renderFilterUI(cat) {
   // happens to match the id pattern getting corrupted.
   if (libEl) libEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lib', isCollapsed, activeCount + libExtra, buildVisibilityCard(cat) + fieldsHtml);
   if (rankEl) rankEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-rank', isCollapsed, activeCount, fieldsHtml);
+  if (lbEl) lbEl.innerHTML = buildFilterPanel(cat, 'filter-fields-' + esc(cat) + '-lb', isCollapsed, activeCount, fieldsHtml);
 }
 
 function buildFilterPanel(cat, filterId, isCollapsed, activeCount, fieldsHtml) {
@@ -1457,6 +1466,7 @@ function updateFilter(el) {
     initRankView();
     renderLB();
   }
+  if (document.getElementById('view-leaderboard').classList.contains('active')) renderLB();
 }
 
 // Filter panel header: expands/collapses the field cards right after it.
@@ -1477,6 +1487,7 @@ function clearAllFilters(cat) {
     initRankView();
     renderLB();
   }
+  if (document.getElementById('view-leaderboard').classList.contains('active')) renderLB();
 }
 
 // --- Category selects ---
@@ -2784,6 +2795,7 @@ function renderLB() {
   if (!allCats.includes(lbCat) && allCats.length) lbCat = allCats[0];
   document.getElementById('lb-cats').innerHTML = allCats.map(c =>
     `<button class="pill${c===lbCat?' active':''}" data-cat="${esc(c)}" data-action="selectLBCat"${argsAttr(c)}>${esc(c)}</button>`).join('');
+  renderFilterUI(lbCat);
   lbList = itemsForCat(lbCat).sort((a,b) => b.elo - a.elo);
   const key = lbCat + '\u0000' + activeFilterKey(lbCat);
   if (key !== lbShowKey) { lbShown = LB_BATCH; lbShowKey = key; }
