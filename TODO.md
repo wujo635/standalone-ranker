@@ -18,13 +18,23 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
   - **Conforming is safe:** editing a song's Title or Artist in the app is a rename (`saveItem()`, renamedTo tombstone), so it keeps the rating and syncs. Re-importing a CSV instead would add second copies, because Artist is an identity field.
   - **Then:** update the `populate-songs` skill's Artist rule (`.claude/skills/populate-songs/SKILL.md`) to match, so new imports stop proposing the full joint credit.
 
+## Ranking quality
+
+Motivation: in a large category, a new item takes a long time to find where it belongs. Every item starts at 1000, every match moves it by at most K = 32 (`eloUpdate()`), and only Tier mode puts never-ranked items first (`startTierSession()`, up to half a session). This matters most in NBA Players (~4,900 items). Proposed in the 2026-09-23 review (items 5 and 6). Pairing is local to the Rank view; provisional K changes how ratings are computed, so it needs the sync check noted below.
+
+- **Better pairing.** Today nothing stops the same pair from coming up twice in a row, and Smart pairing in 1v1 (`smartPair()`) pairs a random anchor with the *single* closest-ELO item, so tight rating clusters keep producing the same pairs. Cheap wins:
+  - skip recently shown pairs (a short in-memory list, e.g. the last 10–20);
+  - pick randomly among the closest few items (e.g. 3–5) instead of always the closest;
+  - favour items with few matches (`wins + losses`), as Tier already does for never-ranked items, so new items get compared sooner — in Podium and 1v1 too.
+  [ARCHITECTURE.md "Ranking modes"](ARCHITECTURE.md)
+- **Faster rating for new items (provisional K).** A bigger rating swing while an item has few matches — e.g. K = 48 until it has played 10, then 32 — so a new item moves toward its real level in fewer comparisons. To work out first:
+  - K per side: each item's K from its *own* match count, so a settled item isn't knocked around by a new one (the update stops being zero-sum, which is fine for ranking);
+  - sync: ratings are applied as deltas from matches on each device (`applyNewMatches()`), so the match count used for K has to be the one at the time of the match, or two devices can compute different swings for the same vote — check this against the existing "Match order across devices" gap;
+  - undo/history stores each update's change, so it should keep working as is.
+  [ARCHITECTURE.md "ELO ranking"](ARCHITECTURE.md)
+
 ## UI / persistence gaps
 
-- **"Look it up" link on Rank cards.** A small search icon on the items being compared in the Rank view (1v1, Podium, Tier) that opens a web search in a new tab, so a user who doesn't recognize a title — typically a song — can check it before picking. Decided:
-  - **Per-category toggle, off by default** (e.g. a `lookup` flag on `state.schema[cat]`, set in the category's schema editor), so it works for Songs, Movies, or anything else. Since it lives on the schema, it syncs like any other schema change.
-  - **Rank view, not Library** — that's where an unfamiliar title actually gets in the way.
-  - **YouTube search link**, so the user can hear the song: `https://www.youtube.com/results?search_query=` + `encodeURIComponent(title + ' ' + identity fields)` (for Songs, Title + Artist), opened with `target="_blank" rel="noopener"`. This is a plain link to YouTube's search page, not the YouTube Data API, so there's no API key and no quota. Possibly a per-category choice of YouTube vs. Google.
-  - **Must not trigger a pick:** the icon needs its own `data-action` and must stop the click from reaching the card's pick handler (1v1/Podium cards are click targets); give it a tap target big enough on mobile and pin it with a click test that a lookup click records no match.
 - **Wire up `settings.userName`.** Added in schema v4 alongside `deviceId` but never used in any UI; reserved for human-readable attribution on history entries. [ARCHITECTURE.md "Known gaps in the merge model"](ARCHITECTURE.md)
 
 ## Scale / infra
