@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.27.0` |
+| App version | `2.28.0` |
 | Data schema version | `6` |
 | Storage | IndexedDB `ranker` / store `kv` / key `ranker-v1` (2.25.0); localStorage `ranker-v1` where IndexedDB has never worked |
 
@@ -77,6 +77,7 @@ tests/rename.test.js           renames across two devices (2.17.0)
 tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
+tests/pairing.test.js          who the Rank view draws: under-played items, Smart pairing, recent pairs (2.28.0)
 tests/csv.test.js              Export CSV -> import gives back the same titles and ids: # titles, double quotes (2.21.1)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1); packed baseline and auto-adopt (2.19.0)
 tests/identity-sync.test.js    an in-place identity change reaching a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6); identity on/off resets the shared baseline (2.20.0)
@@ -492,12 +493,19 @@ ELO and W/L are hidden while ranking (to avoid anchoring) and shown in the Libra
 
 - **1 vs 1** (`loadPair()`, `vote()`): two items, pick one — one ELO update. Keyboard voting via `handleRankVoteKey()`: `←`/`1` and `→`/`2`, only when the Rank tab is active in 1v1 mode and focus isn't in a text field. `standardSessionVotes` counts votes since the category was last selected (in memory only). When the category's Library web search is on (see Library → Web search), each card also shows a "🔎 YouTube"/"🔎 Google" link (`webSearchLink()`, 2.24.0); clicking it, or Enter/Space on it, opens the search without voting — the card's own Enter/Space handler only acts when the card itself is focused, and `delegate()` lets the plain link through (see Event wiring).
 - **Podium** (`loadPodium()`, `submitPodium()`): 3–5 items; assign 🥇🥈🥉. Each placed item beats every lower-placed and unplaced item; unplaced items aren't compared. Up to 9 updates per round.
-- **Tier** (`loadTier()`, `submitTier()`): 3–30 items (chosen per session) sorted into S/A/B/C/D; every cross-tier pair is an update (up to 45 for 10 items). The pool (`startTierSession()`) takes never-ranked items first (up to half the session), fills the rest from ranked items — a random ELO window of them with Smart pairing — and tops up from whatever is left, so a session always has exactly the size asked for (2.17.3). No skip button.
+- **Tier** (`loadTier()`, `submitTier()`): 3–30 items (chosen per session) sorted into S/A/B/C/D; every cross-tier pair is an update (up to 45 for 10 items). The pool (`startTierSession()`) takes never-ranked items first, then under-played ones (see below), up to half the session (2.28.0; before, only never-ranked items had priority), fills the rest from ranked items — a random ELO window of them with Smart pairing — and tops up from whatever is left, so a session always has exactly the size asked for (2.17.3). No skip button.
 
-**Smart pairing** (toggle, saved in `settings.smartPairMode`): instead of random selection —
-- 1v1: `smartPair()` picks a random anchor and pairs it with the single closest-ELO item;
-- Podium (≥ 5 items): a random contiguous window of the ELO-sorted list;
+**Who gets drawn (2.28.0).** In a large category a uniformly random pick almost never lands on a given item, so a new one used to stay at 1000 indefinitely (a simulation of a 4,900-item category: never placed in 20,000 1v1 votes). Selection only — ratings, matches, and sync are unchanged.
+- **Under-played items are favoured, in every mode and with or without Smart pairing.** An item is under-played when it has fewer matches than the category's median (`medianGames()`, a tally rather than a sort). A 1v1 pair or Podium round is built around an anchor (`pickAnchor()`): `UNDERPLAYED_SHARE` (half) of the time an under-played item, drawn with weight = how far below the median it is (`underplayWeight()`), otherwise any item. The weight fades to 0 as the item catches up — no hard cut-off, which in the simulation stranded items short of their level. When every item has the same count (e.g. a fresh category) nothing is under-played and draws are uniform. Tier uses the same weight for its priority half (`weightedSample()`), after never-ranked items; the start screen counts both.
+- **A pair shown in the last `RECENT_PAIRS` (10) draws isn't shown again** while another candidate exists (`recentPairs`, in memory only).
+- **Sides are shuffled,** so the anchor isn't always the left card.
+
+**Smart pairing** (toggle, saved in `settings.smartPairMode`): instead of random opponents —
+- 1v1: `smartPair()` pairs the anchor with a random one of the 3 items rated nearest its target (`nearestTo()`, one pass) — before 2.28.0, the single nearest, so tight rating clusters kept producing the same pairs. The target (`opponentTarget()`) is the anchor's own rating, except for an under-played anchor: above or below it by 400 / 2^matches (400, 200, 100, …; below 25 it's just its neighbours), so its first results move it toward its level in big steps, made of ordinary matches;
+- Podium (≥ 5 items): the anchor plus the 4 items nearest its target, in random order (before 2.28.0, a random contiguous window of the ELO-sorted list);
 - Tier: after priority items, a random ELO-sorted window of `n + 2` items.
+
+Cost: a few passes over the category per draw, only when a pair/round/session is drawn — about 0.3 ms for 4,900 items, against ~5 ms for the save every vote already does.
 
 Without it, `randomPair()` picks two independent random items (so the same pair can repeat, and lopsided matchups teach little).
 
@@ -631,6 +639,7 @@ One line each; the sections above have the details.
 |---|---|
 | `initRankView()` / `setRankMode(mode)` / `applyRankModeUI(mode)` | Rank tab entry, mode switch (saved), mode button state |
 | `loadPair()` / `smartPair()` / `randomPair()` / `vote(wid, lid)` / `handleRankVoteKey(e)` | 1v1 |
+| `pickAnchor()` / `medianGames()` / `underplayWeight()` / `weightedSample()` / `opponentTarget()` / `nearestTo()` / `rememberPair()` | Who gets drawn: under-played anchors, Smart pairing opponents, recent pairs (2.28.0) |
 | `loadPodium()` / `assignPlace()` / `clearPodiumPlace()` / `submitPodium()` | Podium |
 | `loadTier()` / `startTierSession()` / `assignTier()` / `removeTierPlacement()` / `submitTier()` | Tier |
 | `toggleSmartPair(on)` | Smart pairing toggle (saved) |

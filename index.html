@@ -487,7 +487,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.27.0';
+const APP_VERSION = '2.28.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2263,29 +2263,104 @@ function initRankView() {
   else loadPair();
 }
 
+// --- Who gets drawn (2.28.0) ---
+// In a large category a uniformly random pick almost never lands on a given item, so a
+// new one stayed at 1000 indefinitely (a simulation of a 4,900-item category: never
+// placed in 20,000 1v1 votes). Selection now favours under-played items — fewer matches
+// than the category's median — and Smart pairing spreads its opponents. Selection only:
+// ratings, matches and sync are unchanged. Everything here is one pass over the list,
+// run only when a pair/round/session is drawn.
+const UNDERPLAYED_SHARE = 0.5; // share of 1v1 anchors / Podium rounds given to under-played items
+const RECENT_PAIRS = 10;       // a pair shown in the last RECENT_PAIRS draws isn't shown again if avoidable
+let recentPairs = [];          // keys of recently shown pairs (in memory only)
+
+const gamesOf = i => (i.wins || 0) + (i.losses || 0);
+const pairKey = (a, b) => (a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id);
+// Median match count, via a tally (match counts are small integers) instead of a sort.
+function medianGames(list) {
+  const tally = [];
+  list.forEach(i => { const g = gamesOf(i); tally[g] = (tally[g] || 0) + 1; });
+  let seen = 0;
+  for (let g = 0; g < tally.length; g++) { seen += tally[g] || 0; if (seen * 2 >= list.length) return g; }
+  return 0;
+}
+// How strongly an item is favoured: how far below the median it is. It fades to 0 as the
+// item catches up — no hard cut-off, which in the simulation left items stranded short
+// of their level once their priority ended.
+const underplayWeight = (i, median) => Math.max(0, median - gamesOf(i));
+// Up to k items drawn without replacement, each with probability proportional to weight.
+function weightedSample(list, weight, k) {
+  const pool = list.map(i => [i, weight(i)]).filter(([, w]) => w > 0), out = [];
+  while (out.length < k && pool.length) {
+    let x = Math.random() * pool.reduce((s, [, w]) => s + w, 0), j = 0;
+    while (j < pool.length - 1 && (x -= pool[j][1]) >= 0) j++;
+    out.push(pool.splice(j, 1)[0][0]);
+  }
+  return out;
+}
+// The item a pair or round is built around: an under-played item UNDERPLAYED_SHARE of
+// the time (if there are any), otherwise any item.
+function pickAnchor(list, median = medianGames(list)) {
+  if (Math.random() < UNDERPLAYED_SHARE) {
+    const [pick] = weightedSample(list, i => underplayWeight(i, median), 1);
+    if (pick) return pick;
+  }
+  return list[Math.floor(Math.random() * list.length)];
+}
+// The rating to look for opponents around. A settled item's own; an under-played one is
+// aimed above or below by a gap that halves with each match it has (400, 200, 100, …), so
+// its first results move it toward its level in big steps — a binary search, made of
+// ordinary matches (min gap 25: past that it's just its neighbours).
+function opponentTarget(anchor, median) {
+  const gap = 400 / 2 ** gamesOf(anchor);
+  if (gamesOf(anchor) >= median || gap < 25) return anchor.elo;
+  return anchor.elo + (Math.random() < 0.5 ? -gap : gap);
+}
+// The k items rated nearest `target` (one pass, no sort of the whole list), skipping the
+// anchor, `exclude`, and pairs shown recently — unless that leaves nothing.
+function nearestTo(list, target, k, anchor, exclude = new Set()) {
+  const recent = new Set(recentPairs);
+  const scan = skipRecent => {
+    const top = [];
+    for (const i of list) {
+      if (i === anchor || exclude.has(i.id) || (skipRecent && anchor && recent.has(pairKey(anchor, i)))) continue;
+      const d = Math.abs(i.elo - target);
+      if (top.length < k || d < top[top.length - 1][0]) {
+        top.push([d, i]); top.sort((x, y) => x[0] - y[0]);
+        if (top.length > k) top.pop();
+      }
+    }
+    return top.map(([, i]) => i);
+  };
+  const found = scan(true);
+  return found.length ? found : scan(false);
+}
+function rememberPair(a, b) {
+  recentPairs.push(pairKey(a, b));
+  if (recentPairs.length > RECENT_PAIRS) recentPairs.shift();
+}
+
 // --- Standard 1v1 ---
+// Smart pairing: a random one of the 3 items rated nearest the anchor's target, so tight
+// rating clusters don't keep producing the same pair (it used to be the single nearest).
 function smartPair(list) {
   if (list.length < 2) return null;
-  // Pick a random anchor item
-  const anchor = list[Math.floor(Math.random() * list.length)];
-  // Find the item closest to it in ELO (excluding itself)
-  let closest = null;
-  let minDiff = Infinity;
-  list.forEach(item => {
-    if (item.id === anchor.id) return;
-    const diff = Math.abs(item.elo - anchor.elo);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = item;
-    }
-  });
-  return closest ? [anchor, closest] : null;
+  const median = medianGames(list);
+  const anchor = pickAnchor(list, median);
+  const near = nearestTo(list, opponentTarget(anchor, median), 3, anchor);
+  return [anchor, near[Math.floor(Math.random() * near.length)]];
 }
 
 function randomPair(list) {
   if (list.length < 2) return null;
-  const a = list[Math.floor(Math.random() * list.length)];
-  let b; do { b = list[Math.floor(Math.random() * list.length)]; } while (b.id === a.id);
+  const a = pickAnchor(list);
+  const recent = new Set(recentPairs);
+  // A few tries to avoid a recently shown pair; a tiny category may have nothing else.
+  let b;
+  for (let tries = 0; tries < 20; tries++) {
+    do { b = list[Math.floor(Math.random() * list.length)]; } while (b.id === a.id);
+    if (!recent.has(pairKey(a, b))) break;
+  }
   return [a, b];
 }
 
@@ -2295,8 +2370,10 @@ function loadPair() {
   const el = document.getElementById('rank-pair');
   if (list.length < 2) { el.innerHTML = '<div class="empty">Add at least 2 items in this category to start ranking.</div>'; currentPair = null; return; }
   const pair = smartPairMode ? smartPair(list) : randomPair(list);
-  const [a, b] = pair;
+  // The anchor (often an under-played item) would otherwise always be the left card.
+  const [a, b] = Math.random() < 0.5 ? pair : [pair[1], pair[0]];
   currentPair = [a, b];
+  rememberPair(a, b);
   const sessionNote = standardSessionVotes
     ? ` <span style="color:var(--text-muted)">· ${standardSessionVotes} voted this session</span>`
     : '';
@@ -2393,16 +2470,15 @@ function loadPodium() {
   }
   // Pool size: 5 if >=5 items, else list size (min 3)
   const poolSize = Math.min(5, list.length);
-  // Select pool: if smart pairing, pick closest items by ELO, else random shuffle
-  let shuffled;
-  if (smartPairMode && list.length >= 5) {
-    const sorted = [...list].sort((a, b) => a.elo - b.elo);
-    const idx = Math.floor(Math.random() * (sorted.length - poolSize));
-    shuffled = sorted.slice(idx, idx + poolSize);
-  } else {
-    shuffled = [...list].sort(() => Math.random() - 0.5).slice(0, poolSize);
-  }
-  podiumPool = shuffled;
+  // Built around an anchor drawn like a 1v1 anchor (under-played items favoured, 2.28.0).
+  // Smart pairing adds the items rated nearest the anchor's target (its own rating, or
+  // above/below it for an under-played item); otherwise the rest are random.
+  const median = medianGames(list);
+  const anchor = pickAnchor(list, median);
+  const rest = smartPairMode && list.length >= 5
+    ? nearestTo(list, opponentTarget(anchor, median), poolSize - 1, anchor)
+    : list.filter(i => i !== anchor).sort(() => Math.random() - 0.5).slice(0, poolSize - 1);
+  podiumPool = [anchor, ...rest].sort(() => Math.random() - 0.5);
   podiumPlacements = {};
   renderPodium();
 }
@@ -2511,14 +2587,15 @@ function loadTier() {
     return;
   }
   // Show start screen — no prompt until user clicks Start
-  const unranked = list.filter(i => i.wins + i.losses === 0).length;
+  const median = medianGames(list);
+  const unranked = list.filter(i => gamesOf(i) === 0 || gamesOf(i) < median).length;
   const maxSize = Math.min(list.length, 30);
   el.innerHTML =
     '<div class="card" style="text-align:center;padding:1.5rem 1.25rem">' +
     '<div style="font-size:16px;font-weight:600;margin-bottom:.4rem">Tier Session</div>' +
     '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:1.25rem">' +
     list.length + ' items in this category' +
-    (unranked ? ' · ' + unranked + ' unranked (will be prioritised)' : '') +
+    (unranked ? ' · ' + unranked + ' unranked or under-played (will be prioritised)' : '') +
     '</div>' +
     '<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:1.25rem">' +
     '<label style="font-size:13px;color:var(--text-secondary)">Items per session</label>' +
@@ -2541,14 +2618,19 @@ function startTierSession() {
   }
   tierSessionSize = n;
 
-  // Prioritise items with zero comparisons (unranked), regardless of pairing mode
+  // Prioritise, regardless of pairing mode, items with zero comparisons (unranked), then
+  // under-played ones — fewer than the category's median, weighted by how far below
+  // (2.28.0; before, an item lost its priority after its first match).
   const unranked = list.filter(i => i.wins + i.losses === 0);
-  const ranked = list.filter(i => i.wins + i.losses > 0);
-  
+  const median = medianGames(list);
+  const underplayed = weightedSample(list.filter(i => gamesOf(i) > 0), i => underplayWeight(i, median), Math.ceil(n / 2));
+  let priorityItems = [...unranked, ...underplayed].slice(0, Math.ceil(n / 2));
+  const inPriority = new Set(priorityItems.map(i => i.id));
+  const ranked = list.filter(i => i.wins + i.losses > 0 && !inPriority.has(i.id));
+
   // If smart pairing, pick a random ELO window from ranked items
-  let priorityItems = unranked.slice(0, Math.ceil(n / 2));
   let restItems = ranked;
-  
+
   if (smartPairMode && ranked.length > 0) {
     const eloSorted = [...ranked].sort((a, b) => a.elo - b.elo);
     const windowSize = Math.max(Math.min(n + 2, eloSorted.length), n);
