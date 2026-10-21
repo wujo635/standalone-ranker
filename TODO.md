@@ -20,17 +20,14 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 
 ## Ranking quality
 
-Motivation: in a large category, a new item takes a long time to find where it belongs. Every item starts at 1000, every match moves it by at most K = 32 (`eloUpdate()`), and only Tier mode puts never-ranked items first (`startTierSession()`, up to half a session). This matters most in NBA Players (~4,900 items). Proposed in the 2026-09-23 review (items 5 and 6). Pairing is local to the Rank view; provisional K changes how ratings are computed, so it needs the sync check noted below.
+Motivation: in a large category, a new item takes a long time to find where it belongs. Every item starts at 1000, every match moves it by at most K = 32 (`eloUpdate()`), so an item far from 1000 needs many matches to get there. This matters most in NBA Players (~4,900 items). Proposed in the 2026-09-23 review (item 6). Better pairing (item 5) shipped in 2.28.0 — under-played items are now drawn far more often — so this is the remaining half: it changes how ratings are computed, so it needs the sync check noted below.
 
-- **Better pairing.** Today nothing stops the same pair from coming up twice in a row, and Smart pairing in 1v1 (`smartPair()`) pairs a random anchor with the *single* closest-ELO item, so tight rating clusters keep producing the same pairs. Cheap wins:
-  - skip recently shown pairs (a short in-memory list, e.g. the last 10–20);
-  - pick randomly among the closest few items (e.g. 3–5) instead of always the closest;
-  - favour items with few matches (`wins + losses`), as Tier already does for never-ranked items, so new items get compared sooner — in Podium and 1v1 too.
-  [ARCHITECTURE.md "Ranking modes"](ARCHITECTURE.md)
-- **Faster rating for new items (provisional K).** A bigger rating swing while an item has few matches — e.g. K = 48 until it has played 10, then 32 — so a new item moves toward its real level in fewer comparisons. To work out first:
-  - K per side: each item's K from its *own* match count, so a settled item isn't knocked around by a new one (the update stops being zero-sum, which is fine for ranking);
-  - sync: ratings are applied as deltas from matches on each device (`applyNewMatches()`), so the match count used for K has to be the one at the time of the match, or two devices can compute different swings for the same vote — check this against the existing "Match order across devices" gap;
-  - undo/history stores each update's change, so it should keep working as is.
+- **Faster rating for new items (provisional K).** A bigger rating swing while an item has few matches, so a new item moves toward its real level in fewer comparisons. Worked out in the 2026-10-20 design discussion:
+  - **Schedule:** K = 96 at 0 matches, easing to 32 over the first 20–30 — the best of the schedules simulated alongside 2.28.0's draws (a flat 48 for 10 matches barely helped). Unsettled items will visibly jump at first.
+  - **K per side:** each item's K from its *own* match count, so a settled item isn't knocked around by a new one (the update stops being zero-sum, which is fine for ranking).
+  - **Sync — store each side's K on the match record** (`kw`/`kl` in `matchLog` and the Firestore match doc). Every device rebuilds ratings by applying matches as deltas (`applyNewMatches()`), and the match counts it sees at that moment differ from the voter's, so computing K on receipt would make devices disagree. Matches without `kw`/`kl` (all existing history) keep K = 32, so current ratings don't change. Catch: every device must update before anyone votes, or an old one applies 32 and drifts; a Reset re-aligns ratings anyway.
+  - **Never derive K from match history** — after a Reset the cloud has none and an adopting device only has post-reset matches. Use `wins + losses` on the item, which the packed baseline carries.
+  - **Undo/history** stores each update's change, so it should keep working as is.
   [ARCHITECTURE.md "ELO ranking"](ARCHITECTURE.md)
 
 ## UI / persistence gaps
