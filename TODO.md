@@ -25,8 +25,7 @@ Tracks ideas and known gaps noted in `ARCHITECTURE.md` but not yet scheduled. No
 ## Scale / infra
 
 - **Virtual scrolling (only if needed).** Library is paginated (2.6.0) and Leaderboard uses infinite scroll (2.16.0), but Leaderboard rows are never recycled, so scrolling very deep or using Show all still puts every row in the DOM. clusterize.js-style virtualization would cap that. [ARCHITECTURE.md "Rendering"](ARCHITECTURE.md)
-- **localStorage cap (~5MB).** Roughly 10,000 items before issues. Fix: switch to IndexedDB. [ARCHITECTURE.md "localStorage cap"](ARCHITECTURE.md)
-- **Switch localStorage → real backend.** Swap `save()`/`load()` for `fetch()` calls against a REST API or serverless function; state is already JSON-serializable. [ARCHITECTURE.md "Extending the app"](ARCHITECTURE.md)
+- **Switch browser storage → real backend.** The library lives in one IndexedDB record since 2.25.0 (localStorage before); swap `save()`/`load()` for `fetch()` calls against a REST API or serverless function; state is already JSON-serializable. [ARCHITECTURE.md "Extending the app"](ARCHITECTURE.md)
 
 ## Larger, speculative
 
