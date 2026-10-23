@@ -487,7 +487,7 @@ Stephen Curry,Warriors,PG,2009</pre>
 //   major = breaking change requiring data migration
 //   minor = new feature, backward compatible
 //   patch = bug fix
-const APP_VERSION = '2.28.0';
+const APP_VERSION = '2.29.0';
 
 // DATA_SCHEMA_VERSION: bump whenever the shape of `state` changes.
 // Import logic uses this to apply the right migrations.
@@ -2414,18 +2414,35 @@ function handleRankVoteKey(e) {
 }
 document.addEventListener('keydown', handleRankVoteKey);
 
-function eloUpdate(winner, loser) {
-  const K = 32, E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
-  winner.elo = Math.round(winner.elo + K * (1 - E));
-  loser.elo  = Math.round(loser.elo  + K * (0 - 1 + E));
+// Provisional K (2.29.0): an item with few matches moves further per match, so a new
+// item reaches its level in fewer comparisons. Each side's K comes from its OWN match
+// count before the match: K_NEW at 0, easing linearly to K_SETTLED at K_SETTLE_AFTER
+// matches. A settled item playing a new one still moves by K_SETTLED, so the update
+// is no longer zero-sum — fine for ranking.
+const K_NEW = 96, K_SETTLED = 32, K_SETTLE_AFTER = 24;
+function provisionalK(item) {
+  const games = (item.wins || 0) + (item.losses || 0);
+  return Math.max(K_SETTLED, Math.round(K_NEW - (K_NEW - K_SETTLED) * games / K_SETTLE_AFTER));
+}
+
+// kw/kl default to K_SETTLED: a match recorded before 2.29.0 carries no K, and is
+// applied exactly as it always was.
+function eloUpdate(winner, loser, kw = K_SETTLED, kl = K_SETTLED) {
+  const E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
+  winner.elo = Math.round(winner.elo + kw * (1 - E));
+  loser.elo  = Math.round(loser.elo  + kl * (0 - 1 + E));
   winner.wins++; loser.losses++;
 }
 
-// Applies the ELO update and returns the delta record used for history/undo.
+// Applies a NEW result (a vote, a podium, a tier session) with each side's provisional K,
+// and returns the delta record used for history/undo, plus the K used — the caller
+// stores it on the match record (recordMatch()), so every other device applies the same
+// swing instead of working it out from its own, different, match counts.
 function applyEloUpdate(winner, loser) {
   const wEloB4 = winner.elo, lEloB4 = loser.elo;
-  eloUpdate(winner, loser);
-  return { wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4 };
+  const kw = provisionalK(winner), kl = provisionalK(loser);
+  eloUpdate(winner, loser, kw, kl);
+  return { wid: winner.id, lid: loser.id, wChange: winner.elo - wEloB4, lChange: loser.elo - lEloB4, kw, kl };
 }
 
 // Appends one pairwise result to the unbounded match log (separate from the
@@ -2433,19 +2450,23 @@ function applyEloUpdate(winner, loser) {
 // mergeImport() replays to reconcile rankings from two devices — every implied
 // pairwise result needs its own entry, e.g. all C(n,2) pairs from one podium/tier
 // submission, in the exact order they were applied (order matters: ELO is sequential).
-function recordMatch(cat, wid, lid) {
+// `k` is the { kw, kl } applyEloUpdate() returned (2.29.0); it travels with the match to
+// every other device (matchLog, Firestore match docs, exports). Without it the match is
+// applied with K_SETTLED, as every match before 2.29.0 is.
+function recordMatch(cat, wid, lid, k) {
   state.settings.matchSeq = (state.settings.matchSeq || 0) + 1;
   const seq = state.settings.matchSeq;
   const id = state.settings.deviceId + '-' + seq;
-  state.matchLog.push({ id, cat, wid, lid, ts: Date.now(), seq });
+  state.matchLog.push({ id, cat, wid, lid, ts: Date.now(), seq, ...(k ? { kw: k.kw, kl: k.kl } : {}) });
   return id;
 }
 
 function vote(wid, lid) {
   const winner = state.items[wid];
   const loser = state.items[lid];
-  const { wChange, lChange } = applyEloUpdate(winner, loser);
-  const matchId = recordMatch(rankCat(), wid, lid);
+  const update = applyEloUpdate(winner, loser);
+  const { wChange, lChange } = update;
+  const matchId = recordMatch(rankCat(), wid, lid, update);
   recordRanking({
     type: 'standard',
     category: rankCat(),
@@ -2549,8 +2570,9 @@ function submitPodium() {
       const winner = state.items[ordered[i]];
       const loser  = state.items[ordered[j]];
       if (winner && loser) {
-        historyUpdates.push(applyEloUpdate(winner, loser));
-        matchIds.push(recordMatch(cat, winner.id, loser.id));
+        const update = applyEloUpdate(winner, loser);
+        historyUpdates.push(update);
+        matchIds.push(recordMatch(cat, winner.id, loser.id, update));
         updates++;
       }
     }
@@ -2740,8 +2762,9 @@ function submitTier() {
       if (ti === tj) continue; // same tier — no comparison
       const winner = ti < tj ? placed[i] : placed[j];
       const loser  = ti < tj ? placed[j] : placed[i];
-      historyUpdates.push(applyEloUpdate(winner, loser));
-      matchIds.push(recordMatch(cat, winner.id, loser.id));
+      const update = applyEloUpdate(winner, loser);
+      historyUpdates.push(update);
+      matchIds.push(recordMatch(cat, winner.id, loser.id, update));
       updates++;
     }
     tiers[TIERS.indexOf(tierPlacements[placed[i].id])].push(placed[i].title);
@@ -3367,9 +3390,12 @@ function applyNewMatches(newMatches, seededIds = new Set()) {
     // if it is a re-created item the match predates (wStale/lStale — see mergeImport()).
     const wSeeded = seededIds.has(m.wid) || !!m.wStale, lSeeded = seededIds.has(m.lid) || !!m.lStale;
     if (wSeeded && lSeeded) return;
-    if (!wSeeded && !lSeeded) { eloUpdate(w, l); return; }
+    // The K the voter used (2.29.0), not one worked out from this device's match counts;
+    // a match from before 2.29.0 has none and gets K_SETTLED, as it always did.
+    const kw = m.kw ?? K_SETTLED, kl = m.kl ?? K_SETTLED;
+    if (!wSeeded && !lSeeded) { eloUpdate(w, l, kw, kl); return; }
     const wCopy = { ...w }, lCopy = { ...l };
-    eloUpdate(wCopy, lCopy);
+    eloUpdate(wCopy, lCopy, kw, kl);
     if (!wSeeded) { w.elo = wCopy.elo; w.wins = wCopy.wins; }
     else { l.elo = lCopy.elo; l.losses = lCopy.losses; }
   });
@@ -4270,6 +4296,9 @@ async function uploadToFirestore(opts) {
     }, { mergeFields: ['cat', 'title', 'fields', 'updatedAt', 'syncedAt'] }]));
     matchesToPush.forEach(m => writes.push([sharedRef.collection('matches').doc(m.id), {
       cat: m.cat, wid: m.wid, lid: m.lid, ts: m.ts, seq: m.seq,
+      // The K each side used (2.29.0); left out, not undefined (Firestore rejects that), on
+      // a match from before it.
+      ...(m.kw !== undefined ? { kw: m.kw, kl: m.kl } : {}),
       syncedAt: firebase.firestore.FieldValue.serverTimestamp()
     }]));
     // title/cat fall back to null, not undefined — Firestore's SDK rejects undefined
@@ -4459,7 +4488,7 @@ async function pullFromFirestore(opts) {
     });
     matchesSnap.forEach(doc => {
       const d = doc.data();
-      incoming.matchLog.push({ id: doc.id, cat: d.cat, wid: d.wid, lid: d.lid, ts: d.ts, seq: d.seq });
+      incoming.matchLog.push({ id: doc.id, cat: d.cat, wid: d.wid, lid: d.lid, ts: d.ts, seq: d.seq, ...(d.kw !== undefined ? { kw: d.kw, kl: d.kl } : {}) });
       if (d.syncedAt) maxSynced = Math.max(maxSynced, d.syncedAt.toMillis());
     });
     deletesSnap.forEach(doc => {

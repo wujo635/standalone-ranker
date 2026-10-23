@@ -18,7 +18,7 @@ To run the tests (development only — the app itself needs no install): `npm in
 
 | | Value |
 |---|---|
-| App version | `2.28.0` |
+| App version | `2.29.0` |
 | Data schema version | `6` |
 | Storage | IndexedDB `ranker` / store `kv` / key `ranker-v1` (2.25.0); localStorage `ranker-v1` where IndexedDB has never worked |
 
@@ -78,6 +78,7 @@ tests/readd.test.js            re-creating deleted titles/categories (2.17.1)
 tests/ui.test.js               click-level tests: every interactive control, via real DOM events
 tests/tier.test.js             Tier session pool size and priority (2.17.3)
 tests/pairing.test.js          who the Rank view draws: under-played items, Smart pairing, recent pairs (2.28.0)
+tests/provisional-k.test.js    provisional K: the swing by match count, stored on the match, applied the same everywhere (2.29.0)
 tests/csv.test.js              Export CSV -> import gives back the same titles and ids: # titles, double quotes (2.21.1)
 tests/reset-baseline.test.js   reset, keep working, adopt later: ratings must match (2.18.1); packed baseline and auto-adopt (2.19.0)
 tests/identity-sync.test.js    an in-place identity change reaching a synced category (2.18.2); pulling items keyed before it (2.18.4); local items keyed before it (2.18.5); the identity flag in the cloud (2.18.6); identity on/off resets the shared baseline (2.20.0)
@@ -174,7 +175,7 @@ state = {
   // by id on merge. Not guaranteed to be a device's complete lifetime history (data from
   // before schema v6 compacted it), which is why merges apply new matches as deltas on top
   // of live ratings instead of replaying — see "Merging rankings between devices".
-  matchLog: [ { id, cat, wid, lid, ts, seq } ],     // id = `${deviceId}-${seq}`
+  matchLog: [ { id, cat, wid, lid, ts, seq, kw?, kl? } ],  // id = `${deviceId}-${seq}`; kw/kl = K each side used (2.29.0; absent before → 32)
 
   // Permanent tombstones, resolved per key by latest ts (see "Item deletions").
   // renamedTo marks a rename rather than a delete (see "Item renames").
@@ -357,7 +358,7 @@ An optional second transport next to file export/import — both feed `mergeImpo
 - `rankers/shared` — root doc: `{ cats, schema, updatedAt, updatedBy, baselineId?, baselineChunks? }`
 - `rankers/shared/baseline/{n}` — the packed baseline a reset writes (2.19.0): `{ baselineId, index, count, data, syncedAt }`, where `data` is a JSON string of `[{ id, cat, title, fields, updatedAt, elo, wins, losses }, …]` — every item with its rating, split into as few docs as fit `BASELINE_CHUNK_BYTES` (900 KB of UTF-8) each (`packBaseline()`). One string field, not an array of maps: Firestore indexes every nested map field and caps a doc at 40,000 index entries.
 - `rankers/shared/items/{itemId}` — `{ cat, title, fields, updatedAt, syncedAt }`. **No ratings.** Ratings live only in each device's local state, kept current by applying matches; `unionItemsAndSchema()` therefore defaults new items to 1000/0/0. (Ratings stored at a reset live in the packed baseline since 2.19.0. Before that a reseed baked them into the item docs themselves; since 2.24.3 a pull no longer reads a rating from an item doc, as the clean-up Reset removed every such doc. Ordinary uploads still write with `mergeFields`, from when that kept such a rating on the doc, 2.18.1.)
-- `rankers/shared/matches/{matchId}` — `{ cat, wid, lid, ts, seq, syncedAt }`
+- `rankers/shared/matches/{matchId}` — `{ cat, wid, lid, ts, seq, kw?, kl?, syncedAt }` (`kw`/`kl` since 2.29.0, left out on older matches)
 - `rankers/shared/itemDeletes/{itemId}` — `{ itemId, ts, deviceId, title, cat, renamedTo, syncedAt }`, mapped both ways by `tombstoneDoc()`/`tombstoneFromDoc()`. `title`/`cat`/`renamedTo` are written as `null` when absent — Firestore rejects `undefined` field values.
 - `rankers/shared/itemUndeletes/{itemId}` — same shape, without `renamedTo`, plus `recreated` (2.18.8)
 - `rankers/shared/catDeletes/{catKey(cat)}`, `rankers/shared/catUndeletes/{catKey(cat)}` — `{ cat, ts, deviceId, syncedAt }`
@@ -457,7 +458,7 @@ service cloud.firestore {
 
 Accepted tradeoffs — none lose items or matches:
 
-- **Match order across devices isn't globally reconstructed.** New matches are applied on top of whatever each device's ratings are at merge time, and clocks can disagree (`seq` only orders one device's own matches). Every match counts exactly once, but two devices' ELO for an item can drift apart by a few points. W/L counts agree.
+- **Match order across devices isn't globally reconstructed.** New matches are applied on top of whatever each device's ratings are at merge time, and clocks can disagree (`seq` only orders one device's own matches). Every match counts exactly once, but two devices' ELO for an item can drift apart by a few points. W/L counts agree. (Provisional K, 2.29.0, doesn't add to this: each match carries the K the voter used, so every device applies the same swing — as long as every device runs 2.29.0+.)
 - **Field edits are last-write-wins per item, not per field.** If both devices edit *different* fields of the same item between syncs, the older edit is lost entirely.
 - **Merged rename collisions** can leave slightly different ELO on each device (W/L agree) — see "Item renames".
 - **A match against a since-deleted item** can leave its opponent's W/L off by one between devices — see "Item deletions".
@@ -474,18 +475,22 @@ Accepted tradeoffs — none lose items or matches:
 
 ## ELO ranking
 
-Standard ELO with K = 32 (`eloUpdate()`), rounded to integers:
+ELO with a **provisional K** per side (2.29.0; a flat K = 32 before), rounded to integers (`eloUpdate(winner, loser, kw, kl)`):
 
 ```js
 const E = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
-winner.elo = Math.round(winner.elo + 32 * (1 - E));
-loser.elo  = Math.round(loser.elo  + 32 * (0 - 1 + E));
+winner.elo = Math.round(winner.elo + kw * (1 - E));
+loser.elo  = Math.round(loser.elo  + kl * (0 - 1 + E));
 winner.wins++; loser.losses++;
 ```
 
 All items start at 1000. The leaderboard's score bar is normalized: top item 100%, bottom 0%.
 
-`applyEloUpdate()` wraps it and returns the `{ wid, lid, wChange, lChange }` delta used for history/undo; `recordMatch()` appends the result to `matchLog`.
+**Provisional K.** An item with few matches moves further per match, so a new one reaches its level in fewer comparisons. `provisionalK(item)` uses the item's *own* match count before the match: `K_NEW` (96) at 0, easing linearly to `K_SETTLED` (32) at `K_SETTLE_AFTER` (24) matches, then 32. A settled item playing a new one still moves by 32, so an update is no longer zero-sum — fine for ranking. (2.28.0's draws give new items the comparisons; this makes each one count for more.)
+
+**The K travels with the match.** `applyEloUpdate()` applies a new result with each side's provisional K and returns `{ wid, lid, wChange, lChange, kw, kl }` — the delta for history/undo plus the K used — and `recordMatch(cat, wid, lid, k)` stores `kw`/`kl` on the match. Every device rebuilds ratings by applying matches as deltas (`applyNewMatches()`), and the match counts it sees then aren't the voter's, so it applies the stored K rather than working one out; Firestore match docs and exports carry it. A match without `kw`/`kl` — every match before 2.29.0 — is applied with 32, so existing ratings don't change. K is never derived from match history: after a Reset the cloud has none, and an adopting device only has post-reset matches. Undo reverses the stored deltas, so it needs nothing new.
+
+**Every device must run 2.29.0 or later before anyone votes.** An older device ignores `kw`/`kl` and applies 32, so its ratings for new items drift from everyone else's (W/L still agree) until the next Reset re-aligns them.
 
 ## Ranking modes
 
@@ -643,7 +648,7 @@ One line each; the sections above have the details.
 | `loadPodium()` / `assignPlace()` / `clearPodiumPlace()` / `submitPodium()` | Podium |
 | `loadTier()` / `startTierSession()` / `assignTier()` / `removeTierPlacement()` / `submitTier()` | Tier |
 | `toggleSmartPair(on)` | Smart pairing toggle (saved) |
-| `eloUpdate(w, l)` / `applyEloUpdate(w, l)` / `recordMatch(cat, wid, lid)` | ELO math / with delta record / append to `matchLog` |
+| `eloUpdate(w, l, kw, kl)` / `provisionalK(item)` / `applyEloUpdate(w, l)` / `recordMatch(cat, wid, lid, k)` | ELO math (K per side, default 32) / K from match count (2.29.0) / apply a new result: delta record + K used / append to `matchLog`, with the K |
 | `recordRanking()` / `renderHistory()` / `canUndo(entry)` / `undoRanking(i)` | History and undo |
 
 **Sync**
