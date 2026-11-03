@@ -97,8 +97,13 @@ language versions; Simplified Chinese), with these playlist specifics:
   the original script, add Spotify's English or romanized title in parentheses
   (`아리랑 (Arirang)`, from Spotify's "arirang"); when it has neither, keep Spotify's title. Strip Spotify's version
   suffixes: " - Remastered 2011", " - Radio Edit", " - From the film …", "(Live)".
-  If the suffix marks a genuinely different version (live, remix, acoustic, a different-language
+  If the suffix marks a genuinely different version (live, acoustic, a different-language
   version), say so in the preview: the user may want the original instead.
+- **Remixes are kept as remixes** (the user's rule, 2026-11-02). Don't strip a remix suffix or
+  swap in the original: write it as `<Title> (<Remixer> Remix)`, as in populate-songs, e.g.
+  Spotify's "Close To Me - Red Velvet Remix" → `Close to Me (Red Velvet Remix) (ft. Red Velvet)`.
+  A remix and its original are two songs, so both stay if both are in the playlist. List remixes
+  in the preview for information, not as a question.
 - **Featured artists:** Spotify's "(feat. X)" / "(with X)" in a title becomes the `(ft. X)`
   form, as in populate-songs.
 - **More than one artist:** Spotify lists every artist equally and doesn't say who's featured.

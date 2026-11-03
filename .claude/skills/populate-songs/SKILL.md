@@ -70,8 +70,12 @@ If it returns nothing, the artist is probably filed under their native-script na
     albums/EPs list's track lists, the same way as the deduplication check in step 4.
   - List the ones that add new songs in their own section of the numbered list, with the new
     song titles. That way the user can include them by number.
-  - Leave out greatest-hits and best-of compilations with no new songs, and live, remix and
+  - Leave out greatest-hits and best-of compilations with no new songs, and live and
     soundtrack releases.
+  - **Remix releases** (`secondary` includes `Remix`: remix albums, remix EPs and singles) get
+    their own section of the numbered list too, with their remix track titles, so the user can
+    include them by number. Their remixes are kept (step 3); any non-remix tracks on them are
+    duplicates of the originals and are dropped.
   - If the user picks a repackage, add only its **new** songs. The songs it shares with
     earlier releases keep their original album.
 
@@ -88,9 +92,14 @@ For every selected album or EP:
    the CSV until the user picks. This doesn't apply when the user explicitly asked for a
    release's extra songs (e.g. "all the new songs from repackages"); those are requested,
    not bonus.
-   - Skip versions of songs already listed: live, remix, demo, instrumental, acoustic,
+   - Skip versions of songs already listed: live, demo, instrumental, acoustic,
      a cappella, radio/single edit, remaster. A track with `instrumentalVersion: true` is one
      of these, even without "Instrumental" in its title.
+   - **Remixes are kept** (the user's rule, 2026-11-02: "remixes do matter"). A remix is its
+     own song, separate from the original, so it isn't one of the versions above. A remix on
+     the standard edition goes in the CSV. A remix found only on a deluxe/bonus edition is a
+     bonus-track candidate like any other distinct song: list it and ask. Its title keeps the
+     remix label (see Title in step 4).
    - A track that is a previously unreleased song is a distinct song, so it's a bonus-track
      candidate.
    - A bonus track the user picks still gets the original album's name in Album, not
@@ -106,7 +115,7 @@ For every selected album or EP:
 
 | Field | Rule |
 |---|---|
-| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. **Non-Latin titles use the bilingual form `<original title> (<English title>)`**, as MusicBrainz usually lists them: `피카부 (Peek-a-Boo)`, `빨간 맛 (Red Flavor)`. This is the user's settled preference, so don't ask. If MusicBrainz gives only the English title (e.g. Red Velvet's "Ice Cream Cake", "Bad Boy"), keep that unchanged. Don't add an original-script title MusicBrainz doesn't list. **If MusicBrainz gives only the original title** (common for Mandopop, e.g. `晴天`), take the English from the album's English Wikipedia track list (`titleN` is the English, `noteN` the original), e.g. `晴天 (Sunny Day)`. A name the user supplies also counts. Never translate a title yourself. With no source, keep the original title alone and flag it. **Featured artists go in the title as `<Title> (ft. <Artist>)`**, after any English part, e.g. `千里之外 (Far Away) (ft. Fei Yu-ching)`. Join several featured artists with ` & `. Take them from the track's MusicBrainz artist credit, or from a "feat." note in Wikipedia's track list. MusicBrainz often omits them. **Write each featured artist's native-script name**, as MusicBrainz names the artist, e.g. `(ft. 費玉清)`, not `(ft. Fei Yu-ching)`. Wikipedia usually gives only an English name, so look it up: `artist "<English name>"` matches aliases. One person gets one spelling across the run; Wikipedia's "Lara Liang" and "Lara Veronin" are both `梁心頤`. If MusicBrainz has no native name, use the English one and flag it. | The title is part of the id, so a song already in the library under a different title form isn't matched: it's added as a new item. Flag any such song in the preview (see step 5). |
+| Title | The track title as listed. Drop version suffixes like "- 2023 Remaster". Keep the song's real parenthetical subtitle if it has one. **Keep a remix's label** in parentheses after any English part, written the way the source names it: `Close to Me (Red Velvet Remix)`, `How to Run From the Sun (Gtr. Remix)`; a dash form ("- Red Velvet Remix") becomes parentheses. Featured artists come after it. **Non-Latin titles use the bilingual form `<original title> (<English title>)`**, as MusicBrainz usually lists them: `피카부 (Peek-a-Boo)`, `빨간 맛 (Red Flavor)`. This is the user's settled preference, so don't ask. If MusicBrainz gives only the English title (e.g. Red Velvet's "Ice Cream Cake", "Bad Boy"), keep that unchanged. Don't add an original-script title MusicBrainz doesn't list. **If MusicBrainz gives only the original title** (common for Mandopop, e.g. `晴天`), take the English from the album's English Wikipedia track list (`titleN` is the English, `noteN` the original), e.g. `晴天 (Sunny Day)`. A name the user supplies also counts. Never translate a title yourself. With no source, keep the original title alone and flag it. **Featured artists go in the title as `<Title> (ft. <Artist>)`**, after any English part, e.g. `千里之外 (Far Away) (ft. Fei Yu-ching)`. Join several featured artists with ` & `. Take them from the track's MusicBrainz artist credit, or from a "feat." note in Wikipedia's track list. MusicBrainz often omits them. **Write each featured artist's native-script name**, as MusicBrainz names the artist, e.g. `(ft. 費玉清)`, not `(ft. Fei Yu-ching)`. Wikipedia usually gives only an English name, so look it up: `artist "<English name>"` matches aliases. One person gets one spelling across the run; Wikipedia's "Lara Liang" and "Lara Veronin" are both `梁心頤`. If MusicBrainz has no native name, use the English one and flag it. | The title is part of the id, so a song already in the library under a different title form isn't matched: it's added as a new item. Flag any such song in the preview (see step 5). |
 | Artist | The release's main artist exactly as credited (e.g. `Linkin Park`). Leave featured guests out of Artist; they go in the Title (see above). That keeps the Artist filter clean. A track-level duet credit, like `周杰倫 & 費玉清`, counts as a featured guest. For a release credited jointly (e.g. "Linkin Park & Jay-Z"), use the full joint credit. **A non-Latin artist name uses `<native name> (<English name>)`**, e.g. `周杰倫 (Jay Chou)`. Artist is part of the id once it's an identity field, so if the library already has this artist, reuse its exact spelling (step 5). |
 | Album | The release-group title (the original album name). Use the same bilingual form as Title when the album name isn't in the Latin alphabet: `七里香 (Common Jasmine Orange)`, with the English name from the album's Wikipedia infobox `name`. Leave blank for a non-album single. |
 | Year Released | The album's first-release year (`year` from `tracks`). For a non-album single, use the single's year. |
@@ -127,7 +136,9 @@ no lyrics gets `Language: Instrumental`. That way a Language filter for Japanese
 **Deduplicate within the run.** If the same song shows up on two selected releases (a single
 and its album, or an EP and a later album), keep **one** row, using the earliest *album*
 appearance. To match, compare titles case-insensitively with punctuation and
-feat./version suffixes ignored.
+feat./version suffixes ignored. A remix label is **not** a version suffix here: "Monster" and
+"Monster (LDN Noise Remix)" are two songs, and both stay. Two copies of the *same* remix are
+still duplicates.
 
 **A repackage can retitle the same recording.** Repackages and anthologies often drop an
 "Intro:"/"Outro:" prefix: BTS's *Answer* has "Singularity", "Her" and "Tear", which are
